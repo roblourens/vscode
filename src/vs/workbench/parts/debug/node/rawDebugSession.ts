@@ -98,6 +98,10 @@ export class RawDebugSession extends v8.V8Protocol implements debug.IRawDebugSes
 		return this.sendAndLazyEmit('stepOut', args);
 	}
 
+	public stepBack(args: DebugProtocol.StepBackArguments): TPromise<DebugProtocol.StepBackResponse> {
+		return this.sendAndLazyEmit('stepBack', args);
+	}
+
 	public continue(args: DebugProtocol.ContinueArguments): TPromise<DebugProtocol.ContinueResponse> {
 		return this.sendAndLazyEmit('continue', args);
 	}
