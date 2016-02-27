@@ -213,7 +213,7 @@ export class StepBackDebugAction extends AbstractDebugAction {
 	}
 
 	protected isEnabled(): boolean {
-		return super.isEnabled() && this.debugService.getState() === debug.State.Stopped;
+		return super.isEnabled() && this.debugService.getState() === debug.State.Stopped && this.debugService.getActiveSession().capabilities.supportsStepBack;
 	}
 }
 
