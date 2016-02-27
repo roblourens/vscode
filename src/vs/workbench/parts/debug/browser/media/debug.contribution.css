@@ -86,6 +86,11 @@
 	background: url('step-out.svg') center center no-repeat;
 }
 
+.monaco-workbench .debug-action.step-back {
+	background: url('step-over.svg') center center no-repeat;
+	transform: scaleX(-1);
+}
+
 .monaco-workbench .debug-action.continue {
 	background: url('continue.svg') center center no-repeat;
 }
@@ -281,6 +286,11 @@
 	background: url('step-out-inverse.svg') center center no-repeat;
 }
 
+.monaco-workbench.vs-dark .debug-action.step-back {
+	background: url('step-over-inverse.svg') center center no-repeat;
+	transform: scaleX(-1);
+}
+
 .monaco-workbench.vs-dark .debug-action.continue {
 	background: url('continue-inverse.svg') center center no-repeat;
 }
@@ -347,6 +357,11 @@
 
 .monaco-workbench.hc-black .debug-action.step-out {
 	background: url('step-out-inverse.svg') center center no-repeat;
+}
+
+.monaco-workbench.hc-black .debug-action.step-back {
+	background: url('step-over-inverse.svg') center center no-repeat;
+	transform: scaleX(-1);
 }
 
 .monaco-workbench.hc-black .debug-action.continue {

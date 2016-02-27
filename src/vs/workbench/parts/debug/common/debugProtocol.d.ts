@@ -347,6 +347,12 @@ declare module DebugProtocol {
 	export interface StepOutResponse extends Response {
 	}
 
+	export interface StepBackArguments {
+		threadId: number;
+	}
+	export interface StepBackResponse extends Response {
+	}
+
 	/** Pause request; value of command field is "pause".
 		The request suspenses the debuggee.
 		penDebug will respond with a StoppedEvent (event type 'pause') after a successful 'pause' command.
