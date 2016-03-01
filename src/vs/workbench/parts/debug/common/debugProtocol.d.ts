@@ -506,9 +506,7 @@ declare module DebugProtocol {
 				filter: string,
 				label: string
 			}
-		];
-
-		supportsStepBack?: boolean;
+		]
 	}
 
 	/** A structured message object. Used to return errors from requests. */
