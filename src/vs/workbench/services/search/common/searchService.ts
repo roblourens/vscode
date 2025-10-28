@@ -24,18 +24,31 @@ import { IExtensionService } from 'vs/workbench/services/extensions/common/exten
 import { deserializeSearchError, FileMatch, IAITextQuery, ICachedSearchStats, IFileMatch, IFileQuery, IFileSearchStats, IFolderQuery, IProgressMessage, ISearchComplete, ISearchEngineStats, ISearchProgressItem, ISearchQuery, ISearchResultProvider, ISearchService, isFileMatch, isProgressMessage, ITextQuery, pathIncludedInQuery, QueryType, SEARCH_RESULT_LANGUAGE_ID, SearchError, SearchErrorCode, SearchProviderType } from 'vs/workbench/services/search/common/search';
 import { getTextSearchMatchWithModelContext, editorMatchesToTextSearchResults } from 'vs/workbench/services/search/common/searchHelpers';
 
+/**
+ * The main search service implementation for VS Code.
+ * Manages text search, file search, and AI-powered text search across the workspace.
+ * Coordinates multiple search providers for different URI schemes (file://, http://, etc.)
+ * and combines results from both open editors and the file system.
+ */
 export class SearchService extends Disposable implements ISearchService {
 
 	declare readonly _serviceBrand: undefined;
 
+	/** Map of file search providers keyed by URI scheme (e.g., 'file', 'vscode-remote') */
 	private readonly fileSearchProviders = new Map<string, ISearchResultProvider>();
+	/** Map of text search providers keyed by URI scheme */
 	private readonly textSearchProviders = new Map<string, ISearchResultProvider>();
+	/** Map of AI-powered text search providers keyed by URI scheme */
 	private readonly aiTextSearchProviders = new Map<string, ISearchResultProvider>();
 
+	/** Deferred promises waiting for file search providers to be registered for specific schemes */
 	private deferredFileSearchesByScheme = new Map<string, DeferredPromise<ISearchResultProvider>>();
+	/** Deferred promises waiting for text search providers to be registered for specific schemes */
 	private deferredTextSearchesByScheme = new Map<string, DeferredPromise<ISearchResultProvider>>();
+	/** Deferred promises waiting for AI text search providers to be registered for specific schemes */
 	private deferredAITextSearchesByScheme = new Map<string, DeferredPromise<ISearchResultProvider>>();
 
+	/** Track schemes that have been logged as missing providers to avoid duplicate warnings */
 	private loggedSchemesMissingProviders = new Set<string>();
 
 	constructor(
@@ -50,6 +63,14 @@ export class SearchService extends Disposable implements ISearchService {
 		super();
 	}
 
+	/**
+	 * Registers a search result provider for a specific URI scheme and search type.
+	 * Providers enable search functionality for different types of file systems and resources.
+	 * @param scheme - The URI scheme (e.g., 'file', 'vscode-remote', 'http')
+	 * @param type - The type of search provider (file, text, or AI text)
+	 * @param provider - The provider implementation
+	 * @returns A disposable to unregister the provider
+	 */
 	registerSearchResultProvider(scheme: string, type: SearchProviderType, provider: ISearchResultProvider): IDisposable {
 		let list: Map<string, ISearchResultProvider>;
 		let deferredMap: Map<string, DeferredPromise<ISearchResultProvider>>;
@@ -78,6 +99,14 @@ export class SearchService extends Disposable implements ISearchService {
 		});
 	}
 
+	/**
+	 * Performs a text search across the workspace.
+	 * Combines results from open editors (synchronously) with file system search results (asynchronously).
+	 * @param query - The text search query parameters
+	 * @param token - Cancellation token to abort the search
+	 * @param onProgress - Callback for reporting search progress
+	 * @returns Search results including all matches, whether the result limit was hit, and any messages
+	 */
 	async textSearch(query: ITextQuery, token?: CancellationToken, onProgress?: (item: ISearchProgressItem) => void): Promise<ISearchComplete> {
 		const results = this.textSearchSplitSyncAsync(query, token, onProgress);
 		const openEditorResults = results.syncResults;
@@ -89,6 +118,14 @@ export class SearchService extends Disposable implements ISearchService {
 		};
 	}
 
+	/**
+	 * Performs an AI-powered text search across the workspace.
+	 * Uses AI/semantic search providers when available for more intelligent results.
+	 * @param query - The AI text search query parameters
+	 * @param token - Cancellation token to abort the search
+	 * @param onProgress - Callback for reporting search progress
+	 * @returns Search results from the AI provider
+	 */
 	async aiTextSearch(query: IAITextQuery, token?: CancellationToken, onProgress?: (item: ISearchProgressItem) => void): Promise<ISearchComplete> {
 		const onProviderProgress = (progress: ISearchProgressItem) => {
 			// Match
@@ -107,6 +144,16 @@ export class SearchService extends Disposable implements ISearchService {
 		return this.doSearch(query, token, onProviderProgress);
 	}
 
+	/**
+	 * Splits text search into synchronous (open editors) and asynchronous (file system) parts.
+	 * This allows immediate results from open/dirty files while file system search runs in the background.
+	 * @param query - The text search query parameters
+	 * @param token - Cancellation token to abort the search
+	 * @param onProgress - Callback for reporting search progress
+	 * @param notebookFilesToIgnore - Notebook files to exclude from sync results
+	 * @param asyncNotebookFilesToIgnore - Promise of notebook files to exclude from async results
+	 * @returns Object containing both sync results (from open editors) and async results (from file system)
+	 */
 	textSearchSplitSyncAsync(
 		query: ITextQuery,
 		token?: CancellationToken | undefined,
@@ -156,10 +203,24 @@ export class SearchService extends Disposable implements ISearchService {
 		};
 	}
 
+	/**
+	 * Performs a file search to find files matching a pattern.
+	 * @param query - The file search query parameters
+	 * @param token - Cancellation token to abort the search
+	 * @returns Search results containing matching file paths
+	 */
 	fileSearch(query: IFileQuery, token?: CancellationToken): Promise<ISearchComplete> {
 		return this.doSearch(query, token);
 	}
 
+	/**
+	 * Core search execution method that handles provider activation, folder validation, and result aggregation.
+	 * Activates extensions that provide search functionality, filters non-existent folders, and combines results from all providers.
+	 * @param query - The search query (file, text, or AI text)
+	 * @param token - Cancellation token to abort the search
+	 * @param onProgress - Callback for reporting search progress
+	 * @returns Aggregated search results from all providers
+	 */
 	private doSearch(query: ISearchQuery, token?: CancellationToken, onProgress?: (item: ISearchProgressItem) => void): Promise<ISearchComplete> {
 		this.logService.trace('SearchService#search', JSON.stringify(query));
 
@@ -210,6 +271,11 @@ export class SearchService extends Disposable implements ISearchService {
 		return token ? raceCancellationError<ISearchComplete>(providerPromise, token) : providerPromise;
 	}
 
+	/**
+	 * Extracts all unique URI schemes from the search query's folder queries and extra file resources.
+	 * @param query - The search query
+	 * @returns Set of URI schemes (e.g., 'file', 'vscode-remote')
+	 */
 	private getSchemesInQuery(query: ISearchQuery): Set<string> {
 		const schemes = new Set<string>();
 		query.folderQueries?.forEach(fq => schemes.add(fq.folder.scheme));
@@ -219,6 +285,13 @@ export class SearchService extends Disposable implements ISearchService {
 		return schemes;
 	}
 
+	/**
+	 * Waits for a search provider to be registered for a specific scheme and query type.
+	 * Creates a deferred promise if one doesn't exist, allowing the search to wait for provider registration.
+	 * @param queryType - The type of query (File, Text, or aiText)
+	 * @param scheme - The URI scheme
+	 * @returns Promise that resolves when the provider is registered
+	 */
 	private async waitForProvider(queryType: QueryType, scheme: string): Promise<ISearchResultProvider> {
 		const deferredMap: Map<string, DeferredPromise<ISearchResultProvider>> = this.getDeferredTextSearchesByScheme(queryType);
 
@@ -231,6 +304,11 @@ export class SearchService extends Disposable implements ISearchService {
 		}
 	}
 
+	/**
+	 * Gets the appropriate provider map for the given query type.
+	 * @param type - The query type (File, Text, or aiText)
+	 * @returns Map of providers keyed by URI scheme
+	 */
 	private getSearchProvider(type: QueryType): Map<string, ISearchResultProvider> {
 		switch (type) {
 			case QueryType.File:
@@ -244,6 +322,12 @@ export class SearchService extends Disposable implements ISearchService {
 		}
 	}
 
+	/**
+	 * Gets the appropriate deferred provider map for the given query type.
+	 * Used to wait for providers that haven't been registered yet.
+	 * @param type - The query type (File, Text, or aiText)
+	 * @returns Map of deferred promises keyed by URI scheme
+	 */
 	private getDeferredTextSearchesByScheme(type: QueryType): Map<string, DeferredPromise<ISearchResultProvider>> {
 		switch (type) {
 			case QueryType.File:
@@ -257,6 +341,14 @@ export class SearchService extends Disposable implements ISearchService {
 		}
 	}
 
+	/**
+	 * Executes search across all registered providers for the schemes in the query.
+	 * Groups folder queries by scheme, waits for/validates providers, and executes searches in parallel.
+	 * @param query - The search query
+	 * @param onProviderProgress - Callback for reporting progress from providers
+	 * @param token - Cancellation token
+	 * @returns Array of search results from all providers
+	 */
 	private async searchWithProviders(query: ISearchQuery, onProviderProgress: (progress: ISearchProgressItem) => void, token?: CancellationToken) {
 		const e2eSW = StopWatch.create(false);
 
@@ -329,6 +421,11 @@ export class SearchService extends Disposable implements ISearchService {
 		});
 	}
 
+	/**
+	 * Groups folder queries by their URI scheme to enable scheme-specific provider routing.
+	 * @param query - The search query containing folder queries
+	 * @returns Map of folder queries grouped by URI scheme
+	 */
 	private groupFolderQueriesByScheme(query: ISearchQuery): Map<string, IFolderQuery[]> {
 		const queries = new Map<string, IFolderQuery[]>();
 
@@ -342,6 +439,14 @@ export class SearchService extends Disposable implements ISearchService {
 		return queries;
 	}
 
+	/**
+	 * Sends telemetry data for search operations to track performance and usage.
+	 * Includes metrics like search time, result counts, and error types.
+	 * @param query - The search query
+	 * @param endToEndTime - Total time taken for the search in milliseconds
+	 * @param complete - Search completion data (if successful)
+	 * @param err - Search error (if failed)
+	 */
 	private sendTelemetry(query: ISearchQuery, endToEndTime: number, complete?: ISearchComplete, err?: SearchError): void {
 		const fileSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme === Schemas.file);
 		const otherSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme !== Schemas.file);
@@ -477,6 +582,13 @@ export class SearchService extends Disposable implements ISearchService {
 		}
 	}
 
+	/**
+	 * Searches through open/dirty editor models for text matches.
+	 * This provides immediate results from unsaved files before file system search completes.
+	 * Filters out special files like search result editors, git files, and non-file-backed editors.
+	 * @param query - The text search query
+	 * @returns Results from open editors and whether the result limit was hit
+	 */
 	private getOpenEditorResults(query: ITextQuery): { results: ResourceMap<IFileMatch | null>; limitHit: boolean } {
 		const openEditorResults = new ResourceMap<IFileMatch | null>(uri => this.uriIdentityService.extUri.getComparisonKey(uri));
 		let limitHit = false;
@@ -554,10 +666,20 @@ export class SearchService extends Disposable implements ISearchService {
 		};
 	}
 
+	/**
+	 * Checks if a resource matches the include/exclude patterns in the query.
+	 * @param resource - The resource URI to check
+	 * @param query - The text search query containing include/exclude patterns
+	 * @returns True if the resource should be included in search results
+	 */
 	private matches(resource: uri, query: ITextQuery): boolean {
 		return pathIncludedInQuery(query, resource.fsPath);
 	}
 
+	/**
+	 * Clears cached search results across all file search providers.
+	 * @param cacheKey - The cache key to clear
+	 */
 	async clearCache(cacheKey: string): Promise<void> {
 		const clearPs = Array.from(this.fileSearchProviders.values())
 			.map(provider => provider && provider.clearCache(cacheKey));
