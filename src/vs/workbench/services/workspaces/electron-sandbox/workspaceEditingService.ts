@@ -190,7 +190,7 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 			this.hostService.reload();
 		}
 
-		// Extension host restart removed - no longer needed now that workspace.rootPath is deprecated
+		// Extension host restart removed - extensions should use workspace.workspaceFolders instead of deprecated workspace.rootPath
 	}
 }
 
