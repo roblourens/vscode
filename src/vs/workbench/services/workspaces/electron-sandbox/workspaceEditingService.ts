@@ -11,7 +11,6 @@ import { IJSONEditingService } from 'vs/workbench/services/configuration/common/
 import { IWorkspacesService } from 'vs/platform/workspaces/common/workspaces';
 import { WorkspaceService } from 'vs/workbench/services/configuration/browser/configurationService';
 import { IStorageService } from 'vs/platform/storage/common/storage';
-import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
 import { IWorkingCopyBackupService } from 'vs/workbench/services/workingCopy/common/workingCopyBackup';
 import { ICommandService } from 'vs/platform/commands/common/commands';
 import { basename } from 'vs/base/common/resources';
@@ -43,7 +42,6 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 		@INativeHostService private nativeHostService: INativeHostService,
 		@IWorkbenchConfigurationService configurationService: IWorkbenchConfigurationService,
 		@IStorageService private storageService: IStorageService,
-		@IExtensionService private extensionService: IExtensionService,
 		@IWorkingCopyBackupService private workingCopyBackupService: IWorkingCopyBackupService,
 		@INotificationService notificationService: INotificationService,
 		@ICommandService commandService: ICommandService,
@@ -174,11 +172,6 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 	}
 
 	async enterWorkspace(workspaceUri: URI): Promise<void> {
-		const stopped = await this.extensionService.stopExtensionHosts(localize('restartExtensionHost.reason', "Opening a multi-root workspace."));
-		if (!stopped) {
-			return;
-		}
-
 		const result = await this.doEnterWorkspace(workspaceUri);
 		if (result) {
 
@@ -197,11 +190,7 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 			this.hostService.reload();
 		}
 
-		// Restart the extension host: entering a workspace means a new location for
-		// storage and potentially a change in the workspace.rootPath property.
-		else {
-			this.extensionService.startExtensionHosts();
-		}
+		// Extension host restart removed - no longer needed now that workspace.rootPath is deprecated
 	}
 }
 

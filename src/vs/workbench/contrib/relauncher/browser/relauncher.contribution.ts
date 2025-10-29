@@ -255,4 +255,5 @@ export class WorkspaceChangeExtHostRelauncher extends Disposable implements IWor
 
 const workbenchRegistry = Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench);
 workbenchRegistry.registerWorkbenchContribution(SettingsChangeRelauncher, LifecyclePhase.Restored);
-workbenchRegistry.registerWorkbenchContribution(WorkspaceChangeExtHostRelauncher, LifecyclePhase.Restored);
+// WorkspaceChangeExtHostRelauncher disabled - no longer need to restart extension host for deprecated workspace.rootPath API
+// workbenchRegistry.registerWorkbenchContribution(WorkspaceChangeExtHostRelauncher, LifecyclePhase.Restored);
