@@ -162,7 +162,12 @@ export class SessionTypePickerActionItem extends ChatInputPickerActionViewItem {
 			}
 		}));
 
-		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this._updateAgentSessionItems()));
+		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => {
+			this._updateAgentSessionItems();
+			if (this.element) {
+				this.renderLabel(this.element);
+			}
+		}));
 
 		this._updateAgentSessionItems();
 	}
