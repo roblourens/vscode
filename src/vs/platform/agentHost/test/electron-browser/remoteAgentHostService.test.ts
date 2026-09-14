@@ -27,6 +27,7 @@ import { agentsWindowAgentHostClientInfo, editorWindowAgentHostClientInfo } from
 import { PROTOCOL_VERSION } from '../../common/state/protocol/version/registry.js';
 import { computeReconnectDelay } from '../../common/reconnectPolicy.js';
 import { AgentHostTransportFailureReason, NonReconnectableTransportError } from '../../common/state/sessionTransport.js';
+import { JsonRpcErrorCodes, ProtocolError } from '../../common/state/sessionProtocol.js';
 
 interface IRemoteAgentHostServiceTestAccess {
 	readonly _reconnectAttempts: Map<string, number>;
@@ -316,6 +317,14 @@ suite('RemoteAgentHostService', () => {
 
 	teardown(() => disposables.clear());
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('fromConnectError maps a missing initialize handshake to incompatible without an upgrade method', () => {
+		const err = new ProtocolError(JsonRpcErrorCodes.MethodNotFound, 'Method not found: initialize');
+		assert.deepStrictEqual(
+			RemoteAgentHostConnectionStatus.fromConnectError(err, [PROTOCOL_VERSION]),
+			RemoteAgentHostConnectionStatus.incompatible(err.message, [PROTOCOL_VERSION]),
+		);
+	});
 
 	/** Wait for a connection to reach Connected status. */
 	async function waitForConnected(): Promise<void> {

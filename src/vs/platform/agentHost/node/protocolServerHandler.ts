@@ -238,8 +238,9 @@ interface IConnectedClient {
  * or has no transport and is within its disconnect-grace window
  * ({@link IGraceClientRecord}, never any connections). Transitions happen only
  * in {@link ProtocolServerHandler._attachConnection} (→ active, which disposes
- * any grace timers) and the transport `onClose` handler (→ grace, once the last
- * transport is gone).
+ * any grace timers) and {@link ProtocolServerHandler._detachConnection}
+ * (→ grace, once the last transport is gone — used by `onClose` and by a
+ * replacement `initialize` on a reused socket).
  */
 type IClientRecord = IActiveClientRecord | IGraceClientRecord;
 
@@ -453,8 +454,18 @@ export class ProtocolServerHandler extends Disposable implements IAgentHostClien
 					return;
 				}
 
-				// Handle initialize/reconnect as requests that set up the client
-				if (!client && msg.method === 'initialize') {
+				// Handle initialize/reconnect as requests that set up the client.
+				// `initialize` is the handshake even when this transport already
+				// has a connection-local client: SSH/WSL reconnect can keep the
+				// WebSocket alive while a new protocol client sends a fresh
+				// initialize (request id 1). Without replacing the previous
+				// occupant, that request falls through as an unknown method.
+				if (msg.method === 'initialize') {
+					if (client) {
+						this._logService.info(`[ProtocolServer] Replacing handshake on live transport (previous clientId=${client.clientId})`);
+						this._detachConnection(client);
+						client = undefined;
+					}
 					try {
 						const result = this._handleInitialize(msg.params, transport, disposables);
 						client = result.client;
@@ -560,30 +571,8 @@ export class ProtocolServerHandler extends Disposable implements IAgentHostClien
 		}));
 
 		disposables.add(transport.onClose(() => {
-			const record = client ? this._clients.get(client.clientId) : undefined;
-			if (client && record?.state === 'active') {
-				const connectionIndex = record.connections.indexOf(client);
-				if (connectionIndex !== -1) {
-					const subscriptionCount = client.subscriptions.size;
-					record.connections.splice(connectionIndex, 1);
-					this._releaseClientSubscriptions(client, record);
-					this._rejectPendingReverseRequestsForConnection(client);
-					if (record.connections.length === 0) {
-						this._logService.info(`[ProtocolServer] Client disconnected: ${client.clientId}, subscriptions=${subscriptionCount}`);
-						this._clients.set(client.clientId, {
-							state: 'grace',
-							seenConnection: true,
-							clientInfo: record.clientInfo,
-							telemetryContext: client.telemetryContext,
-							protocolVersion: client.protocolVersion,
-							lastSeenAt: Date.now(),
-							disconnectTimeouts: new DisposableMap(),
-						});
-						this._handleClientDisconnected(client.clientId);
-						this._onDidChangeConnectionCount.fire(this._connectedClientCount);
-					}
-					this._reportClientDisconnected(client, subscriptionCount);
-				}
+			if (client) {
+				this._detachConnection(client);
 			}
 			this._connectionDisposables.deleteAndDispose(transport);
 		}));
@@ -1080,6 +1069,42 @@ export class ProtocolServerHandler extends Disposable implements IAgentHostClien
 				}
 			}
 		}
+	}
+
+	/**
+	 * Detach `client` from its live record as if its transport closed, without
+	 * disposing the transport. Used by `onClose` and by a replacement
+	 * `initialize` on a reused socket.
+	 */
+	private _detachConnection(client: IConnectedClient): void {
+		const record = this._clients.get(client.clientId);
+		if (record?.state !== 'active') {
+			return;
+		}
+		const connectionIndex = record.connections.indexOf(client);
+		if (connectionIndex === -1) {
+			return;
+		}
+		const subscriptionCount = client.subscriptions.size;
+		record.connections.splice(connectionIndex, 1);
+		this._releaseClientSubscriptions(client, record);
+		this._rejectPendingReverseRequestsForConnection(client);
+		client.disposables.delete(client.initializationDisposables);
+		if (record.connections.length === 0) {
+			this._logService.info(`[ProtocolServer] Client disconnected: ${client.clientId}, subscriptions=${subscriptionCount}`);
+			this._clients.set(client.clientId, {
+				state: 'grace',
+				seenConnection: true,
+				clientInfo: record.clientInfo,
+				telemetryContext: client.telemetryContext,
+				protocolVersion: client.protocolVersion,
+				lastSeenAt: Date.now(),
+				disconnectTimeouts: new DisposableMap(),
+			});
+			this._handleClientDisconnected(client.clientId);
+			this._onDidChangeConnectionCount.fire(this._connectedClientCount);
+		}
+		this._reportClientDisconnected(client, subscriptionCount);
 	}
 
 	private _handleClientDisconnected(clientId: string): void {

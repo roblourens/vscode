@@ -12,7 +12,7 @@ import { ConfigurationTarget, type IConfigurationService } from '../../configura
 import { StorageScope, StorageTarget, type IStorageService } from '../../storage/common/storage.js';
 import type { IAgentConnection } from './agentService.js';
 import type { UnsupportedProtocolVersionErrorData } from './state/protocol/errors.js';
-import { AHP_UNSUPPORTED_PROTOCOL_VERSION, ProtocolError } from './state/sessionProtocol.js';
+import { AHP_UNSUPPORTED_PROTOCOL_VERSION, isMissingInitializeHandshakeError, ProtocolError } from './state/sessionProtocol.js';
 import { AgentHostTransportFailureReason } from './state/sessionTransport.js';
 import { readUnsupportedProtocolVersionErrorMeta, type IVscodeUpgradeResult } from './state/protocolUpgrade.js';
 import { TUNNEL_ADDRESS_PREFIX } from './tunnelAgentHost.js';
@@ -110,10 +110,11 @@ export namespace RemoteAgentHostConnectionStatus {
 		return status?.kind !== 'connected';
 	}
 	/**
-	 * If `err` is a protocol-version mismatch reported by an agent host
-	 * during the `initialize` handshake, returns an `incompatible` status
-	 * carrying the host's message. Returns `undefined` otherwise so callers
-	 * can fall back to their existing failure handling.
+	 * If `err` is a handshake rejection reported by an agent host during
+	 * `initialize` (protocol-version mismatch, or the host does not implement
+	 * `initialize` at all), returns an `incompatible` status carrying the
+	 * host's message. Returns `undefined` otherwise so callers can fall back
+	 * to their existing failure handling.
 	 */
 	export function fromConnectError(err: unknown, supportedByClient: readonly string[]): RemoteAgentHostConnectionStatus | undefined {
 		if (err instanceof ProtocolError && err.code === AHP_UNSUPPORTED_PROTOCOL_VERSION) {
@@ -121,6 +122,10 @@ export namespace RemoteAgentHostConnectionStatus {
 			const offeredByServer = Array.isArray(data?.supportedVersions) ? data.supportedVersions : undefined;
 			const vscodeUpgradeMethod = readUnsupportedProtocolVersionErrorMeta(err.data)?.vscodeUpgradeMethod;
 			return incompatible(err.message, supportedByClient, offeredByServer, vscodeUpgradeMethod);
+		}
+		if (isMissingInitializeHandshakeError(err)) {
+			// An old host that lacks `initialize` also lacks `_vscodeUpgrade`.
+			return incompatible(err.message, supportedByClient);
 		}
 		return undefined;
 	}

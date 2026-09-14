@@ -89,7 +89,8 @@ export { ResourceChangeType } from './protocol/channels-resource-watch/state.js'
 export type { ResourceChange, ResourceWatchState } from './protocol/channels-resource-watch/state.js';
 
 // Error codes
-export { AhpErrorCodes, JsonRpcErrorCodes } from './protocol/errors.js';
+import { AhpErrorCodes, JsonRpcErrorCodes } from './protocol/errors.js';
+export { AhpErrorCodes, JsonRpcErrorCodes };
 export type { AhpErrorCode, JsonRpcErrorCode } from './protocol/errors.js';
 
 // Snapshot type (re-exported from state). The generated `Snapshot.state`
@@ -141,6 +142,19 @@ export class ProtocolError extends Error {
 	constructor(readonly code: number, message: string, readonly data?: unknown) {
 		super(message);
 	}
+}
+
+/**
+ * True when the peer rejected the AHP `initialize` handshake as an unknown
+ * JSON-RPC method. That happens both for a host that predates the handshake
+ * and (historically) when a reused transport treated a second `initialize` as
+ * ordinary traffic. Callers should surface this as an incompatible host
+ * rather than a generic disconnect.
+ */
+export function isMissingInitializeHandshakeError(err: unknown): err is ProtocolError & { readonly message: 'Method not found: initialize' } {
+	return err instanceof ProtocolError
+		&& err.code === JsonRpcErrorCodes.MethodNotFound
+		&& err.message === 'Method not found: initialize';
 }
 
 /**

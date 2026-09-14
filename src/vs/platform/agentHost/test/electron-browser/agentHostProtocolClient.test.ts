@@ -1604,6 +1604,39 @@ suite('AgentHostProtocolClient', () => {
 		assert.strictEqual(client.connectionState, AgentHostClientState.Closed);
 	});
 
+	test('treats a missing initialize handshake as incompatible without closing the transport', async () => {
+		const transport = disposables.add(new TestClientProtocolTransport());
+		const { client } = createClient(transport);
+		const connectPromise = client.connect();
+
+		transport.connectDeferred.complete();
+		while (transport.sentMessages.length === 0) {
+			await Promise.resolve();
+		}
+
+		const sent = transport.sentMessages[0] as JsonRpcRequest;
+		transport.fireMessage({
+			jsonrpc: '2.0',
+			id: sent.id,
+			error: {
+				code: JsonRpcErrorCodes.MethodNotFound,
+				message: 'Method not found: initialize',
+			},
+		});
+
+		await assertRemoteProtocolError(connectPromise, {
+			code: JsonRpcErrorCodes.MethodNotFound,
+			message: 'Method not found: initialize',
+		});
+		assert.strictEqual(client.connectionState, AgentHostClientState.Incompatible);
+		await assertRemoteProtocolError(client.resourceList(URI.file('/workspace')), {
+			code: JsonRpcErrorCodes.MethodNotFound,
+			message: 'Method not found: initialize',
+		});
+		client.dispatch(ROOT_STATE_URI, { type: ActionType.RootConfigChanged, config: { dropped: true } });
+		assert.strictEqual(transport.sentMessages.length, 1);
+	});
+
 	test('sends shutdown as a JSON-RPC request shape', async () => {
 		const { client, transport } = createClient();
 		const resultPromise = client.shutdown();

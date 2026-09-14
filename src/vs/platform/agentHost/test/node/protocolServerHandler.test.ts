@@ -479,6 +479,39 @@ suite('ProtocolServerHandler', () => {
 		});
 	});
 
+	test('replaces an existing handshake when initialize is sent again on the same transport', async () => {
+		const transport = connectClient('client-original');
+		const first = findResponse(transport.sent, 1);
+		if (!first || !hasKey(first, { result: true })) {
+			assert.fail('should have sent initialize response');
+		}
+		assert.strictEqual(handler.isClientConnected('client-original'), true);
+
+		transport.simulateMessage(request(2, 'initialize', {
+			protocolVersions: [PROTOCOL_VERSION],
+			clientId: 'client-replacement',
+		}));
+
+		const second = findResponse(transport.sent, 2);
+		if (!second || !hasKey(second, { result: true })) {
+			assert.fail('second initialize should succeed instead of MethodNotFound');
+		}
+		assert.strictEqual((second.result as InitializeResult).protocolVersion, PROTOCOL_VERSION);
+		assert.strictEqual(handler.isClientConnected('client-original'), false);
+		assert.strictEqual(handler.isClientConnected('client-replacement'), true);
+
+		transport.sent.length = 0;
+		const listedPromise = waitForResponse(transport, 3);
+		transport.simulateMessage(request(3, 'listSessions'));
+		const listed = await listedPromise;
+		if (!hasKey(listed, { result: true })) {
+			assert.fail('replacement client should handle post-handshake requests');
+		}
+
+		transport.simulateClose();
+		transport.dispose();
+	});
+
 	test('routes a workspace trust request to the initiating client', async () => {
 		const transport = connectClient('client-1');
 		while (!findResponse(transport.sent, 1)) {
