@@ -133,6 +133,29 @@ suite('SubagentRegistry', () => {
 		});
 	});
 
+	test('getSpawnByAgentId finds the spawn stamped with that agent id; getUniqueLiveSpawn is defined only when exactly one spawn is in flight', () => {
+		const registry = r();
+		const parentA = registry.recordSpawn('toolu_parent_a');
+		registry.recordSpawn('toolu_parent_b');
+		parentA.setAgentId('agent-a');
+
+		assert.deepStrictEqual({
+			byAgent: registry.getSpawnByAgentId('agent-a')?.toolUseId,
+			missingAgent: registry.getSpawnByAgentId('agent-missing'),
+			notUnique: registry.getUniqueLiveSpawn(),
+		}, {
+			byAgent: 'toolu_parent_a',
+			missingAgent: undefined,
+			notUnique: undefined,
+		});
+
+		registry.removeSpawn('toolu_parent_b');
+		assert.strictEqual(registry.getUniqueLiveSpawn()?.toolUseId, 'toolu_parent_a');
+
+		parentA.markCompleted();
+		assert.strictEqual(registry.getUniqueLiveSpawn(), undefined);
+	});
+
 	test('drainForegroundSpawns: returns and removes only foreground spawns; background spawns survive; inner-edge entries pointing at drained spawns are evicted', () => {
 		const registry = r();
 		registry.recordSpawn('toolu_fg_1');

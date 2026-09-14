@@ -51,6 +51,7 @@ import {
 	ROOT_STATE_URI,
 	SessionLifecycle,
 	CustomizationType,
+	ToolCallConfirmationReason,
 	ToolCallStatus,
 	ToolResultContentType,
 	type ErrorInfo,
@@ -117,6 +118,12 @@ export interface IAgentSideEffectsOptions {
 interface IPendingSubagentSignal {
 	readonly signal: AgentSignal;
 	readonly agent: IAgent;
+}
+
+interface IPendingToolConfirmation {
+	readonly signal: IAgentToolPendingConfirmationSignal;
+	readonly agent: IAgent;
+	readonly turnId: string;
 }
 
 interface ISubagentSessionRef {
@@ -216,6 +223,14 @@ export class AgentSideEffects extends Disposable {
 	 *
 	 */
 	private readonly _pendingSubagentSignals = new NKeyMap<IPendingSubagentSignal[], [ProtocolURI, string]>();
+	/**
+	 * `pending_confirmation` signals that arrived before the matching
+	 * `ChatToolCallStart` on the target chat. The Claude mapper can emit
+	 * inner Start/Ready after `canUseTool` has already parked; dispatching
+	 * Ready into a chat that has no tool part is a no-op and leaves the
+	 * SDK hung (#333931). Drained when the start (or a later ready) lands.
+	 */
+	private readonly _pendingToolConfirmations = new NKeyMap<IPendingToolConfirmation, [ProtocolURI, string]>();
 	private readonly _inputRequestTracker: AgentHostInputRequestTracker;
 	/**
 	 * Fires with the provider id whenever a turn starts. Surfaced so
@@ -746,6 +761,18 @@ export class AgentSideEffects extends Disposable {
 		if (signal.kind !== 'action') {
 			return;
 		}
+		if (signal.action.type === ActionType.ChatToolCallReady && signal.action.confirmed === ToolCallConfirmationReason.NotNeeded) {
+			// The stream mapper admits inner tools with `confirmed: NotNeeded`
+			// on the assumption that `canUseTool` is skipped. When it is not,
+			// a later mapper Ready must not clobber an in-flight confirmation
+			// back to Running and leave the permission deferred parked.
+			const pendingConfirmation = this._pendingToolConfirmations.get(sessionKey, signal.action.toolCallId);
+			const existingToolCall = this._findToolCall(sessionKey, signal.action.toolCallId);
+			if (pendingConfirmation || existingToolCall?.status === ToolCallStatus.PendingConfirmation) {
+				this._drainPendingToolConfirmation(sessionKey, signal.action.toolCallId);
+				return;
+			}
+		}
 		let action = signal.action;
 		if (action.type !== ActionType.ChatTruncated && hasKey(action, { turnId: true }) && action.turnId !== turnId) {
 			if (turnIdRouting === 'remap') {
@@ -830,6 +857,10 @@ export class AgentSideEffects extends Disposable {
 		}
 
 		this._stateManager.dispatchServerAction(sessionKey, action);
+
+		if (action.type === ActionType.ChatToolCallStart || action.type === ActionType.ChatToolCallReady) {
+			this._drainPendingToolConfirmation(sessionKey, action.toolCallId);
+		}
 
 		// Any turn-scoped action counts as activity for the hang watchdog: it is
 		// proof the agent loop is still alive, even when the action produces
@@ -1229,6 +1260,24 @@ export class AgentSideEffects extends Disposable {
 		return execution ? execution.duration + execution.stopWatch.elapsed() : undefined;
 	}
 
+	private _findToolCall(sessionKey: ProtocolURI, toolCallId: string) {
+		const part = this._stateManager.getSessionState(sessionKey)?.activeTurn?.responseParts.find(
+			part => part.kind === ResponsePartKind.ToolCall && part.toolCall.toolCallId === toolCallId
+		);
+		return part?.kind === ResponsePartKind.ToolCall ? part.toolCall : undefined;
+	}
+
+	private _drainPendingToolConfirmation(sessionKey: ProtocolURI, toolCallId: string): void {
+		const pending = this._pendingToolConfirmations.get(sessionKey, toolCallId);
+		if (!pending) {
+			return;
+		}
+		this._pendingToolConfirmations.delete(sessionKey, toolCallId);
+		void this._handleToolReady(pending.signal, sessionKey, pending.turnId, pending.agent).catch(err => {
+			this._logService.error('[AgentSideEffects] _handleToolReady failed', err);
+		});
+	}
+
 	/**
 	 * Finds the subagent session that owns a given tool call by checking
 	 * whether the tool call was previously registered under a subagent
@@ -1316,6 +1365,17 @@ export class AgentSideEffects extends Disposable {
 			this._toolCallAgents.delete(toolCallKey);
 			this._managedApprovalToolCalls.delete(toolCallKey);
 			this._logService.trace(`[AgentSideEffects] Dropping stale tool ready for ${e.state.toolCallId}: status=${toolCall.status}`);
+			// Settle the permission deferred: dropping the Ready without a
+			// response is what parked `canUseTool` forever in #333931.
+			agent.respondToPermissionRequest(e.state.toolCallId, false);
+			return;
+		}
+		if (!toolCall && autoApproval === undefined && !forbiddenSnapshotWrite) {
+			// Confirmation is required but the tool part is not on this chat
+			// yet (canUseTool raced ahead of the inner Start). Hold the
+			// signal until Start/Ready arrives so we don't dispatch a Ready
+			// the reducer will ignore.
+			this._pendingToolConfirmations.set({ signal: e, agent, turnId }, sessionKey, e.state.toolCallId);
 			return;
 		}
 		const contributor = e.state.contributor ?? toolCall?.contributor;

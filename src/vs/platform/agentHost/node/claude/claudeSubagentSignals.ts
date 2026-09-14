@@ -203,8 +203,10 @@ export function buildTopLevelSubagentReadyAction(
  *   - `text` / `thinking` → `ChatResponsePart` (Markdown / Reasoning)
  *     with the full block content.
  *   - `tool_use` → `ChatToolCallStart` + `ChatToolCallReady`
- *     (`confirmed: NotNeeded`, since the SDK runs inner tools in
- *     `bypassPermissions` and the parent's `canUseTool` is skipped),
+ *     (`confirmed: NotNeeded` so a skipped `canUseTool` still leaves the
+ *     call Running). The SDK does still invoke `canUseTool` for some
+ *     inner tools; `AgentSideEffects` then owns the real confirmation
+ *     and must not let this synthetic Ready clobber it (#333931).
  *     plus side effects on `state` (cross-message lookup) and
  *     `registry` (inner→parent edge for the canUseTool bridge).
  *

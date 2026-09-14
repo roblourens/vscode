@@ -7188,6 +7188,81 @@ suite('ClaudeAgent (Phase 7 §3.4 — _handleCanUseTool)', () => {
 		});
 	});
 
+	test('canUseTool tags parentToolCallId from the inner-tool edge even when the SDK omits agentID', async () => {
+		const { ctx, canUseTool, sessionUri } = await materialize();
+		const session = ctx.agent.getSessionForTesting(sessionUri);
+		assert.ok(session, 'session must be materialized');
+		session.subagents.recordSpawn('toolu_parent');
+		session.subagents.noteInnerTool('toolu_inner', 'toolu_parent');
+
+		const signals: AgentSignal[] = [];
+		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
+
+		const promise = canUseTool('Read', { file_path: '/tmp/inner.txt' }, makeOptions('toolu_inner'));
+		ctx.agent.respondToPermissionRequest('toolu_inner', true);
+		await promise;
+
+		const pending = signals.find(s => s.kind === 'pending_confirmation');
+		assert.ok(pending && pending.kind === 'pending_confirmation', 'pending_confirmation emitted');
+		assert.strictEqual(pending.parentToolCallId, 'toolu_parent');
+	});
+
+	test('canUseTool recovers the parent spawn from agentID when the mapper has not recorded the inner-tool edge yet', async () => {
+		const { ctx, canUseTool, sessionUri } = await materialize();
+		const session = ctx.agent.getSessionForTesting(sessionUri);
+		assert.ok(session, 'session must be materialized');
+		session.subagents.recordSpawn('toolu_parent', { agentId: 'agent-hex-1' });
+
+		const signals: AgentSignal[] = [];
+		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
+
+		const promise = canUseTool('Read', { file_path: '/tmp/inner.txt' }, {
+			...makeOptions('toolu_inner_early'),
+			agentID: 'agent-hex-1',
+		});
+		ctx.agent.respondToPermissionRequest('toolu_inner_early', true);
+		await promise;
+
+		const pending = signals.find(s => s.kind === 'pending_confirmation');
+		assert.ok(pending && pending.kind === 'pending_confirmation', 'pending_confirmation emitted');
+		assert.deepStrictEqual({
+			pendingParent: pending.parentToolCallId,
+			innerEdge: session.subagents.getParentSpawn('toolu_inner_early')?.toolUseId,
+		}, {
+			pendingParent: 'toolu_parent',
+			innerEdge: 'toolu_parent',
+		});
+	});
+
+	test('canUseTool attributes an inner tool to the unique live spawn when canUseTool races ahead of the mapper', async () => {
+		const { ctx, canUseTool, sessionUri } = await materialize();
+		const session = ctx.agent.getSessionForTesting(sessionUri);
+		assert.ok(session, 'session must be materialized');
+		session.subagents.recordSpawn('toolu_parent');
+
+		const signals: AgentSignal[] = [];
+		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
+
+		const promise = canUseTool('Bash', { command: 'ls' }, {
+			...makeOptions('toolu_inner_first'),
+			agentID: 'agent-first',
+		});
+		ctx.agent.respondToPermissionRequest('toolu_inner_first', true);
+		await promise;
+
+		const pending = signals.find(s => s.kind === 'pending_confirmation');
+		assert.ok(pending && pending.kind === 'pending_confirmation', 'pending_confirmation emitted');
+		assert.deepStrictEqual({
+			pendingParent: pending.parentToolCallId,
+			stampedAgentId: session.subagents.getSpawn('toolu_parent')?.agentId,
+			innerEdge: session.subagents.getParentSpawn('toolu_inner_first')?.toolUseId,
+		}, {
+			pendingParent: 'toolu_parent',
+			stampedAgentId: 'agent-first',
+			innerEdge: 'toolu_parent',
+		});
+	});
+
 	test('Phase 12 step 5 — AskUserQuestion + ExitPlanMode inside a subagent context tag their emitted signals with parentToolCallId', async () => {
 		const { ctx, canUseTool, sessionUri } = await materialize();
 

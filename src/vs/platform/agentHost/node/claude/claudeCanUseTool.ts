@@ -180,29 +180,35 @@ async function dispatchCanUseTool(
 
 /**
  * Phase 12 step 5 — shared subagent-context resolution for every
- * `pending_confirmation` and `ChatInputRequested` emission. When the
- * SDK delivers `options.agentID`, look up the parent spawn via the
- * session's registry and write the agentId back to it. The write is
- * **first-writer-wins** (a mismatched late agentID is silently dropped
- * — see {@link SubagentSpawn.setAgentId}); all writers converge on the
- * SDK's single identity for a given Task, so conflict is not expected.
- * Returns the parent `tool_use_id` for top-level callers to spread
- * onto the request payload, or `undefined` when this isn't an inner
- * tool call (no subagent context).
+ * `pending_confirmation` and `ChatInputRequested` emission.
+ *
+ * The inner-tool → parent edge is the authoritative lookup; `agentID` is
+ * only needed to stamp the spawn, not to decide that this is an inner
+ * call. The SDK can invoke `canUseTool` before the mapper records that
+ * edge and can omit `agentID` on later inner tools — both used to drop
+ * `parentToolCallId`, route confirmation to the parent chat, and leave
+ * `canUseTool` parked forever (#333931).
+ *
+ * Fallbacks: spawn already stamped with this `agentID` (prior inner
+ * tool of the same subagent), then the unique in-flight spawn when the
+ * SDK did supply `agentID` so we know this is inner. The resolved edge
+ * is written back so later tools of the same call don't race again.
  */
 function resolveSubagentParent(
 	session: ClaudeAgentSession,
 	options: IClaudeCanUseToolOptions,
 ): string | undefined {
-	if (!options.agentID) {
+	const parentSpawn = session.subagents.getParentSpawn(options.toolUseID)
+		?? (options.agentID ? session.subagents.getSpawnByAgentId(options.agentID) : undefined)
+		?? (options.agentID ? session.subagents.getUniqueLiveSpawn() : undefined);
+	if (!parentSpawn) {
 		return undefined;
 	}
-	const parentSpawn = session.subagents.getParentSpawn(options.toolUseID);
-	if (parentSpawn) {
+	if (options.agentID) {
 		parentSpawn.setAgentId(options.agentID);
-		return parentSpawn.toolUseId;
 	}
-	return undefined;
+	session.subagents.noteInnerTool(options.toolUseID, parentSpawn.toolUseId);
+	return parentSpawn.toolUseId;
 }
 
 /**

@@ -95,6 +95,10 @@ export class SubagentSpawn {
 		this._completed = true;
 		return true;
 	}
+
+	get completed(): boolean {
+		return this._completed;
+	}
 }
 
 /**
@@ -180,6 +184,35 @@ export class SubagentRegistry extends Disposable {
 	getParentSpawn(innerToolUseId: string): SubagentSpawn | undefined {
 		const parentId = this._innerToParent.get(innerToolUseId);
 		return parentId !== undefined ? this._spawns.get(parentId) : undefined;
+	}
+
+	/** Look up a live spawn by the SDK agent id stamped on a later inner `canUseTool`. */
+	getSpawnByAgentId(agentId: string): SubagentSpawn | undefined {
+		for (const spawn of this._spawns.values()) {
+			if (spawn.agentId === agentId) {
+				return spawn;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * The sole in-flight spawn, if there is exactly one. Used by `canUseTool`
+	 * when the inner-tool edge has not been recorded yet (the SDK can invoke
+	 * the permission callback before the mapper sees the inner `tool_use`).
+	 */
+	getUniqueLiveSpawn(): SubagentSpawn | undefined {
+		let found: SubagentSpawn | undefined;
+		for (const spawn of this._spawns.values()) {
+			if (spawn.completed) {
+				continue;
+			}
+			if (found) {
+				return undefined;
+			}
+			found = spawn;
+		}
+		return found;
 	}
 
 	/**

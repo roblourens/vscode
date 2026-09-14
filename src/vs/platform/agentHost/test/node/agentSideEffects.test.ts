@@ -4794,6 +4794,92 @@ suite('AgentSideEffects', () => {
 			assert.strictEqual(parentInner, undefined, 'parent session must not contain the inner tool call');
 		});
 
+		test('pending_confirmation before an inner tool start still settles on the subagent chat (#333931)', async () => {
+			// canUseTool can park on pending_confirmation before the mapper
+			// emits the inner ChatToolCallStart. The Ready must wait for that
+			// start so it is not dropped, and a later mapper Ready with
+			// confirmed: NotNeeded must not clobber the confirmation.
+			setupSession();
+			startTurn('turn-1');
+			disposables.add(sideEffects.registerProgressListener(agent));
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri),
+				action: {
+					type: ActionType.ChatToolCallStart, turnId: 'turn-1',
+					toolCallId: 'tc-parent', toolName: 'runSubagent', displayName: 'Run Subagent', contributor: undefined,
+					_meta: { toolKind: undefined, language: undefined },
+				},
+			});
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri),
+				action: {
+					type: ActionType.ChatToolCallReady, turnId: 'turn-1',
+					toolCallId: 'tc-parent', invocationMessage: 'Delegating...', toolInput: undefined,
+					confirmed: ToolCallConfirmationReason.NotNeeded,
+				},
+			});
+			agent.fireProgress({ kind: 'subagent_started', chat: URI.parse(defaultChatUri), toolCallId: 'tc-parent', agentName: 'helper', agentDisplayName: 'Helper' });
+
+			agent.fireProgress({
+				kind: 'pending_confirmation', chat: URI.parse(defaultChatUri), parentToolCallId: 'tc-parent',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'tc-inner-early', toolName: 'Bash', displayName: 'Bash',
+					invocationMessage: 'Run command', toolInput: '{"command":"ls"}',
+					confirmationTitle: 'Allow Bash?', edits: undefined,
+				},
+				permissionKind: 'shell', permissionPath: undefined,
+			});
+
+			assert.deepStrictEqual(agent.respondToPermissionCalls, []);
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-parent',
+				action: {
+					type: ActionType.ChatToolCallStart, turnId: 'turn-1',
+					toolCallId: 'tc-inner-early', toolName: 'Bash', displayName: 'Bash', contributor: undefined,
+					_meta: { toolKind: undefined, language: undefined },
+				},
+			});
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-parent',
+				action: {
+					type: ActionType.ChatToolCallReady, turnId: 'turn-1',
+					toolCallId: 'tc-inner-early', invocationMessage: 'Run command', toolInput: '{"command":"ls"}',
+					confirmed: ToolCallConfirmationReason.NotNeeded,
+				},
+			});
+
+			const subagentUri = buildSubagentChatUri(sessionUri.toString(), 'tc-parent');
+			const subState = await waitForState(stateManager, () => {
+				const s = stateManager.getSessionState(subagentUri);
+				const inner = s?.activeTurn?.responseParts.find(
+					rp => rp.kind === ResponsePartKind.ToolCall && rp.toolCall.toolCallId === 'tc-inner-early'
+				);
+				return inner?.kind === ResponsePartKind.ToolCall && inner.toolCall.status === ToolCallStatus.PendingConfirmation ? s : undefined;
+			});
+			const innerPart = subState?.activeTurn?.responseParts.find(
+				rp => rp.kind === ResponsePartKind.ToolCall && rp.toolCall.toolCallId === 'tc-inner-early'
+			);
+			assert.strictEqual(
+				innerPart?.kind === ResponsePartKind.ToolCall ? innerPart.toolCall.status : undefined,
+				ToolCallStatus.PendingConfirmation,
+			);
+			assert.deepStrictEqual(agent.respondToPermissionCalls, []);
+
+			sideEffects.handleAction(subagentUri, {
+				type: ActionType.ChatToolCallConfirmed,
+				turnId: stateManager.getActiveTurnId(subagentUri) ?? '',
+				toolCallId: 'tc-inner-early',
+				approved: true,
+				confirmed: ToolCallConfirmationReason.UserAction,
+			} as ChatAction);
+			assert.deepStrictEqual(agent.respondToPermissionCalls, [
+				{ requestId: 'tc-inner-early', approved: true },
+			]);
+		});
+
 		test('pending_confirmation without an active turn still dispatches (does not hang)', async () => {
 			// Regression: when a hook-triggered continuation runs after
 			// the protocol turn has completed, the state manager has no
