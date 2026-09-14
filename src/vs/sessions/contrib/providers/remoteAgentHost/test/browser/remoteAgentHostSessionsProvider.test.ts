@@ -1412,6 +1412,23 @@ suite('RemoteAgentHostSessionsProvider', () => {
 		assert.strictEqual(workspace!.requiresWorkspaceTrust, true, 'remote session folders require workspace trust');
 	}));
 
+	test('session adapter keeps vscode-remote working directories unwrapped', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
+		const remoteDirectory = URI.parse('vscode-remote://ssh-remote+host/home/user/myrepo');
+		connection.addSession(createSession('remote-ws-sess', { summary: 'Remote WS', workingDirectory: remoteDirectory }));
+
+		const provider = createProvider(disposables, connection, { isWebPlatform: true });
+		provider.getSessions();
+		await timeout(0);
+
+		const wsSession = provider.getSessions().find(s => s.title.get() === 'Remote WS');
+		assert.ok(wsSession, 'Session with vscode-remote working directory should exist');
+
+		const workspace = wsSession!.workspace.get();
+		assert.ok(workspace, 'Workspace should be populated');
+		assert.strictEqual(workspace!.label, 'myrepo');
+		assert.strictEqual(workspace!.folders[0].root.toString(), remoteDirectory.toString());
+	}));
+
 	test('session adapter without working directory has no workspace', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
 		connection.addSession(createSession('no-ws-sess', { summary: 'No WS' }));
 

@@ -11,8 +11,10 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, IReference } from '../../../../base/common/lifecycle.js';
+import { Schemas } from '../../../../base/common/network.js';
 import { autorun, IObservable, ISettableObservable, observableValue, constObservable } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
+import { createURITransformer } from '../../../../base/common/uriTransformer.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { AgentHostIpcChannels, IAgentCreateChatRequestOptions, IAgentCreateSessionConfig, IAgentHostInspectInfo, IAgentHostManagedSettingsDiagnostics, IAgentHostNetworkDiagnosticsInfo, IAgentHostNetworkFetchResult, IAgentHostService, IAgentHostSocketInfo, IAgentResolveSessionConfigParams, IAgentSessionConfigCompletionsParams, IAgentSessionMetadata, AuthenticateParams, AuthenticateResult, IMcpNotification, type AgentHostDebugLogsArtifactKind, type IAgentHostDebugLogsArtifact, type IAgentHostDebugLogsChunk } from '../../../../platform/agentHost/common/agentService.js';
@@ -61,6 +63,7 @@ export class EditorRemoteAgentHostServiceClient extends Disposable implements IA
 	private _authenticationSettled = false;
 
 	private readonly _protocolClient: AgentHostProtocolClient | undefined;
+	private readonly _remoteAuthority: string | undefined;
 	get resourceUris() { return this._protocolClient?.resourceUris ?? identityAgentHostResourceUriMapper; }
 	private readonly _noopRootState: IAgentSubscription<RootState> = {
 		value: undefined,
@@ -82,6 +85,7 @@ export class EditorRemoteAgentHostServiceClient extends Disposable implements IA
 		super();
 
 		const connection = this._remoteAgentService.getConnection();
+		this._remoteAuthority = connection?.remoteAuthority;
 		this._logService.info(`${LOG_PREFIX} Initializing (remoteAuthority=${connection?.remoteAuthority ?? 'none'})`);
 
 		if (!connection) {
@@ -248,9 +252,22 @@ export class EditorRemoteAgentHostServiceClient extends Disposable implements IA
 		const sessions = await this._requireClient().listSessions();
 		return sessions.map(session => ({
 			...session,
-			workingDirectory: session.workingDirectory ? fromAgentHostUri(session.workingDirectory) : undefined,
-			workingDirectories: session.workingDirectories?.map(fromAgentHostUri),
+			workingDirectory: session.workingDirectory ? this._toWorkbenchDirectory(session.workingDirectory) : undefined,
+			workingDirectories: session.workingDirectories?.map(directory => this._toWorkbenchDirectory(directory)),
 		}));
+	}
+
+	/**
+	 * `listSessions` may still hand back host-local `file:` directories when the
+	 * protocol client wrapped them. Restore the workbench `vscode-remote:` identity
+	 * so workspace filtering matches Remote-SSH folders.
+	 */
+	private _toWorkbenchDirectory(uri: URI): URI {
+		const unwrapped = fromAgentHostUri(uri);
+		if (unwrapped.scheme !== Schemas.file || !this._remoteAuthority) {
+			return unwrapped;
+		}
+		return createURITransformer(this._remoteAuthority).transformOutgoingURI(unwrapped);
 	}
 
 	createSession(config?: IAgentCreateSessionConfig): Promise<URI> {

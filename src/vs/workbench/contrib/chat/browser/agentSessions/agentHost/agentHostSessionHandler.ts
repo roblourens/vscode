@@ -6097,12 +6097,25 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			return directories;
 		}
 		const hostScheme = URI.isUri(defaultDirectory) ? URI.revive(defaultDirectory).scheme : URI.parse(defaultDirectory).scheme;
-		const addressable = directories.filter(directory => this._config.connection.resourceUris.toAgentHost(directory).scheme === hostScheme);
+		const addressable = directories.filter(directory => this._isHostAddressableWorkingDirectory(directory, hostScheme));
 		if (addressable.length === directories.length) {
 			return directories;
 		}
 		this._logService.warn(`[AgentHost] Host addresses '${hostScheme}' working directories; dropping ${directories.length - addressable.length} that it cannot use.`);
 		return addressable.length > 0 ? addressable : undefined;
+	}
+
+	/**
+	 * `vscode-remote:` workspace folders are host-local `file:` URIs after the
+	 * editor's remote AHP transport translates them, so they must not be dropped
+	 * just because the handshake default directory is a `file:` URI.
+	 */
+	private _isHostAddressableWorkingDirectory(directory: URI, hostScheme: string): boolean {
+		const hostLocal = this._config.connection.resourceUris.toAgentHost(directory);
+		if (hostLocal.scheme === hostScheme) {
+			return true;
+		}
+		return hostScheme === Schemas.file && hostLocal.scheme === Schemas.vscodeRemote;
 	}
 
 	/**

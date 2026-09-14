@@ -8,6 +8,7 @@ import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import { extUriBiasedIgnorePathCase } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
+import { fromAgentHostUri } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 import { AgentSession, type IAgentSessionMetadata } from '../../../../../../platform/agentHost/common/agentService.js';
 import { ActionType, type IIsArchivedChangedAction, type IIsReadChangedAction, type INotification, type SessionAction } from '../../../../../../platform/agentHost/common/state/sessionActions.js';
 import { readSessionMatchesByProjectRoot, readSessionMultiRootMetadata, SessionStatus, type SessionSummary } from '../../../../../../platform/agentHost/common/state/sessionState.js';
@@ -434,8 +435,28 @@ export class AgentHostSessionListStore extends Disposable {
 
 	private _matchesAnyFolder(workingDirectories: readonly URI[], folders: readonly IWorkspaceFolder[]): boolean {
 		return workingDirectories.some(directory =>
-			folders.some(folder => extUriBiasedIgnorePathCase.isEqualOrParent(directory, folder.uri))
+			folders.some(folder => this._isDirectoryInFolder(directory, folder.uri))
 		);
+	}
+
+	/**
+	 * Remote-SSH editor windows compare `vscode-remote:` workspace folders with
+	 * host-local `file:` (or `vscode-agent-host:`-wrapped) session directories.
+	 * Treat those as the same location when the path is contained by the folder.
+	 */
+	private _isDirectoryInFolder(directory: URI, folder: URI): boolean {
+		const dir = fromAgentHostUri(directory);
+		const root = fromAgentHostUri(folder);
+		if (extUriBiasedIgnorePathCase.isEqualOrParent(dir, root)) {
+			return true;
+		}
+		if (dir.scheme === Schemas.file && root.scheme === Schemas.vscodeRemote) {
+			return extUriBiasedIgnorePathCase.isEqualOrParent(dir.with({ scheme: Schemas.vscodeRemote, authority: root.authority }), root);
+		}
+		if (dir.scheme === Schemas.vscodeRemote && root.scheme === Schemas.file) {
+			return extUriBiasedIgnorePathCase.isEqualOrParent(dir.with({ scheme: Schemas.file, authority: '' }), root);
+		}
+		return false;
 	}
 
 	/**

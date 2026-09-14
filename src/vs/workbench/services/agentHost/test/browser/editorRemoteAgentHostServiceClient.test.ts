@@ -203,4 +203,46 @@ suite('EditorRemoteAgentHostServiceClient', () => {
 			workingDirectories: directorySets[index],
 		})));
 	});
+
+	test('restores host-local file directories to vscode-remote workspace identities', async () => {
+		const channel: IChannel = {
+			call: <T>() => Promise.resolve(undefined as T),
+			listen: () => Event.None,
+		};
+		const remoteAgentService = new DeferredRemoteAgentService(disposables.add(new TestRemoteAgentConnection(channel)));
+		const hostDirectory = URI.file('/workspace');
+		const workbenchDirectory = URI.parse('vscode-remote://ssh-remote+test/workspace');
+		const sessions: IAgentSessionMetadata[] = [{
+			session: URI.parse('copilot:/session-0'),
+			startTime: 0,
+			modifiedTime: 0,
+			workingDirectory: hostDirectory,
+			workingDirectories: [hostDirectory],
+		}];
+		const instantiationService = disposables.add(new TestInstantiationService(new ServiceCollection(
+			[IRemoteAgentService, remoteAgentService],
+			[IAgentHostEnablementService, { _serviceBrand: undefined, enabled: constObservable(false), managedSandboxEnforced: constObservable(false) }],
+			[ILogService, new NullLogService()],
+			[IWorkbenchEnvironmentService, { isSessionsWindow: false }],
+			[IAgentHostFileSystemService, {
+				_serviceBrand: undefined,
+				registerAuthority: () => Disposable.None,
+				ensureSyncedCustomizationProvider: () => { },
+			}],
+		)));
+		instantiationService.stubInstance(AgentHostProtocolClient, {
+			onDidClose: Event.None,
+			onDidChangeConnectionState: Event.None,
+			listSessions: async () => sessions,
+			dispose: () => { },
+		});
+		instantiationService.set(IInstantiationService, instantiationService);
+		const service = disposables.add(instantiationService.createInstance(EditorRemoteAgentHostServiceClient));
+
+		assert.deepStrictEqual(await service.listSessions(), [{
+			...sessions[0],
+			workingDirectory: workbenchDirectory,
+			workingDirectories: [workbenchDirectory],
+		}]);
+	});
 });

@@ -450,7 +450,7 @@ export class RemoteAgentHostSessionsProvider extends BaseAgentHostSessionsProvid
 	}
 
 	protected override mapWorkingDirectoryUri(uri: URI): URI {
-		return toAgentHostUri(uri, this._connectionAuthority);
+		return uri.scheme === Schemas.file ? toAgentHostUri(uri, this._connectionAuthority) : uri;
 	}
 
 	protected override mapProjectUri(uri: URI): URI {
