@@ -15,7 +15,7 @@ import { FileService } from '../../../files/common/fileService.js';
 import { InMemoryFileSystemProvider } from '../../../files/common/inMemoryFilesystemProvider.js';
 import { NullLogService } from '../../../log/common/log.js';
 import { McpServerType } from '../../../mcp/common/mcpPlatformTypes.js';
-import { toSdkInstructionDirectories, toSdkMcpServers, toSdkCustomAgents, toSdkSessionCustomAgents, toSdkSkillDirectories, parsedPluginsEqual, toSdkHooks, type IPluginAgentsForSdk } from '../../node/copilot/copilotPluginConverters.js';
+import { toSdkInstructionDirectories, toSdkMcpServers, toSdkCustomAgents, toSdkCustomAgentTools, toSdkSessionCustomAgents, toSdkSkillDirectories, parsedPluginsEqual, toSdkHooks, type IPluginAgentsForSdk } from '../../node/copilot/copilotPluginConverters.js';
 import { PluginFormat, type IMcpServerDefinition, type INamedPluginResource, type IParsedHookGroup, type IParsedPlugin, type IParsedSkill } from '../../../agentPlugins/common/pluginParsers.js';
 import { CustomizationType, McpServerStatus, type HookCustomization, type McpServerCustomization, type SkillCustomization } from '../../common/state/protocol/state.js';
 
@@ -208,6 +208,34 @@ suite('copilotPluginConverters', () => {
 		});
 	});
 
+	// ---- toSdkCustomAgentTools ------------------------------------------
+
+	suite('toSdkCustomAgentTools', () => {
+
+		test('empty or missing tools become null (all tools)', () => {
+			assert.strictEqual(toSdkCustomAgentTools(undefined), null);
+			assert.strictEqual(toSdkCustomAgentTools([]), null);
+		});
+
+		test('keeps unrecognized Copilot/VS Code tool names', () => {
+			assert.deepStrictEqual(toSdkCustomAgentTools(['read_file', 'grep_search']), ['read_file', 'grep_search']);
+		});
+
+		test('maps the edit toolset to apply_patch for Codex-family subagent writes', () => {
+			const tools = toSdkCustomAgentTools(['edit']);
+			assert.ok(tools?.includes('edit'));
+			assert.ok(tools?.includes('apply_patch'));
+			assert.ok(tools?.includes('builtin:apply_patch'));
+			assert.ok(tools?.includes('create'));
+		});
+
+		test('maps nested VS Code edit toolsets the same way as edit', () => {
+			const tools = toSdkCustomAgentTools(['edit/editFiles']);
+			assert.ok(tools?.includes('edit/editFiles'));
+			assert.ok(tools?.includes('apply_patch'));
+		});
+	});
+
 	// ---- toSdkCustomAgents ----------------------------------------------
 
 	suite('toSdkCustomAgents', () => {
@@ -270,6 +298,33 @@ suite('copilotPluginConverters', () => {
 				tools: ['read_file', 'grep_search'],
 				prompt: 'You are a meticulous code reviewer.\n',
 			}]);
+		});
+
+		test('expands VS Code edit/read toolsets into Copilot write tools including apply_patch', async () => {
+			const agentUri = URI.from({ scheme: Schemas.inMemory, path: '/agents/architect.md' });
+			await fileService.writeFile(agentUri, VSBuffer.fromString([
+				'---',
+				'name: Architect',
+				'tools:',
+				'  - search/codebase',
+				'  - search/usages',
+				'  - read',
+				'  - edit',
+				'---',
+				'Design software architecture.',
+				'',
+			].join('\n')));
+
+			const result = await toSdkCustomAgents([{ uri: agentUri, name: 'Architect' }], fileService);
+			const tools = result[0].tools;
+
+			assert.ok(tools);
+			assert.ok(tools.includes('edit'));
+			assert.ok(tools.includes('apply_patch'), 'Codex-family writes go through apply_patch (#336338)');
+			assert.ok(tools.includes('builtin:apply_patch'));
+			assert.ok(tools.includes('view'), 'read alias maps to Copilot view');
+			assert.ok(tools.includes('grep'));
+			assert.ok(tools.includes('search/codebase'), 'original VS Code toolset names are kept');
 		});
 
 		test('parses supported reasoning-effort values from frontmatter', async () => {
@@ -457,17 +512,27 @@ suite('copilotPluginConverters', () => {
 			assert.deepStrictEqual(result, [{ name: 'helper', tools: null, prompt: 'Loose agent' }]);
 		});
 
-		test('excludes file-dir plugin agents when none is selected', async () => {
-			const agentUri = URI.from({ scheme: Schemas.inMemory, path: '/plugin/inbox.md' });
-			await fileService.writeFile(agentUri, VSBuffer.fromString('Inbox agent'));
+		test('includes file-dir plugin agents so subagent invocations get the expanded tool allow-list', async () => {
+			const agentUri = URI.from({ scheme: Schemas.inMemory, path: '/plugin/architect.md' });
+			await fileService.writeFile(agentUri, VSBuffer.fromString([
+				'---',
+				'name: Architect',
+				'tools:',
+				'  - read',
+				'  - edit',
+				'---',
+				'Body.',
+			].join('\n')));
 
 			const plugins: IPluginAgentsForSdk[] = [{
-				pluginDir: URI.file('/plugins/inbox'),
-				agents: [{ uri: agentUri, name: 'Inbox' }],
+				pluginDir: URI.file('/plugins/architect'),
+				agents: [{ uri: agentUri, name: 'Architect' }],
 			}];
 			const result = await toSdkSessionCustomAgents(plugins, undefined, fileService);
 
-			assert.deepStrictEqual(result, []);
+			assert.strictEqual(result.length, 1);
+			assert.strictEqual(result[0].name, 'Architect');
+			assert.ok(result[0].tools?.includes('apply_patch'));
 		});
 
 		test('forces the selected file-dir plugin agent into customAgents', async () => {

@@ -5,7 +5,6 @@
 
 import { spawn } from 'child_process';
 import type { CustomAgentConfig, MCPServerConfig, SessionHooks } from '@github/copilot-sdk';
-import { Schemas } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/path.js';
 import { OperatingSystem, OS } from '../../../../base/common/platform.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -123,14 +122,145 @@ function isCustomAgentReasoningEffort(value: string | undefined): value is Custo
 	return customAgentReasoningEfforts.some(reasoningEffort => reasoningEffort === value);
 }
 
+const COPILOT_BUILTIN_TOOL_PREFIX = 'builtin:';
+
+function withCopilotBuiltinAliases(name: string): readonly string[] {
+	return [name, `${COPILOT_BUILTIN_TOOL_PREFIX}${name}`];
+}
+
+const EDIT_SDK_TOOLS = [
+	'apply_patch',
+	'git_apply_patch',
+	'edit',
+	'create',
+	'str_replace',
+	'str_replace_editor',
+	'insert',
+].flatMap(withCopilotBuiltinAliases);
+
+const READ_SDK_TOOLS = [
+	'view',
+].flatMap(withCopilotBuiltinAliases);
+
+const SEARCH_SDK_TOOLS = [
+	'grep',
+	'rg',
+	'glob',
+	'search_code_subagent',
+].flatMap(withCopilotBuiltinAliases);
+
+const EXECUTE_SDK_TOOLS = [
+	'bash',
+	'powershell',
+].flatMap(withCopilotBuiltinAliases);
+
+const WEB_SDK_TOOLS = [
+	'web_search',
+	'web_fetch',
+].flatMap(withCopilotBuiltinAliases);
+
+const AGENT_SDK_TOOLS = [
+	'task',
+	'list_agents',
+	'read_agent',
+].flatMap(withCopilotBuiltinAliases);
+
+const TODO_SDK_TOOLS = [
+	'update_todo',
+].flatMap(withCopilotBuiltinAliases);
+
+/**
+ * Family of a VS Code / Copilot custom-agent tool reference (`edit/editFiles` → `edit`).
+ */
+function customAgentToolFamily(tool: string): string {
+	const name = tool.startsWith(COPILOT_BUILTIN_TOOL_PREFIX)
+		? tool.slice(COPILOT_BUILTIN_TOOL_PREFIX.length)
+		: tool;
+	const slash = name.indexOf('/');
+	return (slash === -1 ? name : name.slice(0, slash)).toLowerCase();
+}
+
+/**
+ * Expands VS Code custom-agent toolset names (`edit`, `read`, `search/codebase`, …)
+ * into the Copilot runtime allow-list.
+ *
+ * Codex-family models (including GPT-5.6 Terra) expose writes as `apply_patch`,
+ * not the `edit`/`str_replace` tools the `edit` alias historically mapped to.
+ * Subagent invocations enforce `CustomAgentConfig.tools` as a policy, so an
+ * unexpanded `edit` entry advertises `apply_patch` while forbidding its use.
+ */
+export function toSdkCustomAgentTools(tools: readonly string[] | undefined): string[] | null {
+	if (!tools || tools.length === 0) {
+		return null;
+	}
+
+	const result: string[] = [];
+	const seen = new Set<string>();
+	const add = (name: string) => {
+		if (name && !seen.has(name)) {
+			seen.add(name);
+			result.push(name);
+		}
+	};
+	const addAll = (names: readonly string[]) => {
+		for (const name of names) {
+			add(name);
+		}
+	};
+
+	for (const tool of tools) {
+		add(tool);
+		switch (customAgentToolFamily(tool)) {
+			case 'edit':
+			case 'write':
+			case 'multiedit':
+			case 'notebookedit':
+				addAll(EDIT_SDK_TOOLS);
+				break;
+			case 'read':
+			case 'notebookread':
+				addAll(READ_SDK_TOOLS);
+				break;
+			case 'search':
+			case 'grep':
+			case 'glob':
+				addAll(SEARCH_SDK_TOOLS);
+				break;
+			case 'execute':
+			case 'shell':
+			case 'bash':
+			case 'powershell':
+				addAll(EXECUTE_SDK_TOOLS);
+				break;
+			case 'web':
+			case 'websearch':
+			case 'webfetch':
+				addAll(WEB_SDK_TOOLS);
+				break;
+			case 'agent':
+			case 'custom-agent':
+			case 'task':
+				addAll(AGENT_SDK_TOOLS);
+				break;
+			case 'todo':
+			case 'todowrite':
+				addAll(TODO_SDK_TOOLS);
+				break;
+		}
+	}
+
+	return result;
+}
+
 /**
  * Converts parsed plugin agents into the SDK's `customAgents` config.
  *
  * Each agent file is read and (when present) its YAML frontmatter is parsed:
  *  - `name` falls back to the agent's resource name (filename stem).
  *  - `description` is forwarded verbatim.
- *  - `tools` is forwarded as the SDK's allow-list; an empty / missing array
- *    becomes `null` so the SDK grants the agent access to all tools.
+ *  - `tools` is expanded into the SDK's allow-list (VS Code `edit` includes
+ *    `apply_patch`); an empty / missing array becomes `null` so the SDK
+ *    grants the agent access to all tools.
  *  - `reasoning-effort` is forwarded when it is a supported runtime value.
  *  - `prompt` is the markdown body that follows the frontmatter (or the
  *    full file content when there is no frontmatter).
@@ -173,7 +303,7 @@ export async function toSdkCustomAgents(agents: readonly INamedPluginResource[],
 					...(description ? { description } : {}),
 					...(model ? { model } : {}),
 					...(isCustomAgentReasoningEffort(reasoningEffort) ? { reasoningEffort } : {}),
-					tools: tools && tools.length > 0 ? tools : null,
+					tools: toSdkCustomAgentTools(tools),
 					...(skills !== undefined ? { skills } : {}),
 					...(infer !== undefined ? { infer } : {}),
 					prompt,
@@ -195,23 +325,27 @@ export interface IPluginAgentsForSdk {
 /**
  * Builds the SDK's `customAgents` config for a session.
  *
- * Agents contributed by plugins materialized into an on-disk (file-scheme)
- * directory are normally left out of `customAgents` and discovered by the SDK
- * through `pluginDirectories` instead, to avoid duplicates. However, the SDK
- * validates the session-start `agent:` option against `customAgents` *by name
- * only* — it does NOT consult `pluginDirectories`. So a selected plugin or
- * extension agent (e.g. one chosen in the agent picker) would otherwise fail
- * with "Custom agent '<name>' not found". This forces the resolved selection
- * into `customAgents` so it can be activated, while every other file-dir agent
- * continues to load via `pluginDirectories`.
+ * Every discovered custom agent is projected here — including workspace
+ * `.github/agents/` files that the SDK also loads from `pluginDirectories`.
+ * Subagent invocations enforce `CustomAgentConfig.tools` as the invocation
+ * policy, so they must see the host-expanded Copilot allow-list (`edit` →
+ * `apply_patch`) rather than the raw VS Code toolset names from disk.
+ *
+ * The SDK still validates session-start `agent:` against `customAgents` by
+ * name only. If the resolved selection is missing (resource name vs
+ * frontmatter name), it is force-included like before.
  */
 export async function toSdkSessionCustomAgents(
 	plugins: readonly IPluginAgentsForSdk[],
 	resolvedAgentName: string | undefined,
 	fileService: IFileService,
 ): Promise<CustomAgentConfig[]> {
-	const pluginsWithoutDirs = plugins.filter(p => !p.pluginDir || p.pluginDir.scheme !== Schemas.file);
-	const customAgents = await toSdkCustomAgents(pluginsWithoutDirs.flatMap(p => p.agents), fileService);
+	const customAgents: CustomAgentConfig[] = [];
+	for (const config of await toSdkCustomAgents(plugins.flatMap(p => p.agents), fileService)) {
+		if (!customAgents.some(agent => agent.name === config.name)) {
+			customAgents.push(config);
+		}
+	}
 	if (resolvedAgentName && !customAgents.some(agent => agent.name === resolvedAgentName)) {
 		const selectedAgents = plugins.flatMap(p => p.agents).filter(agent => agent.name === resolvedAgentName);
 		for (const config of await toSdkCustomAgents(selectedAgents, fileService)) {

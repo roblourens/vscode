@@ -878,10 +878,11 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			}
 			shellTools = await createShellTools(plan.shellManager, runtime.chatUri, this._terminalManager, this._logService, request => runtime.requestUnsandboxedCommandConfirmation(request));
 		}
-		// Rely on the SDK to discover most agents/skills/etc. from `pluginDirectories`
-		// instead of feeding them explicitly, to avoid duplicates. Custom agents are the
-		// exception: the SDK validates the session-start `agent:` against `customAgents`
-		// by name, so the selected agent is force-included (see `toSdkSessionCustomAgents`).
+		// Skills/hooks still come from `pluginDirectories` to avoid duplicates.
+		// Custom agents are projected into `customAgents` so subagent invocations
+		// receive the host-expanded Copilot tool allow-list (`edit` includes
+		// `apply_patch`). The SDK also validates session-start `agent:` against
+		// `customAgents` by name (see `toSdkSessionCustomAgents`).
 		const pluginsWithoutDirs = plugins.filter(p => !p.pluginDir || p.pluginDir.scheme !== Schemas.file);
 		const explicitMcpServers = plan.isEphemeral ? [] : plugins.flatMap(plugin => plugin.mcpServers.filter(server =>
 			!plugin.disabledMcpServers?.includes(server.name)
