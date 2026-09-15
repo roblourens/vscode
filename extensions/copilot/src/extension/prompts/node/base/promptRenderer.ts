@@ -16,6 +16,7 @@ import { ITokenizerProvider } from '../../../../platform/tokenizer/node/tokenize
 import { createServiceIdentifier } from '../../../../util/common/services';
 import { isLocation } from '../../../../util/common/types';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
+import { CancellationError } from '../../../../util/vs/base/common/errors';
 import { URI } from '../../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { ServiceCollection } from '../../../../util/vs/platform/instantiation/common/serviceCollection';
@@ -25,6 +26,35 @@ import { getUniqueReferences, PromptReference } from '../../../prompt/common/con
 import { IBuildPromptContext } from '../../../prompt/common/intents';
 import { IIntent } from '../../../prompt/node/intents';
 import { PromptElementCtor } from './promptElement';
+
+const INSTANTIATION_SERVICE_DISPOSED_MESSAGE = 'InstantiationService has been disposed';
+
+function isInstantiationServiceDisposedError(error: unknown): boolean {
+	return error instanceof Error && error.message === INSTANTIATION_SERVICE_DISPOSED_MESSAGE;
+}
+
+function rethrowAsCancellationIfDisposed(error: unknown): never {
+	if (isInstantiationServiceDisposedError(error)) {
+		throw new CancellationError();
+	}
+	throw error;
+}
+
+function createInstanceOrCancelIfDisposed(instantiationService: IInstantiationService, ctor: any, props: unknown, args: any[]): any {
+	try {
+		return instantiationService.createInstance(ctor, props, ...args);
+	} catch (error) {
+		rethrowAsCancellationIfDisposed(error);
+	}
+}
+
+async function renderOrCancelIfDisposed<T>(render: () => Promise<T>): Promise<T> {
+	try {
+		return await render();
+	} catch (error) {
+		rethrowAsCancellationIfDisposed(error);
+	}
+}
 
 /**
  * Allows us to use dependency injection to pass the fully fledged IChatEndpoint to the prompt element being rendered.
@@ -97,11 +127,12 @@ export class PromptRenderer<P extends BasePromptElementProps> extends BasePrompt
 	}
 
 	override createElement(element: QueueItem<PromptElementCtor<P, any>, P>, ...args: any[]) {
-		return this._instantiationService.createInstance(element.ctor, element.props, ...args);
+		// Parent/child InstantiationService may dispose while prompt-tsx is still walking the tree.
+		return createInstanceOrCancelIfDisposed(this._instantiationService, element.ctor, element.props, args);
 	}
 
 	override async render(progress?: Progress<ChatResponsePart> | undefined, token?: CancellationToken | undefined, opts?: Partial<{ trace: boolean }>): Promise<RenderPromptResult> {
-		const result = await super.render(progress, token);
+		const result = await renderOrCancelIfDisposed(() => super.render(progress, token));
 		const defaultOptions = { trace: true };
 		opts = { ...defaultOptions, ...opts };
 		if (this.tracer && !!opts.trace) {
@@ -151,7 +182,7 @@ export class PromptRenderer<P extends BasePromptElementProps> extends BasePrompt
 	}
 
 	async countTokens(token?: CancellationToken): Promise<number> {
-		const result = await super.render(undefined, token);
+		const result = await renderOrCancelIfDisposed(() => super.render(undefined, token));
 		return result.tokenCount;
 	}
 }
@@ -198,7 +229,7 @@ class PromptRendererForJSON<P extends BasePromptElementProps> extends BasePrompt
 	}
 
 	override createElement(element: QueueItem<PromptElementCtor<P, any>, P>, ...args: any[]) {
-		return this.instantiationService.createInstance(element.ctor, element.props, ...args);
+		return createInstanceOrCancelIfDisposed(this.instantiationService, element.ctor, element.props, args);
 	}
 }
 
