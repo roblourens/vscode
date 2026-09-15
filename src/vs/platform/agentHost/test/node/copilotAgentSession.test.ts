@@ -11862,6 +11862,22 @@ Use the attached image as context.
 			assert.strictEqual(result.resultType, 'success');
 		});
 
+		test('hasPendingClientToolCall is true only while the SDK handler is parked', async () => {
+			const { session, runtime } = await createAgentSession(disposables, { clientSnapshot: snapshot });
+			const tools = runtime.createClientSdkTools();
+			const handlerPromise = invokeClientToolHandler(tools[0], 'tc-parked-query');
+
+			assert.strictEqual(session.hasPendingClientToolCall('tc-parked-query'), true);
+			assert.strictEqual(session.hasPendingClientToolCall('tc-other'), false);
+
+			session.handleClientToolCallComplete('tc-parked-query', {
+				success: true,
+				pastTenseMessage: 'done',
+			});
+			await handlerPromise;
+			assert.strictEqual(session.hasPendingClientToolCall('tc-parked-query'), false);
+		});
+
 		test('handleClientToolCallComplete with failure result', async () => {
 			const { session, runtime } = await createAgentSession(disposables, { clientSnapshot: snapshot });
 

@@ -61,7 +61,7 @@ import type { ErrorInfo } from '../../common/state/protocol/common/state.js';
 import { ProtectedResourceMetadata, type AgentSelection, type ChildCustomizationType, type ConfigPropertySchema, type ConfigSchema, type CustomizationEnablement, type ModelSelection, type ToolDefinition } from '../../common/state/protocol/state.js';
 import { ActionType, AuthRequiredReason, type AuthRequiredParams, type SessionAction } from '../../common/state/sessionActions.js';
 import { areAdditionalWorkingDirectoriesEqual } from '../../common/state/sessionWorkingDirectories.js';
-import { AgentCustomization, CustomizationLoadStatus, CustomizationType, RuleCustomization, ChatInputResponseKind, SkillCustomization, customizationId, buildChatUri, buildDefaultChatUri, AH_META_WORKSPACELESS_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_EHCLI_LAST_TURN_DB_KEY, AH_META_IS_READ_DB_KEY, isDefaultChatUri, withSessionEhcliAdoptable, type ChildCustomization, type ClientPluginCustomization, type Customization, type DirectoryCustomization, type HookCustomization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type PluginCustomization, type PolicyState, type ChatInputAnswer, type ToolCallResult, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
+import { AgentCustomization, CustomizationLoadStatus, CustomizationType, RuleCustomization, ChatInputResponseKind, SkillCustomization, customizationId, buildChatUri, buildDefaultChatUri, AH_META_WORKSPACELESS_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_EHCLI_LAST_TURN_DB_KEY, AH_META_IS_READ_DB_KEY, isAhpChatChannel, isDefaultChatUri, parseChatUri, withSessionEhcliAdoptable, type ChildCustomization, type ClientPluginCustomization, type Customization, type DirectoryCustomization, type HookCustomization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type PluginCustomization, type PolicyState, type ChatInputAnswer, type ToolCallResult, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
 import { getByokLmAgentModelId, resolveByokLmEnablement } from '../../common/agentHostByokLm.js';
 import { isCustomizationEnabled } from '../../common/customizationEnablement.js';
 import { ActiveClientToolSet, structuralToolsEqual } from '../activeClientState.js';
@@ -3094,19 +3094,39 @@ export class CopilotAgent extends Disposable implements IAgent {
 	// {@link IAgent.chats}). The orchestrator owns the feature-level
 	// `(session, chat)` mapping and hands these methods a single, concrete chat
 	// channel URI plus transient context when the operation needs the owning
-	// session or storage scope. Routing reads only the exact chat backing map
-	// and never recovers ownership by parsing the chat URI.
+	// session or storage scope. Routing prefers the exact chat backing map.
+	// Client-tool completions also recover a live/pending runtime when the
+	// backing key is equivalent, the SDK session is still initializing, or a
+	// parked handler already owns that toolCallId — otherwise the SDK waits
+	// forever after AgentSideEffects has already forwarded the result.
 
 	/** Exact Copilot SDK session-id lookup; use chat-based helpers for routing. */
 	private _findSessionBySdkId(sdkSessionId: string): CopilotAgentSession | undefined {
-		return this._chatEntriesBySdkId.get(sdkSessionId)?.chatSession;
+		const live = this._chatEntriesBySdkId.get(sdkSessionId)?.chatSession;
+		if (live) {
+			return live;
+		}
+		for (const session of this._sessionsPendingRegistration.values()) {
+			if (session.sessionId === sdkSessionId) {
+				return session;
+			}
+		}
+		return undefined;
+	}
+
+	/** Live and still-initializing chats that can receive host callbacks. */
+	private *_iterRoutableSessions(): IterableIterator<CopilotAgentSession> {
+		yield* this._sessionsPendingRegistration.values();
+		for (const entry of this._chatEntriesBySdkId.values()) {
+			yield entry.chatSession;
+		}
 	}
 
 	/** Returns the live chat whose persistence scope is the session itself. */
 	private _findSessionChat(session: URI): CopilotAgentSession | undefined {
-		for (const entry of this._chatEntriesBySdkId.values()) {
-			if (isEqual(entry.chatSession.resourceUri, session)) {
-				return entry.chatSession;
+		for (const chatSession of this._iterRoutableSessions()) {
+			if (chatSession.resourceUri && isEqual(chatSession.resourceUri, session)) {
+				return chatSession;
 			}
 		}
 		return undefined;
@@ -3114,8 +3134,57 @@ export class CopilotAgent extends Disposable implements IAgent {
 
 	private _findChatByUri(chat: URI | string): CopilotAgentSession | undefined {
 		const chatKey = typeof chat === 'string' ? chat : chat.toString();
-		const backing = this._chatBackings.get(chatKey);
-		return backing ? this._findSessionBySdkId(backing.sdkSessionId) : undefined;
+		const backing = this._findChatBacking(chatKey);
+		if (backing) {
+			const bound = this._findSessionBySdkId(backing.sdkSessionId);
+			if (bound) {
+				return bound;
+			}
+		}
+		for (const session of this._iterRoutableSessions()) {
+			if (session.chatUri && this._chatKeysMatch(session.chatUri.toString(), chatKey)) {
+				return session;
+			}
+		}
+		if (!isAhpChatChannel(chatKey)) {
+			return this._findChatByUri(buildDefaultChatUri(chatKey));
+		}
+		return undefined;
+	}
+
+	private _findChatBacking(chatKey: string): IPersistedChat | undefined {
+		const exact = this._chatBackings.get(chatKey);
+		if (exact) {
+			return exact;
+		}
+		const parsed = parseChatUri(chatKey);
+		if (!parsed) {
+			return undefined;
+		}
+		for (const [key, backing] of this._chatBackings) {
+			if (this._chatKeysMatch(key, chatKey)) {
+				return backing;
+			}
+		}
+		return undefined;
+	}
+
+	private _chatKeysMatch(a: string, b: string): boolean {
+		if (a === b) {
+			return true;
+		}
+		const parsedA = parseChatUri(a);
+		const parsedB = parseChatUri(b);
+		return !!parsedA && !!parsedB && parsedA.session === parsedB.session && parsedA.chatId === parsedB.chatId;
+	}
+
+	private _findSessionWithPendingClientTool(toolCallId: string): CopilotAgentSession | undefined {
+		for (const session of this._iterRoutableSessions()) {
+			if (session.hasPendingClientToolCall?.(toolCallId)) {
+				return session;
+			}
+		}
+		return undefined;
 	}
 
 	private _findBoundSessionChatUri(sessionId: string): URI | undefined {
@@ -4143,8 +4212,13 @@ export class CopilotAgent extends Disposable implements IAgent {
 		const spawnedFrom = resolveSubagentChatParent(context);
 		const target = this._findChatByUri(chat)
 			?? (spawnedFrom ? this._findChatByUri(spawnedFrom.chat) : undefined)
+			?? this._findSessionWithPendingClientTool(toolCallId)
 			?? (context ? this._findSessionChat(context.configurationResource) : undefined);
-		target?.handleClientToolCallComplete(toolCallId, result);
+		if (!target) {
+			this._logService.warn(`[Copilot] No session for client tool completion: chat=${chat.toString()}, toolCallId=${toolCallId}`);
+			return;
+		}
+		target.handleClientToolCallComplete(toolCallId, result);
 	}
 
 	private async _sendMessage(chat: URI, prompt: string, attachments?: readonly MessageAttachment[], turnId?: string, senderClientId?: string, clientType = AgentHostClientType.Unknown, workingDirectories?: readonly URI[], operationContext?: URI | IAgentChatContext, clientTelemetryContext?: IAgentHostClientTelemetryContext): Promise<void> {

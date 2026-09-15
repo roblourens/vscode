@@ -11158,6 +11158,62 @@ suite('CopilotAgent', () => {
 				await disposeAgent(agent);
 			}
 		});
+
+		test('routes a parked client tool when the addressed chat has no backing', async () => {
+			// Regression for vscode#336241: AgentSideEffects forwards the
+			// completion, but chat-URI lookup can miss (peer vs default, encoding,
+			// init window). Permission responses already scan live sessions;
+			// completions must too, or the SDK handler waits forever.
+			const agent = createTestAgent(disposables);
+			try {
+				const sessionUri = AgentSession.uri('copilotcli', 'session-parked-tool');
+				const parkedChat = URI.parse(buildChatUri(sessionUri, 'peer-parked'));
+				const lookupChat = URI.parse(buildChatUri(sessionUri, 'peer-missing'));
+				const calls: { toolCallId: string; result: ToolCallResult }[] = [];
+				setPeerChatStub(agent, parkedChat, {
+					handleClientToolCallComplete(toolCallId: string, result: ToolCallResult) { calls.push({ toolCallId, result }); },
+					hasPendingClientToolCall(toolCallId: string) { return toolCallId === 'tc-parked'; },
+					dispose() { },
+				});
+
+				const result: ToolCallResult = { success: true, pastTenseMessage: 'parked done' };
+				agent.onClientToolCallComplete(lookupChat, 'tc-parked', result, {
+					configurationResource: sessionUri,
+					resource: lookupChat,
+				});
+
+				assert.deepStrictEqual(calls, [{ toolCallId: 'tc-parked', result }]);
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+
+		test('routes through a session that is still pending live registration', async () => {
+			const agent = createTestAgent(disposables);
+			try {
+				const sessionUri = AgentSession.uri('copilotcli', 'session-pending-reg');
+				const sessionId = AgentSession.id(sessionUri);
+				const defaultChat = URI.parse(buildDefaultChatUri(sessionUri));
+				const calls: { toolCallId: string; result: ToolCallResult }[] = [];
+				const stub = {
+					sessionId,
+					sessionUri,
+					resourceUri: sessionUri,
+					chatUri: defaultChat,
+					handleClientToolCallComplete(toolCallId: string, result: ToolCallResult) { calls.push({ toolCallId, result }); },
+					dispose() { },
+				};
+				chatBackings(agent).set(defaultChat.toString(), { sdkSessionId: sessionId });
+				(agent as unknown as { _sessionsPendingRegistration: { add(value: unknown): void } })._sessionsPendingRegistration.add(stub);
+
+				const result: ToolCallResult = { success: true, pastTenseMessage: 'pending done' };
+				agent.onClientToolCallComplete(defaultChat, 'tc-pending', result);
+
+				assert.deepStrictEqual(calls, [{ toolCallId: 'tc-pending', result }]);
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
 	});
 
 	suite('exact chat routing and lifecycle', () => {

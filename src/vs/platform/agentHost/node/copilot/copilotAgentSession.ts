@@ -2351,6 +2351,11 @@ export class CopilotAgentSession extends Disposable {
 		}));
 	}
 
+	/** Whether the SDK handler is currently parked waiting for this client tool id. */
+	hasPendingClientToolCall(toolCallId: string): boolean {
+		return this._pendingClientToolCalls.has(toolCallId);
+	}
+
 	/**
 	 * Resolves a pending client tool call. If the SDK handler has not yet
 	 * registered for `toolCallId`, the result is buffered so the handler
@@ -2362,6 +2367,7 @@ export class CopilotAgentSession extends Disposable {
 			this._activeToolCalls.delete(toolCallId);
 			return;
 		}
+		this._logService.info(`[Copilot:${this.sessionId}] Accepting client tool completion: toolCallId=${toolCallId}, parked=${this._pendingClientToolCalls.has(toolCallId)}`);
 		const textContent = result.content
 			?.filter(c => c.type === ToolResultContentType.Text)
 			.map(c => c.text)
