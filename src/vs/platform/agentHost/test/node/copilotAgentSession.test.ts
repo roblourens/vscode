@@ -6861,6 +6861,36 @@ Use the attached image as context.
 			await steeringPromise;
 		});
 
+		test('waits for the in-flight prompt to reach the SDK before sending steering (#336305)', async () => {
+			const sendGate = new DeferredPromise<void>();
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configureMockSession: mockSession => {
+					mockSession.sendGate = sendGate.p;
+				},
+			});
+
+			const sendPromise = session.send('original prompt', undefined, 'turn-1');
+			while (mockSession.sendRequests.length === 0) {
+				await timeout(0);
+			}
+			assert.deepStrictEqual(mockSession.sendRequests, [{
+				prompt: 'original prompt',
+				attachments: undefined,
+			}]);
+
+			const steeringPromise = session.sendSteering({ id: 'steer-1', message: { text: 'focus on tests', origin: { kind: MessageKind.User } } });
+			await timeout(0);
+			assert.strictEqual(mockSession.sendRequests.length, 1, 'steering must not send until the original prompt is accepted');
+
+			sendGate.complete();
+			await sendPromise;
+			await steeringPromise;
+			assert.deepStrictEqual(mockSession.sendRequests, [
+				{ prompt: 'original prompt', attachments: undefined },
+				{ prompt: 'focus on tests', attachments: undefined, mode: 'immediate' },
+			]);
+		});
+
 		test('promotes steering when the SDK idles before echoing it', async () => {
 			const { session, mockSession, signals } = await createAgentSession(disposables);
 			session.resetTurnState('turn-original');

@@ -1078,6 +1078,23 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _mcpServerLifecycleSequencer = new SequencerByKey<string>();
 	private readonly _steeringMessagesInFlight = new Set<string>();
 	/**
+	 * In-flight `send()` / `resume()` dispatch, from preflight through the
+	 * SDK accepting the prompt. Steering must not call `session.send()` until
+	 * this settles: `mode: 'immediate'` on an idle loop is recorded as
+	 * `delivery: idle` and starts a separate turn (#336305).
+	 */
+	private _turnDispatchInFlight: Promise<void> | undefined;
+	/**
+	 * True while the Copilot SDK agentic loop is processing this chat. Set
+	 * when `session.send()` / continuation / fleet start returns, cleared on
+	 * `session.idle`. Distinct from the protocol turn: the host can still
+	 * have an open turn while the SDK has already gone idle.
+	 */
+	private _sdkLoopActive = false;
+	/** True once this session has started an SDK loop at least once. */
+	private _sdkLoopEverStarted = false;
+	private readonly _sdkLoopWaiters: DeferredPromise<void>[] = [];
+	/**
 	 * Steering messages that have been accepted by the SDK but not yet
 	 * surfaced to the chat UI as a separate user message. When the SDK
 	 * echoes a steering through a `user.message` event whose `content`
@@ -1938,6 +1955,7 @@ export class CopilotAgentSession extends Disposable {
 			this._resumingTurnAwaitingProviderStart = undefined;
 		}
 		this._currentTurn.clear();
+		this._notifySdkLoopWaiters();
 		this._agentMergeTurn = false;
 		this._streamingToolCalls.clear();
 		this._streamingToolDisplaySchedulers.clearAndDisposeAll();
@@ -2805,22 +2823,27 @@ export class CopilotAgentSession extends Disposable {
 		if (this._tryStartDevelopmentRecoverableError(prompt)) {
 			return;
 		}
-		try {
-			await this._send(prompt, attachments, mode);
-		} catch (err) {
-			// A rejected send never reaches the SDK's agentic loop, so no
-			// `session.idle` will ever arrive to close this turn. The host turns
-			// the rejection into a `ChatError` that finalizes the protocol turn,
-			// so drop our handle to match: leaving it set makes the chat look
-			// busy forever, which blocks idle eviction and parks any deferred
-			// client restart for the rest of the process's life.
-			if (turn && this._currentTurn.value === turn) {
-				this._clearActiveTurn();
+		// Teardown on rejection must run inside the tracked dispatch so
+		// steering waiters (#336305) don't observe a still-open turn after
+		// `session.send()` failed.
+		await this._trackTurnDispatch(async () => {
+			try {
+				await this._send(prompt, attachments, mode);
+			} catch (err) {
+				// A rejected send never reaches the SDK's agentic loop, so no
+				// `session.idle` will ever arrive to close this turn. The host turns
+				// the rejection into a `ChatError` that finalizes the protocol turn,
+				// so drop our handle to match: leaving it set makes the chat look
+				// busy forever, which blocks idle eviction and parks any deferred
+				// client restart for the rest of the process's life.
+				if (turn && this._currentTurn.value === turn) {
+					this._clearActiveTurn();
+				}
+				this._hostInstructions = undefined;
+				this._pendingSnapshotReminder = undefined;
+				throw err;
 			}
-			this._hostInstructions = undefined;
-			this._pendingSnapshotReminder = undefined;
-			throw err;
-		}
+		});
 	}
 
 	handleUserPromptSubmitted(): { readonly additionalContext: string } | undefined {
@@ -3022,6 +3045,7 @@ export class CopilotAgentSession extends Disposable {
 				}
 				return this._wrapper.session.send({ prompt, attachments: sdkAttachments?.length ? sdkAttachments : undefined });
 			});
+			this._markSdkLoopActive();
 			sendingTurn?.markProviderCallResolved();
 		} catch (error) {
 			sendingTurn?.markProviderCallRejected();
@@ -3040,22 +3064,25 @@ export class CopilotAgentSession extends Disposable {
 		const turn = this._currentTurn.value;
 		this._resumingTurnAwaitingProviderStart = turn;
 		turn?.markProviderCallPending();
-		try {
-			await this._prepareSdkTurn(mode);
-			const traceContext = this._otelService.getSessionTraceContext(this.sessionId, this.resourceUri.toString());
-			await this._otelService.withTraceContext(traceContext, () => this._wrapper.session.rpc.sendMessages({ messages: [] }));
-			turn?.markProviderCallResolved();
-			this._logService.info(`[Copilot:${this.sessionId}] zero-message continuation returned`);
-		} catch (error) {
-			if (this._resumingTurnAwaitingProviderStart === turn) {
-				this._resumingTurnAwaitingProviderStart = undefined;
+		await this._trackTurnDispatch(async () => {
+			try {
+				await this._prepareSdkTurn(mode);
+				const traceContext = this._otelService.getSessionTraceContext(this.sessionId, this.resourceUri.toString());
+				await this._otelService.withTraceContext(traceContext, () => this._wrapper.session.rpc.sendMessages({ messages: [] }));
+				this._markSdkLoopActive();
+			} catch (error) {
+				if (this._resumingTurnAwaitingProviderStart === turn) {
+					this._resumingTurnAwaitingProviderStart = undefined;
+				}
+				if (turn && this._currentTurn.value === turn) {
+					turn.markProviderCallRejected();
+					this._clearActiveTurn();
+				}
+				throw error;
 			}
-			if (turn && this._currentTurn.value === turn) {
-				turn.markProviderCallRejected();
-				this._clearActiveTurn();
-			}
-			throw error;
-		}
+		});
+		turn?.markProviderCallResolved();
+		this._logService.info(`[Copilot:${this.sessionId}] zero-message continuation returned`);
 	}
 
 	private _tryStartDevelopmentRecoverableError(prompt: string): boolean {
@@ -3229,6 +3256,7 @@ export class CopilotAgentSession extends Disposable {
 			// Promote the turn to `running` now so an abort before the first SDK event
 			// tears it down instead of stranding a `pending` turn.
 			startingTurn.markRunning();
+			this._markSdkLoopActive();
 			this._logService.info(`[Copilot:${this.sessionId}] rpc.fleet.start succeeded; retaining turn until session idle`);
 			return;
 		}
@@ -3396,9 +3424,20 @@ export class CopilotAgentSession extends Disposable {
 		this._steeringMessagesInFlight.add(steeringMessage.id);
 		this._logService.info(`[Copilot:${this.sessionId}] Sending steering message: "${steeringMessage.message.text.substring(0, 100)}"`);
 		try {
+			await this._waitForSdkLoopToAcceptSteering();
+			if (this._store.isDisposed) {
+				return;
+			}
 			await this._reconcileMcpServerEnablement();
-			this._pendingSteeringFlips.set(steeringMessage.id, steeringMessage);
 			const sdkAttachments = await this._toSdkAttachments(steeringMessage.message.attachments);
+			// MCP reconcile / attachment mapping can outlive the original
+			// agentic loop; wait again so `mode: 'immediate'` still lands
+			// on an active loop (#336305).
+			await this._waitForSdkLoopToAcceptSteering();
+			if (this._store.isDisposed) {
+				return;
+			}
+			this._pendingSteeringFlips.set(steeringMessage.id, steeringMessage);
 			// Steering is injected into the active turn and never fires the SDK's `user-prompt-submitted`
 			// hook, so the read-only snapshot signal can't ride `additionalContext` here. Fold it into the
 			// prompt as a `<reminder>` block instead: the runtime forwards it to the model, and the host's
@@ -3417,6 +3456,77 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.error(`[Copilot:${this.sessionId}] Steering message failed`, err);
 		} finally {
 			this._steeringMessagesInFlight.delete(steeringMessage.id);
+		}
+	}
+
+	/**
+	 * `mode: 'immediate'` is a no-op-as-new-turn when the Copilot SDK loop is
+	 * idle (`delivery: idle`). Wait until the in-flight prompt has been
+	 * accepted — or until the protocol turn ends, if the loop already went
+	 * idle — so steering injects into the active turn instead of starting a
+	 * concatenated follow-up (#336305).
+	 */
+	private async _waitForSdkLoopToAcceptSteering(): Promise<void> {
+		while (!this._store.isDisposed) {
+			if (this._turnDispatchInFlight) {
+				this._logService.info(`[Copilot:${this.sessionId}] Deferring steering until the in-flight prompt reaches the SDK`);
+				await this._turnDispatchInFlight;
+				continue;
+			}
+			if (this._sdkLoopEverStarted && !this._sdkLoopActive && this._currentTurn.value?.isRunning) {
+				this._logService.info(`[Copilot:${this.sessionId}] Deferring steering until the SDK loop is active or the current turn ends`);
+				await this._whenSdkLoopActiveOrTurnCleared();
+				continue;
+			}
+			return;
+		}
+	}
+
+	private async _trackTurnDispatch(run: () => Promise<void>): Promise<void> {
+		let settle!: () => void;
+		const tracked = new Promise<void>(resolve => { settle = resolve; });
+		this._turnDispatchInFlight = tracked;
+		try {
+			await run();
+		} finally {
+			settle();
+			if (this._turnDispatchInFlight === tracked) {
+				this._turnDispatchInFlight = undefined;
+			}
+		}
+	}
+
+	private _markSdkLoopActive(): void {
+		this._sdkLoopEverStarted = true;
+		this._sdkLoopActive = true;
+		this._notifySdkLoopWaiters();
+	}
+
+	private _markSdkLoopInactive(): void {
+		this._sdkLoopActive = false;
+	}
+
+	private _whenSdkLoopActiveOrTurnCleared(): Promise<void> {
+		if (this._sdkLoopActive || !this._currentTurn.value) {
+			return Promise.resolve();
+		}
+		const waiter = new DeferredPromise<void>();
+		this._sdkLoopWaiters.push(waiter);
+		// Re-check after enqueue so a turn-clear / loop-active that raced
+		// the first check cannot leave this waiter stranded.
+		if (this._sdkLoopActive || !this._currentTurn.value) {
+			this._notifySdkLoopWaiters();
+		}
+		return waiter.p;
+	}
+
+	private _notifySdkLoopWaiters(): void {
+		if (this._sdkLoopWaiters.length === 0) {
+			return;
+		}
+		const waiters = this._sdkLoopWaiters.splice(0);
+		for (const waiter of waiters) {
+			waiter.complete();
 		}
 	}
 
@@ -3522,6 +3632,7 @@ export class CopilotAgentSession extends Disposable {
 	 * backstop, since {@link _beginAbort} no-ops when already aborted.
 	 */
 	override dispose(): void {
+		this._notifySdkLoopWaiters();
 		void this._editTracker.flushAttribution().catch(error => {
 			this._logService.warn(`[Copilot:${this.sessionId}] Failed to flush edit attribution: ${error}`);
 		});
@@ -5588,6 +5699,7 @@ export class CopilotAgentSession extends Disposable {
 		}));
 
 		this._register(wrapper.onIdle(async e => {
+			this._markSdkLoopInactive();
 			this._logService.info(`[Copilot:${sessionId}] Session idle`);
 			const abortingTurn = this._abortingTurn;
 			this._abortingTurn = undefined;
