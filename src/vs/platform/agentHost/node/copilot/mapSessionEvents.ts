@@ -14,6 +14,7 @@ import { AgentSession } from '../../common/agent.js';
 import { stripRedundantCdPrefix } from '../../common/commandLineHelpers.js';
 import { toToolCallMeta, type IToolCallUiMeta, type ToolKind } from '../../common/meta/agentToolCallMeta.js';
 import { IFileEditRecord, ISessionDatabase } from '../../common/sessionDataService.js';
+import { createOversizedToolBatchError, isOversizedToolCallBatch } from '../../common/toolCallBatchLimit.js';
 import { MessageAttachmentKind, type MessageAttachment } from '../../common/state/protocol/state.js';
 import { createErrorResponsePart, MessageKind, ResponsePartKind, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallStatus, ToolResultContentType, TurnState, buildSubagentSessionUri, parseChatUri, type AgentSelection, type ErrorInfo, type Message, type ModelSelection, type ResponsePart, type StringOrMarkdown, type TerminalCommandResult, type ToolCallCompletedState, type ToolResultContent, type ToolResultTerminalContent, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
 import { buildNonPtyShellTerminalUri } from './copilotNonPtyShellTerminals.js';
@@ -187,6 +188,8 @@ interface ITurnBuilder {
 	usage: UsageInfo | undefined;
 	/** Tool starts seen but not yet completed in this turn, keyed by toolCallId. */
 	readonly pendingTools: Map<string, IToolStartInfo>;
+	/** When set, skip further tool response parts for an oversized per-response batch. */
+	omitToolCallParts?: boolean;
 }
 
 export interface IMapSessionEventsOptions {
@@ -666,7 +669,17 @@ export async function mapSessionEvents(
 					parentTurnState = hasToolRequests ? TurnState.Cancelled : TurnState.Complete;
 				}
 				if (d.toolRequests?.length) {
-					appendFallbackToolRequests(builder, d.toolRequests, parentToolCallId);
+					if (isOversizedToolCallBatch(d.toolRequests.length)) {
+						builder.omitToolCallParts = true;
+						builder.responseParts.push(createErrorResponsePart(createOversizedToolBatchError(d.toolRequests.length), true));
+						if (!parentToolCallId && builder === parentBuilder && !parentTurnTerminated) {
+							parentTurnState = TurnState.Error;
+							parentTurnTerminated = true;
+							rootRequestActive = false;
+						}
+					} else {
+						appendFallbackToolRequests(builder, d.toolRequests, parentToolCallId);
+					}
 				}
 				break;
 			}
@@ -768,6 +781,9 @@ export async function mapSessionEvents(
 				if (!builder) {
 					// No active turn to attach this completion to.
 					continue;
+				}
+				if (builder.omitToolCallParts) {
+					break;
 				}
 				const completedPart = makeCompletedToolCallPart(d, info, sessionUriStr, providerId, rawSessionId, routingChatUri, storedEdits, subagentInfoByToolCallId.get(d.toolCallId), workingDirectory, resolveAgentName);
 				builder.responseParts.push(completedPart);

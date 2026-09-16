@@ -35,6 +35,7 @@ import { ITelemetryService } from '../../../telemetry/common/telemetry.js';
 import { getCopilotHomePath } from '../../common/copilotHome.js';
 import { CopilotCliConfigKey, copilotCliConfigSchema } from '../../common/copilotCliConfig.js';
 import type { AutoModeTier } from '../../common/autoModeTiers.js';
+import { createOversizedToolBatchError, MAX_TOOL_CALLS_PER_RESPONSE, ToolCallResponseBatch } from '../../common/toolCallBatchLimit.js';
 import type { ChatInputRequestWithPlanReview, IAgentHostPlanReviewAction } from '../../common/agentHostPlanReview.js';
 import { ChatInputRequestPurpose, withChatInputRequestPurpose } from '../../common/meta/agentChatInputRequestMeta.js';
 import { AgentSystemNotificationKind, toAgentSystemNotificationMeta } from '../../common/meta/agentSystemNotificationMeta.js';
@@ -941,6 +942,13 @@ export class CopilotAgentSession extends Disposable {
 	private _developmentRecoverableError: { readonly turnId: string; remainingFailures: number; readonly totalFailures: number } | undefined;
 	private readonly _developmentErrorInjectionEnabled: boolean;
 	private _dropLateRootTurnEvents = false;
+	/**
+	 * Per-response tool-call circuit breaker, keyed by `parentToolCallId ?? ''`
+	 * so a subagent response is counted separately from the parent round.
+	 */
+	private readonly _toolCallBatches = new Map<string, ToolCallResponseBatch>();
+	private _oversizedToolBatchHandled = false;
+	private _oversizedToolBatchError: ErrorInfo | undefined;
 	private _agentMergeTurn = false;
 	private readonly _mcpServerNames: ReadonlySet<string>;
 	/** Monotonic 0-based ordinal assigned to each turn as it starts, for numeric `turnIndex` telemetry parity. */
@@ -1838,6 +1846,31 @@ export class CopilotAgentSession extends Disposable {
 		this._currentTurn.value?.reasoningPartIds.delete(scope);
 	}
 
+	private _responseToolBatch(parentToolCallId: string | undefined): ToolCallResponseBatch {
+		const key = parentToolCallId ?? '';
+		let batch = this._toolCallBatches.get(key);
+		if (!batch) {
+			batch = new ToolCallResponseBatch();
+			this._toolCallBatches.set(key, batch);
+		}
+		return batch;
+	}
+
+	private _rejectOversizedToolCallBatch(count: number): void {
+		if (this._oversizedToolBatchHandled) {
+			return;
+		}
+		this._oversizedToolBatchHandled = true;
+		const error = createOversizedToolBatchError(count);
+		this._oversizedToolBatchError = error;
+		this._logService.warn(`[Copilot:${this.sessionId}] Rejecting oversized tool-call batch (${count} > ${MAX_TOOL_CALLS_PER_RESPONSE})`);
+		if (this._currentTurn.value) {
+			this.failActiveTurn(error);
+		}
+		this._dropLateRootTurnEvents = true;
+		void this.abort().catch(err => this._logService.warn(`[Copilot:${this.sessionId}] Failed to abort after oversized tool-call batch: ${getErrorMessage(err)}`));
+	}
+
 	/**
 	 * Starts a fresh `pending` turn, discarding any per-turn streaming state
 	 * from a previous turn so the next text/reasoning chunk allocates a new
@@ -1847,6 +1880,9 @@ export class CopilotAgentSession extends Disposable {
 		this._detectInterruptedTurnOnRestore = false;
 		this._streamingToolCalls.clear();
 		this._streamingToolDisplaySchedulers.clearAndDisposeAll();
+		this._toolCallBatches.clear();
+		this._oversizedToolBatchHandled = false;
+		this._oversizedToolBatchError = undefined;
 		this._currentTurn.value = new CopilotTurn(turnId, this._nextTurnOrdinal++, senderClientId, clientContext);
 	}
 
@@ -4926,6 +4962,17 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	private async _handlePreToolUse(input: PreToolUseHookInput): Promise<PreToolUseHookOutput> {
+		if (this._oversizedToolBatchHandled || [...this._toolCallBatches.values()].some(batch => batch.rejected)) {
+			const count = Math.max(MAX_TOOL_CALLS_PER_RESPONSE + 1, ...[...this._toolCallBatches.values()].map(batch => batch.size));
+			const error = this._oversizedToolBatchError ?? createOversizedToolBatchError(count);
+			this._logService.warn(`[Copilot:${this.sessionId}] Denying tool '${input.toolName}' from oversized per-response batch`);
+			this._rejectOversizedToolCallBatch(count);
+			return {
+				permissionDecision: 'deny',
+				permissionDecisionReason: error.message,
+				additionalContext: error.message,
+			};
+		}
 		try {
 			const restriction = this._agentMergeTurn
 				? getAgentMergeGitHubToolRestriction(input.toolName, input.toolArgs)
@@ -5229,9 +5276,17 @@ export class CopilotAgentSession extends Disposable {
 					},
 				}, parentToolCallId);
 			}
+			const toolBatch = this._responseToolBatch(parentToolCallId);
+			toolBatch.beginResponseEvent();
 			if (e.data.toolRequests?.length) {
+				if (!toolBatch.finishMessage(e.data.toolRequests.length)) {
+					this._rejectOversizedToolCallBatch(e.data.toolRequests.length);
+					return;
+				}
 				// Wait for the full message boundary; clearing on an earlier tool delta would duplicate assembled markdown.
 				this._beginToolCallRound(parentToolCallId);
+			} else {
+				toolBatch.finishMessage(0);
 			}
 		}));
 
@@ -5291,6 +5346,14 @@ export class CopilotAgentSession extends Disposable {
 				return;
 			}
 
+			const parentToolCallId = this._parentToolCallIdForSubagentEvent(e);
+			const batch = this._responseToolBatch(parentToolCallId);
+			batch.beginResponseEvent();
+			if (!batch.observe(e.data.toolCallId)) {
+				this._rejectOversizedToolCallBatch(batch.size);
+				return;
+			}
+
 			const existing = this._streamingToolCalls.get(e.data.toolCallId);
 			const streaming = existing ?? {
 				input: '',
@@ -5337,6 +5400,15 @@ export class CopilotAgentSession extends Disposable {
 
 		this._register(wrapper.onToolStart(e => {
 			if (!e.agentId && this._shouldDropLateRootTurnEvent('tool.execution_start')) {
+				return;
+			}
+			const parentToolCallIdForBatch = this._parentToolCallIdForSubagentEvent(e);
+			const batch = this._responseToolBatch(parentToolCallIdForBatch);
+			if (batch.rejected) {
+				return;
+			}
+			if (!batch.observe(e.data.toolCallId)) {
+				this._rejectOversizedToolCallBatch(batch.size);
 				return;
 			}
 			if (isHiddenTool(e.data.toolName)) {

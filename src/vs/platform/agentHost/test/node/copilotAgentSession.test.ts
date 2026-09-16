@@ -45,6 +45,7 @@ import { MessageAttachmentKind, MessageKind, ResponsePartKind, ChatInputAnswerSt
 import { TerminalClaimKind } from '../../common/state/protocol/state.js';
 import { toHostSnapshotAttachmentMeta } from '../../common/meta/agentSnapshotAttachmentMeta.js';
 import { STREAMING_TOOL_DISPLAY_INTERVAL_MS } from '../../common/streamingToolCallDisplay.js';
+import { createOversizedToolBatchError, MAX_TOOL_CALLS_PER_RESPONSE } from '../../common/toolCallBatchLimit.js';
 import { CustomizationEnablementKind, CustomizationType, McpAuthRequiredReason, McpServerStatus, type Customization, type McpServerCustomization } from '../../common/state/protocol/channels-session/state.js';
 import { CopilotAgentSession, type ICopilotWorkingDirectoryChangeTransaction } from '../../node/copilot/copilotAgentSession.js';
 import { CopilotGitHubCredentials, CopilotGitHubSessionCredentials } from '../../node/copilot/copilotGitHubCredentials.js';
@@ -8340,6 +8341,122 @@ Use the attached image as context.
 				registeredEventInterests: ['sampling.requested'],
 				releasedEventInterests: ['interest-1'],
 				samplingResponses: [{ requestId: 'sampling-1' }],
+			});
+		});
+
+		test('rejects an oversized per-response tool-call batch before dispatch', async () => {
+			const capturedRuntime: { current?: ICopilotSessionRuntime } = {};
+			const { session, mockSession, signals } = await createAgentSession(disposables, { captureRuntime: capturedRuntime });
+			session.resetTurnState('turn-1');
+			const toolRequests = Array.from({ length: MAX_TOOL_CALLS_PER_RESPONSE + 1 }, (_, i) => ({
+				toolCallId: `tc-${i}`,
+				name: 'memory',
+				arguments: { path: `p${i}.md` },
+			}));
+
+			mockSession.fire('assistant.message', {
+				messageId: 'oversized',
+				content: '',
+				toolRequests,
+			} as SessionEventPayload<'assistant.message'>['data']);
+			await timeout(0);
+
+			for (const request of toolRequests) {
+				mockSession.fire('tool.execution_start', {
+					toolCallId: request.toolCallId,
+					toolName: 'memory',
+					arguments: request.arguments,
+				} as SessionEventPayload<'tool.execution_start'>['data']);
+			}
+
+			const preToolUse = await capturedRuntime.current!.handlePreToolUse({
+				sessionId: 'test-session-1',
+				timestamp: new Date(0),
+				workingDirectory: '/tmp',
+				toolName: 'memory',
+				toolArgs: { path: 'p0.md' },
+			});
+
+			const actions = getActions(signals);
+			const errors = actions.filter((action): action is ChatErrorAction => action.type === ActionType.ChatError);
+			assert.deepStrictEqual({
+				abortCalls: mockSession.abortCalls,
+				toolStarts: actions.filter(action => action.type === ActionType.ChatToolCallStart).length,
+				error: errors.map(action => ({
+					errorType: action.part.error.errorType,
+					resumable: action.part.resumable,
+					message: action.part.error.message,
+				})),
+				preToolUse,
+			}, {
+				abortCalls: 1,
+				toolStarts: 0,
+				error: [{
+					errorType: 'tooManyToolCalls',
+					resumable: true,
+					message: createOversizedToolBatchError(MAX_TOOL_CALLS_PER_RESPONSE + 1).message,
+				}],
+				preToolUse: {
+					permissionDecision: 'deny',
+					permissionDecisionReason: createOversizedToolBatchError(MAX_TOOL_CALLS_PER_RESPONSE + 1).message,
+					additionalContext: createOversizedToolBatchError(MAX_TOOL_CALLS_PER_RESPONSE + 1).message,
+				},
+			});
+		});
+
+		test('does not reject a per-response tool-call batch at the cap', async () => {
+			const { session, mockSession, signals } = await createAgentSession(disposables);
+			session.resetTurnState('turn-1');
+			const toolRequests = Array.from({ length: MAX_TOOL_CALLS_PER_RESPONSE }, (_, i) => ({
+				toolCallId: `tc-ok-${i}`,
+				name: 'memory',
+				arguments: { path: `ok${i}.md` },
+			}));
+
+			mockSession.fire('assistant.message', {
+				messageId: 'at-cap',
+				content: '',
+				toolRequests,
+			} as SessionEventPayload<'assistant.message'>['data']);
+			mockSession.fire('tool.execution_start', {
+				toolCallId: 'tc-ok-0',
+				toolName: 'memory',
+				arguments: { path: 'ok0.md' },
+			} as SessionEventPayload<'tool.execution_start'>['data']);
+
+			const actions = getActions(signals);
+			assert.deepStrictEqual({
+				abortCalls: mockSession.abortCalls,
+				toolStarts: actions.filter(action => action.type === ActionType.ChatToolCallStart).length,
+				errors: actions.filter(action => action.type === ActionType.ChatError).length,
+			}, {
+				abortCalls: 0,
+				toolStarts: 1,
+				errors: 0,
+			});
+		});
+
+		test('rejects an oversized batch discovered while tool-call deltas stream', async () => {
+			const { session, mockSession, signals } = await createAgentSession(disposables);
+			session.resetTurnState('turn-1');
+			for (let i = 0; i < MAX_TOOL_CALLS_PER_RESPONSE + 1; i++) {
+				mockSession.fire('assistant.tool_call_delta', {
+					toolCallId: `tc-delta-${i}`,
+					toolName: 'memory',
+					inputDelta: `{"path":"p${i}.md"}`,
+				});
+			}
+			await timeout(0);
+
+			const actions = getActions(signals);
+			assert.deepStrictEqual({
+				abortCalls: mockSession.abortCalls,
+				toolStarts: actions.filter(action => action.type === ActionType.ChatToolCallStart).length,
+				errorType: actions.filter((action): action is ChatErrorAction => action.type === ActionType.ChatError).map(action => action.part.error.errorType),
+			}, {
+				abortCalls: 1,
+				toolStarts: MAX_TOOL_CALLS_PER_RESPONSE,
+				errorType: ['tooManyToolCalls'],
 			});
 		});
 

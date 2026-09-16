@@ -10,6 +10,7 @@ import { readToolCallMeta } from '../../common/meta/agentToolCallMeta.js';
 import { AgentSession } from '../../common/agent.js';
 import { getErrorResponsePart, getTurnError, MessageAttachmentKind, MessageKind, ResponsePartKind, ToolCallContributorKind, ToolCallStatus, ToolResultContentType, TurnState, buildChatUri, type ResponsePart, type StringOrMarkdown, type ToolCallResponsePart, type ToolResultContent } from '../../common/state/sessionState.js';
 import { appendSdkToolResultContent, mapSessionEvents as mapSessionEventsWithRouting, type IMapSessionEventsOptions } from '../../node/copilot/mapSessionEvents.js';
+import { createOversizedToolBatchError, MAX_TOOL_CALLS_PER_RESPONSE } from '../../common/toolCallBatchLimit.js';
 import { toSessionEvents, type ISessionEvent } from './copilotTestEvents.js';
 
 function mapSessionEvents(session: URI, db: undefined, events: Parameters<typeof mapSessionEventsWithRouting>[2], options: IMapSessionEventsOptions | undefined = undefined) {
@@ -55,6 +56,45 @@ suite('mapSessionEvents — history replay', () => {
 				}]);
 		});
 	}
+
+	test('replaces an oversized assistant tool-request batch with one recoverable error', async () => {
+		const toolRequests = Array.from({ length: MAX_TOOL_CALLS_PER_RESPONSE + 1 }, (_, i) => ({
+			toolCallId: `tc-${i}`,
+			name: 'memory',
+			arguments: { path: `p${i}.md` },
+		}));
+		const events: ISessionEvent[] = [
+			{ type: 'user.message', data: { interactionId: 'u1', content: 'Remember the project.' } },
+			{ type: 'assistant.message', data: { messageId: 'm2', content: '', toolRequests } },
+			...toolRequests.map(request => ({
+				type: 'tool.execution_start' as const,
+				data: { toolCallId: request.toolCallId, toolName: 'memory', arguments: request.arguments },
+			})),
+			...toolRequests.map(request => ({
+				type: 'tool.execution_complete' as const,
+				data: { toolCallId: request.toolCallId, success: true },
+			})),
+		];
+
+		const { turns } = await mapSessionEvents(session, undefined, toSessionEvents(events));
+		const toolCallParts = turns[0]?.responseParts.filter(part => part.kind === ResponsePartKind.ToolCall) ?? [];
+
+		assert.deepStrictEqual({
+			turnCount: turns.length,
+			state: turns[0]?.state,
+			toolCallParts: toolCallParts.length,
+			errorPart: getErrorResponsePart(turns[0]),
+		}, {
+			turnCount: 1,
+			state: TurnState.Error,
+			toolCallParts: 0,
+			errorPart: {
+				kind: ResponsePartKind.Error,
+				error: createOversizedToolBatchError(MAX_TOOL_CALLS_PER_RESPONSE + 1),
+				resumable: true,
+			},
+		});
+	});
 
 	test('task_complete renders the input summary when tool output is truncated', async () => {
 		const events: ISessionEvent[] = [
