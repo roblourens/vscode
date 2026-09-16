@@ -75,6 +75,8 @@ export class MockChatModel extends Disposable implements IChatModel {
 	setWorkingDirectory(uri: URI | undefined): void { this.workingDirectory = uri; }
 	readonly onDidChangePendingRequests: Event<void> = this._register(new Emitter<void>()).event;
 	getPendingRequests(): readonly IChatPendingRequest[] { return []; }
+	setPendingRequestHeld(_id: string, _held: boolean): void { }
+	isPendingRequestHeld(_id: string): boolean { return false; }
 	toExport(): IExportableChatData {
 		return {
 			initialLocation: this.initialLocation,

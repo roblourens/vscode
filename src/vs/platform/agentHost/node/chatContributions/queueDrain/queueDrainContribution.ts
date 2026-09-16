@@ -14,6 +14,7 @@ import { createUnknownAgentHostClientTelemetryContext } from '../../../common/ag
 import { IAgentHostChatContributions, createChatMementoKey, type IAgentHostChatContribution, type IAgentHostChatContributionContext, type IAgentHostChatContributionHost, type IAppliedClientAction, type IQueuedMessageSender, type ITurnEnd } from '../../../common/agentHostChatContributionsService.js';
 import { ActionType } from '../../../common/state/sessionActions.js';
 import { getErrorResponsePart, isAhpChatChannel, parseRequiredSessionUriFromChatUri, PendingMessageKind, TurnState, type Message, type URI as ProtocolURI } from '../../../common/state/sessionState.js';
+import { isPendingMessageHeld, withoutPendingMessageHeld } from '../../../common/meta/agentPendingMessageHeldMeta.js';
 import { AgentHostStateManager, IAgentHostStateManager } from '../../agentHostStateManager.js';
 import { IAgentHostProviderService } from '../../agentHostProviderService.js';
 import { startTurn } from '../../agentHostTurnStarter.js';
@@ -86,7 +87,8 @@ export class QueueDrainContribution extends Disposable implements IAgentHostChat
 			return;
 		}
 		const session = parseRequiredSessionUriFromChatUri(channel);
-		this._providerService.getProviderForSession(session)?.setPendingMessages?.(URI.parse(channel), state.steeringMessage, []);
+		const steering = isPendingMessageHeld(state.steeringMessage) ? undefined : state.steeringMessage;
+		this._providerService.getProviderForSession(session)?.setPendingMessages?.(URI.parse(channel), steering, []);
 		this._tryConsumeNextQueuedMessage(channel);
 	}
 
@@ -110,6 +112,9 @@ export class QueueDrainContribution extends Disposable implements IAgentHostChat
 			return;
 		}
 		const message = state.queuedMessages[0];
+		if (isPendingMessageHeld(message)) {
+			return;
+		}
 		const sender = this._context.memento(QueuedSender, channel, message.id).get() ?? {
 			clientId: undefined,
 			clientContext: {
@@ -117,10 +122,15 @@ export class QueueDrainContribution extends Disposable implements IAgentHostChat
 				hostLaunchKind: host.hostLaunchKind,
 			},
 		};
+		const latest = this._stateManager.getSessionState(channel);
+		const latestMessage = latest?.queuedMessages?.[0];
+		if (!latestMessage || latestMessage.id !== message.id || isPendingMessageHeld(latestMessage) || latest?.steeringMessage || this._stateManager.getActiveTurnId(channel)) {
+			return;
+		}
 		// Drop the entry rather than blanking it: the memento is keyed by message
 		// id, so a long-lived chat would otherwise retain one per message queued.
 		this._context.deleteMemento(QueuedSender, channel, message.id);
-		this._admitQueuedTurn(host, channel, message.message, message.id, sender);
+		this._admitQueuedTurn(host, channel, withoutPendingMessageHeld(latestMessage.message), latestMessage.id, sender);
 	}
 
 	private _admitQueuedTurn(host: IAgentHostChatContributionHost, channel: ProtocolURI, message: Message, messageId: string, sender: IQueuedMessageSender): void {

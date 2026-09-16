@@ -108,6 +108,28 @@ export class ClaudePromptQueue extends Disposable {
 	}
 
 	/**
+	 * Removes steering entries that have not yet been handed to the SDK.
+	 * Completes their deferreds so they do not leak. Returns the number dropped.
+	 */
+	dropUnconsumedSteering(pendingMessageId?: string): number {
+		let dropped = 0;
+		this._toYield = this._toYield.filter(entry => {
+			if (!entry.steeringPendingId) {
+				return true;
+			}
+			if (pendingMessageId && entry.steeringPendingId !== pendingMessageId) {
+				return true;
+			}
+			if (!entry.deferred.isSettled) {
+				entry.deferred.complete();
+			}
+			dropped++;
+			return false;
+		});
+		return dropped;
+	}
+
+	/**
 	 * Most-recent in-flight or queued entry, used by steering to inherit
 	 * its parent's `turnId`. Prefers the in-flight head over the latest
 	 * queued entry (matches CONTEXT.md M10: steering folds into the

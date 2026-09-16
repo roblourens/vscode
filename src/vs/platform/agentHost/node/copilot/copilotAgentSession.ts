@@ -1083,6 +1083,7 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _mcpEnablementSequencer = new Sequencer();
 	private readonly _mcpServerLifecycleSequencer = new SequencerByKey<string>();
 	private readonly _steeringMessagesInFlight = new Set<string>();
+	private readonly _cancelledSteeringIds = new Set<string>();
 	/**
 	 * Steering messages that have been accepted by the SDK but not yet
 	 * surfaced to the chat UI as a separate user message. When the SDK
@@ -3430,15 +3431,22 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	async sendSteering(steeringMessage: PendingMessage): Promise<void> {
-		if (this._steeringMessagesInFlight.has(steeringMessage.id) || this._pendingSteeringFlips.has(steeringMessage.id)) {
+		if (this._steeringMessagesInFlight.has(steeringMessage.id) || this._pendingSteeringFlips.has(steeringMessage.id) || this._cancelledSteeringIds.has(steeringMessage.id)) {
 			return;
 		}
 		this._steeringMessagesInFlight.add(steeringMessage.id);
 		this._logService.info(`[Copilot:${this.sessionId}] Sending steering message: "${steeringMessage.message.text.substring(0, 100)}"`);
 		try {
 			await this._reconcileMcpServerEnablement();
-			this._pendingSteeringFlips.set(steeringMessage.id, steeringMessage);
+			if (this._isSteeringDeliveryCancelled(steeringMessage.id)) {
+				this._logService.info(`[Copilot:${this.sessionId}] Cancelled steering message before send: ${steeringMessage.id}`);
+				return;
+			}
 			const sdkAttachments = await this._toSdkAttachments(steeringMessage.message.attachments);
+			if (this._isSteeringDeliveryCancelled(steeringMessage.id)) {
+				this._logService.info(`[Copilot:${this.sessionId}] Cancelled steering message before send: ${steeringMessage.id}`);
+				return;
+			}
 			// Steering is injected into the active turn and never fires the SDK's `user-prompt-submitted`
 			// hook, so the read-only snapshot signal can't ride `additionalContext` here. Fold it into the
 			// prompt as a `<reminder>` block instead: the runtime forwards it to the model, and the host's
@@ -3447,6 +3455,7 @@ export class CopilotAgentSession extends Disposable {
 			const steeringPrompt = snapshotReminder
 				? `${steeringMessage.message.text}\n\n<reminder>\n${snapshotReminder}\n</reminder>`
 				: steeringMessage.message.text;
+			this._pendingSteeringFlips.set(steeringMessage.id, steeringMessage);
 			await this._wrapper.session.send({
 				prompt: steeringPrompt,
 				attachments: sdkAttachments?.length ? sdkAttachments : undefined,
@@ -3457,7 +3466,36 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.error(`[Copilot:${this.sessionId}] Steering message failed`, err);
 		} finally {
 			this._steeringMessagesInFlight.delete(steeringMessage.id);
+			this._cancelledSteeringIds.delete(steeringMessage.id);
 		}
+	}
+
+	/**
+	 * Cancels an unsent steering delivery. A steering message already handed to
+	 * the SDK (recorded in {@link _pendingSteeringFlips}) is past the point of
+	 * cancellation and is left to complete.
+	 */
+	cancelPendingSteering(id?: string): void {
+		const ids = id ? [id] : [...this._steeringMessagesInFlight];
+		for (const cancelId of ids) {
+			if (this._pendingSteeringFlips.has(cancelId)) {
+				continue;
+			}
+			this._cancelledSteeringIds.add(cancelId);
+		}
+	}
+
+	/** Cancels in-flight steering other than `exceptId`, so replacing a queued item cannot deliver both. */
+	cancelPendingSteeringExcept(exceptId: string): void {
+		for (const id of [...this._steeringMessagesInFlight]) {
+			if (id !== exceptId) {
+				this.cancelPendingSteering(id);
+			}
+		}
+	}
+
+	private _isSteeringDeliveryCancelled(id: string): boolean {
+		return this._cancelledSteeringIds.has(id);
 	}
 
 	async getMessages(): Promise<readonly Turn[]> {

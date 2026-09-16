@@ -186,6 +186,20 @@ suite('ClaudePromptQueue', () => {
 		assert.deepStrictEqual(steeringYielded, ['pending-42'], 'fires on yield');
 	});
 
+	test('dropUnconsumedSteering removes unyielded steering and skips the SDK (#336466)', async () => {
+		const { queue, steeringYielded } = createQueue(disposables);
+		const iter = queue.iterable[Symbol.asyncIterator]();
+		const steering = makeEntry('s1', { steeringPendingId: 'pending-42' });
+		const followup = makeEntry('plain');
+		void queue.push(steering);
+		void queue.push(followup);
+		assert.strictEqual(queue.dropUnconsumedSteering('pending-42'), 1);
+		assert.strictEqual(steering.deferred.isSettled, true, 'dropped steering deferred is settled');
+		const yielded = await drainOne(iter);
+		assert.strictEqual(yielded?.uuid, makeUuid('plain'));
+		assert.deepStrictEqual(steeringYielded, []);
+	});
+
 	test('non-steering entries do not fire the steering callback', async () => {
 		const { queue, steeringYielded } = createQueue(disposables);
 		const iter = queue.iterable[Symbol.asyncIterator]();

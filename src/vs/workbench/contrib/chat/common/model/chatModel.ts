@@ -1889,6 +1889,12 @@ export interface IChatModel extends IDisposable {
 
 	readonly onDidChangePendingRequests: Event<void>;
 	getPendingRequests(): readonly IChatPendingRequest[];
+	/**
+	 * Pauses auto-delivery of a pending request while the user is editing it.
+	 * Agent Host omits held items from provider delivery until they are released.
+	 */
+	setPendingRequestHeld(id: string, held: boolean): void;
+	isPendingRequestHeld(id: string): boolean;
 }
 
 export interface ISerializableChatsData {
@@ -2528,6 +2534,7 @@ export class ChatModel extends Disposable implements IChatModel {
 	readonly onDidChange = this._onDidChange.event;
 
 	private readonly _pendingRequests: IChatPendingRequest[] = [];
+	private readonly _heldPendingRequestIds = new Set<string>();
 	private readonly _onDidChangePendingRequests = this._register(new Emitter<void>());
 	readonly onDidChangePendingRequests = this._onDidChangePendingRequests.event;
 
@@ -2553,6 +2560,23 @@ export class ChatModel extends Disposable implements IChatModel {
 		return this._pendingRequests;
 	}
 
+	setPendingRequestHeld(id: string, held: boolean): void {
+		const wasHeld = this._heldPendingRequestIds.has(id);
+		if (held === wasHeld) {
+			return;
+		}
+		if (held) {
+			this._heldPendingRequestIds.add(id);
+		} else {
+			this._heldPendingRequestIds.delete(id);
+		}
+		this._onDidChangePendingRequests.fire();
+	}
+
+	isPendingRequestHeld(id: string): boolean {
+		return this._heldPendingRequestIds.has(id);
+	}
+
 	setPendingRequests(requests: readonly { requestId: string; kind: ChatRequestQueueKind }[]): void {
 		const existingMap = new Map(this._pendingRequests.map(p => [p.request.id, p]));
 		const newPending: IChatPendingRequest[] = [];
@@ -2565,6 +2589,7 @@ export class ChatModel extends Disposable implements IChatModel {
 		}
 		this._pendingRequests.length = 0;
 		this._pendingRequests.push(...newPending);
+		this._pruneHeldPendingRequestIds(newPending.map(request => request.request.id));
 		this._onDidChangePendingRequests.fire();
 	}
 
@@ -2575,6 +2600,7 @@ export class ChatModel extends Disposable implements IChatModel {
 		if (this._pendingRequests.length === requests.length && requests.every((request, index) => this._pendingRequests[index] === request)) {
 			return;
 		}
+		this._pruneHeldPendingRequestIds(requests.map(request => request.request.id));
 		this._pendingRequests.length = 0;
 		this._pendingRequests.push(...requests);
 		this._onDidChangePendingRequests.fire();
@@ -2615,6 +2641,7 @@ export class ChatModel extends Disposable implements IChatModel {
 	 * @internal Used by ChatService to remove a pending request
 	 */
 	removePendingRequest(id: string): void {
+		this._heldPendingRequestIds.delete(id);
 		const index = this._pendingRequests.findIndex(r => r.request.id === id);
 		if (index !== -1) {
 			this._pendingRequests.splice(index, 1);
@@ -2628,6 +2655,7 @@ export class ChatModel extends Disposable implements IChatModel {
 	dequeuePendingRequest(): IChatPendingRequest | undefined {
 		const request = this._pendingRequests.shift();
 		if (request) {
+			this._heldPendingRequestIds.delete(request.request.id);
 			this._onDidChangePendingRequests.fire();
 		}
 		return request;
@@ -2640,7 +2668,9 @@ export class ChatModel extends Disposable implements IChatModel {
 	dequeueAllSteeringRequests(): IChatPendingRequest[] {
 		const steeringRequests: IChatPendingRequest[] = [];
 		while (this._pendingRequests.at(0)?.kind === ChatRequestQueueKind.Steering) {
-			steeringRequests.push(this._pendingRequests.shift()!);
+			const steering = this._pendingRequests.shift()!;
+			this._heldPendingRequestIds.delete(steering.request.id);
+			steeringRequests.push(steering);
 		}
 		if (steeringRequests.length > 0) {
 			this._onDidChangePendingRequests.fire();
@@ -2652,9 +2682,19 @@ export class ChatModel extends Disposable implements IChatModel {
 	 * @internal Used by ChatService to clear all pending requests
 	 */
 	clearPendingRequests(): void {
-		if (this._pendingRequests.length > 0) {
+		if (this._pendingRequests.length > 0 || this._heldPendingRequestIds.size > 0) {
 			this._pendingRequests.length = 0;
+			this._heldPendingRequestIds.clear();
 			this._onDidChangePendingRequests.fire();
+		}
+	}
+
+	private _pruneHeldPendingRequestIds(remainingIds: readonly string[]): void {
+		const remaining = new Set(remainingIds);
+		for (const heldId of [...this._heldPendingRequestIds]) {
+			if (!remaining.has(heldId)) {
+				this._heldPendingRequestIds.delete(heldId);
+			}
 		}
 	}
 

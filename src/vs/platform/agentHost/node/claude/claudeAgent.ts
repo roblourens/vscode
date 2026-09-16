@@ -35,6 +35,7 @@ import type { ResolveSessionConfigResult, SessionConfigCompletionsResult } from 
 import { AHP_AUTH_REQUIRED, ProtocolError } from '../../common/state/sessionProtocol.js';
 import { PolicyState, ProtectedResourceMetadata, type AgentSelection, type ModelSelection, type ToolDefinition } from '../../common/state/protocol/state.js';
 import { buildDefaultChatUri, ChatInputResponseKind, isDefaultChatUri, parseRequiredSessionUriFromChatUri, type ClientPluginCustomization, type Customization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type ChatInputAnswer, type ToolCallResult, type Turn } from '../../common/state/sessionState.js';
+import { isPendingMessageHeld } from '../../common/meta/agentPendingMessageHeldMeta.js';
 import { IFileService } from '../../../files/common/files.js';
 import { computeFolderPickerDecisionForRoots } from '../shared/folderPickerDecision.js';
 import { claudeDirectoryQualifiesForPrimary } from './claudeFolderPickerCriteria.js';
@@ -2394,8 +2395,10 @@ export class ClaudeAgent extends Disposable implements IAgent {
 			this._logService.warn(`[Claude] setPendingMessages: target not found for ${chat.toString()}`);
 			return;
 		}
-		if (steeringMessage) {
+		if (steeringMessage && !isPendingMessageHeld(steeringMessage)) {
 			target.injectSteering(steeringMessage);
+		} else {
+			target.dropPendingSteering(steeringMessage?.id);
 		}
 	}
 

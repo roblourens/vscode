@@ -487,6 +487,18 @@ export class ClaudeSdkPipeline extends Disposable {
 	}
 
 	/**
+	 * Remove unyielded steering from the prompt queue so a cancelled or
+	 * held pending message is not handed to the SDK. Already-yielded
+	 * entries are past the cancellation point.
+	 */
+	dropUnconsumedSteering(pendingMessageId?: string): void {
+		const dropped = this._queue.dropUnconsumedSteering(pendingMessageId);
+		if (dropped > 0) {
+			this._logService.info(`[Claude:${this.sessionId}] dropUnconsumedSteering: dropped ${dropped} id=${pendingMessageId ?? '*'}`);
+		}
+	}
+
+	/**
 	 * Cancel the in-flight SDK turn via the abort controller. Drops every
 	 * pending entry's deferred (rejected with `CancellationError`),
 	 * marks the pipeline for rebind on next {@link send}. Idempotent.

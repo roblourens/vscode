@@ -21,6 +21,7 @@ import { AgentHostLaunchKind, createUnknownAgentHostClientTelemetryContext } fro
 import { createChatMementoKey, createSessionMementoKey, IAgentHostChatContributions, type IAgentHostChatContribution, type IAgentHostChatContributionContext, type IAgentHostChatContributionHost, type IHydrationContext, type IIncomingRequest, type IAppliedClientAction, type IDispatchedAction, type IOutgoingTurn, type IRestoredChat, type ITurnEnd, type IncomingRequestDisposition } from '../../common/agentHostChatContributionsService.js';
 import { AgentHostArtifactToolsConfigKey, AgentHostMarkdownPlanRichLinksEnabledConfigKey, type ISchema, type SchemaDefinition, type SchemaValue } from '../../common/agentHostSchema.js';
 import { withChatSurfaceMeta } from '../../common/meta/agentChatSurfaceMeta.js';
+import { PENDING_MESSAGE_HELD_META_KEY } from '../../common/meta/agentPendingMessageHeldMeta.js';
 import { readAgentMessageDelegationMeta, toAgentMessageDelegationMeta } from '../../common/meta/agentMessageDelegationMeta.js';
 import { ISessionDataService } from '../../common/sessionDataService.js';
 import { ActionType } from '../../common/state/sessionActions.js';
@@ -942,8 +943,17 @@ function dispatchedAction(channel: string, session: string, action: IDispatchedA
 	};
 }
 
-function queuedMessage(id: string, text: string): { type: ActionType.ChatPendingMessageSet; kind: PendingMessageKind.Queued; id: string; message: Message } {
-	return { type: ActionType.ChatPendingMessageSet, kind: PendingMessageKind.Queued, id, message: { text, origin: { kind: MessageKind.User } } };
+function queuedMessage(id: string, text: string, held = false): { type: ActionType.ChatPendingMessageSet; kind: PendingMessageKind.Queued; id: string; message: Message } {
+	return {
+		type: ActionType.ChatPendingMessageSet,
+		kind: PendingMessageKind.Queued,
+		id,
+		message: {
+			text,
+			origin: { kind: MessageKind.User },
+			...(held ? { _meta: { [PENDING_MESSAGE_HELD_META_KEY]: true } } : {}),
+		},
+	};
 }
 
 function turnEnd(turnId: string, reason: ITurnEnd['reason'] = { kind: 'success' }): ITurnEnd {
@@ -1173,6 +1183,80 @@ suite('AgentHostChatContributions', () => {
 			pendingMessages: [undefined, undefined, undefined, undefined],
 			admitted: [['second', 'second-client']],
 		});
+	});
+
+	test('queue drain does not forward a held steering message to the agent (#336466)', () => {
+		const queue = createQueueDrainContributions(disposables);
+		const heldSteering: IAppliedClientAction['action'] = {
+			type: ActionType.ChatPendingMessageSet,
+			kind: PendingMessageKind.Steering,
+			id: 'steer-held',
+			message: { text: 'still editing', origin: { kind: MessageKind.User }, _meta: { [PENDING_MESSAGE_HELD_META_KEY]: true } },
+		};
+		queue.stateManager.dispatchServerAction(queue.chat, heldSteering);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, heldSteering, 'steer-client'));
+
+		assert.deepStrictEqual(queue.pendingMessages.map(message => message?.id), [undefined]);
+	});
+
+	test('queue drain does not admit a held queued message (#336466)', () => {
+		const queue = createQueueDrainContributions(disposables);
+		queue.stateManager.dispatchServerAction(queue.chat, {
+			type: ActionType.ChatTurnStarted,
+			turnId: 'active-turn',
+			startedAt: '2025-01-01T00:00:00.000Z',
+			message: { text: 'running', origin: { kind: MessageKind.User } },
+		});
+		const held = queuedMessage('held', 'do not send yet', true);
+		const later = queuedMessage('later', 'later');
+		queue.stateManager.dispatchServerAction(queue.chat, held);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, held, 'held-client'));
+		queue.stateManager.dispatchServerAction(queue.chat, later);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, later, 'later-client'));
+		queue.stateManager.dispatchServerAction(queue.chat, { type: ActionType.ChatTurnComplete, turnId: 'active-turn', duration: 1 });
+		queue.service.turnEnd({ session: queue.session, channel: queue.chat, turnId: 'active-turn', reason: { kind: 'localCommand' } });
+
+		assert.deepStrictEqual({
+			admitted: queue.admitted.map(admission => admission.message.text),
+			queued: queue.stateManager.getSessionState(queue.chat)?.queuedMessages?.map(message => message.id),
+		}, {
+			admitted: [],
+			queued: ['held', 'later'],
+		});
+	});
+
+	test('queue drain admits a previously held message once the hold is released (#336466)', () => {
+		const queue = createQueueDrainContributions(disposables);
+		const held = queuedMessage('held', 'send after edit', true);
+		queue.stateManager.dispatchServerAction(queue.chat, held);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, held, 'held-client'));
+		assert.deepStrictEqual(queue.admitted.map(admission => admission.message.text), []);
+
+		const released = queuedMessage('held', 'send after edit');
+		queue.stateManager.dispatchServerAction(queue.chat, released);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, released, 'held-client'));
+
+		assert.deepStrictEqual(queue.admitted.map(admission => [admission.message.text, admission.message._meta, admission.clientId]), [['send after edit', undefined, 'held-client']]);
+	});
+
+	test('queue drain does not admit a message removed after it was selected (#336466)', () => {
+		const queue = createQueueDrainContributions(disposables);
+		queue.stateManager.dispatchServerAction(queue.chat, {
+			type: ActionType.ChatTurnStarted,
+			turnId: 'active-turn',
+			startedAt: '2025-01-01T00:00:00.000Z',
+			message: { text: 'running', origin: { kind: MessageKind.User } },
+		});
+		const first = queuedMessage('first', 'removed before send');
+		queue.stateManager.dispatchServerAction(queue.chat, first);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, first, 'first-client'));
+		const removed: IAppliedClientAction['action'] = { type: ActionType.ChatPendingMessageRemoved, kind: PendingMessageKind.Queued, id: 'first' };
+		queue.stateManager.dispatchServerAction(queue.chat, removed);
+		queue.service.didApplyClientAction(appliedClientAction(queue.chat, queue.session, removed, 'remove-client'));
+		queue.stateManager.dispatchServerAction(queue.chat, { type: ActionType.ChatTurnComplete, turnId: 'active-turn', duration: 1 });
+		queue.service.turnEnd({ session: queue.session, channel: queue.chat, turnId: 'active-turn', reason: { kind: 'localCommand' } });
+
+		assert.deepStrictEqual(queue.admitted, []);
 	});
 
 	test('queue drain defers stale queued actions until a resumable turn completes', () => {

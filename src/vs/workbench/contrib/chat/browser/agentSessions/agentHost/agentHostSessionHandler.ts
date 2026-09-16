@@ -37,6 +37,7 @@ import { AgentFeedbackAttachmentDisplayKind, AgentFeedbackAttachmentMetadataKey 
 import { BrowserViewAttachmentDisplayKind, BrowserViewAttachmentMetadataKey } from '../../../../../../platform/agentHost/common/meta/browserViewAttachments.js';
 import { readToolCallMeta } from '../../../../../../platform/agentHost/common/meta/agentToolCallMeta.js';
 import { readCompletionAttachmentMeta } from '../../../../../../platform/agentHost/common/meta/agentCompletionAttachmentMeta.js';
+import { withPendingMessageHeldMeta } from '../../../../../../platform/agentHost/common/meta/agentPendingMessageHeldMeta.js';
 import { IRemoteAgentHostService } from '../../../../../../platform/agentHost/common/remoteAgentHostService.js';
 import { SessionConfigKey } from '../../../../../../platform/agentHost/common/sessionConfigKeys.js';
 import { isWorktreeUnderRepository } from '../../../../../../platform/agentHost/common/worktreePaths.js';
@@ -2121,10 +2122,13 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			const messageAttachments = this._variableEntriesToAttachments(variables, sessionResource, p.request.message.text);
 			const attachments = messageAttachments.length > 0 ? messageAttachments : undefined;
 			const model = this._createModelSelection(p.sendOptions.userSelectedModelId, p.sendOptions.userSelectedModelConfiguration);
+			const metadata = chatModel.isPendingRequestHeld(p.request.id)
+				? withPendingMessageHeldMeta(p.sendOptions.metadata)
+				: p.sendOptions.metadata;
 			const snapshot: IPendingSnapshot = {
 				id: p.request.id,
 				message: {
-					...userOriginMessage(p.request.message.text, attachments, p.sendOptions.metadata),
+					...userOriginMessage(p.request.message.text, attachments, metadata),
 					...(model ? { model } : {}),
 				},
 			};

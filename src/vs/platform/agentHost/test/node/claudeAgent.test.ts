@@ -7979,6 +7979,24 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		advance.complete();
 	});
 
+	test('setPendingMessages(undefined) drops unyielded steering (#336466)', async () => {
+		const { ctx, sessionUri, query, advance } = await materialize();
+
+		const longSend = ctx.agent.chats.sendMessage(defaultChatUri(sessionUri), 'long task', undefined, undefined, 'turn-2', undefined, undefined, chatContext(defaultChatUri(sessionUri)));
+		await tick();
+
+		ctx.agent.setPendingMessages!(defaultChatUri(sessionUri), { id: 'pending-cancel', message: { text: 'never send this', origin: { kind: MessageKind.User } } }, []);
+		ctx.agent.setPendingMessages!(defaultChatUri(sessionUri), undefined, []);
+		await tick();
+		await tick();
+
+		assert.strictEqual(query.drainedPrompts.some(p => p.priority === 'now'), false, 'cancelled steering must not reach the SDK');
+
+		ctx.sdk.nextQueryMessages.push(makeResultSuccess(AgentSession.id(sessionUri)));
+		advance.complete();
+		await longSend;
+	});
+
 	test('steering_consumed fires when the iterable hands the steering message to the SDK', async () => {
 		const { ctx, sessionUri, advance } = await materialize();
 		const sid = AgentSession.id(sessionUri);

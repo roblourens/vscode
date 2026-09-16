@@ -12159,13 +12159,15 @@ suite('AgentHostChatContribution', () => {
 	// ---- Server-initiated turns -------------------------------------------
 
 	suite('server-initiated turns', () => {
-		function createPendingChatModel(sessionResource: URI, pendingRequests: IChatPendingRequest[]): { model: IChatModel; firePendingRequestsChanged(): void } {
+		function createPendingChatModel(sessionResource: URI, pendingRequests: IChatPendingRequest[], heldIds: ReadonlySet<string> = new Set()): { model: IChatModel; firePendingRequestsChanged(): void } {
 			const onDidChangePendingRequests = disposables.add(new Emitter<void>());
 			return {
 				model: upcastPartial<IChatModel>({
 					sessionResource,
 					onDidChangePendingRequests: onDidChangePendingRequests.event,
 					getPendingRequests: () => pendingRequests,
+					isPendingRequestHeld: (id: string) => heldIds.has(id),
+					setPendingRequestHeld: () => { },
 				}),
 				firePendingRequestsChanged: () => onDidChangePendingRequests.fire(),
 			};
@@ -12457,6 +12459,59 @@ suite('AgentHostChatContribution', () => {
 					},
 				},
 				repeatedActions: [],
+			});
+		});
+
+		test('marks a pending message held while it is being edited (#336466)', async () => {
+			const { sessionHandler, agentHostService, chatService } = createContribution(disposables);
+
+			const backendSession = AgentSession.uri('copilot', 'held-pending-sync');
+			agentHostService.sessionStates.set(backendSession.toString(), {
+				...createSessionState({
+					resource: backendSession.toString(),
+					provider: 'copilot',
+					title: 'Test',
+					status: SessionStatus.InProgress,
+					createdAt: new Date().toISOString(),
+					modifiedAt: new Date().toISOString(),
+				}),
+				lifecycle: SessionLifecycle.Ready,
+				activeTurn: createActiveTurn('active-turn-1', { text: 'Working', origin: { kind: MessageKind.User } }, '2025-01-01T00:00:00.000Z'),
+			});
+
+			const sessionResource = URI.from({ scheme: 'agent-host-copilot', path: '/held-pending-sync' });
+			const chatSession = await sessionHandler.provideChatSessionContent(sessionResource, CancellationToken.None);
+			disposables.add(toDisposable(() => chatSession.dispose()));
+
+			const pendingRequests: IChatPendingRequest[] = [];
+			const heldIds = new Set<string>(['steer-held']);
+			const chatModel = createPendingChatModel(sessionResource, pendingRequests, heldIds);
+			chatService.setSession(sessionResource, chatModel.model);
+
+			agentHostService.dispatchedActions.length = 0;
+			pendingRequests.push({
+				request: upcastPartial<IChatRequestModel>({
+					id: 'steer-held',
+					message: { text: 'still editing', parts: [] },
+					variableData: { variables: [] },
+				}),
+				kind: ChatRequestQueueKind.Steering,
+				sendOptions: {},
+			});
+			chatModel.firePendingRequestsChanged();
+
+			const dispatch = agentHostService.dispatchedActions.find(dispatched => dispatched.action.type === ActionType.ChatPendingMessageSet);
+			assert.ok(dispatch, 'held pending message should still be synced to protocol state');
+			const action = dispatch.action as Extract<SessionAction, { type: ActionType.ChatPendingMessageSet }>;
+			assert.deepStrictEqual(action, {
+				type: ActionType.ChatPendingMessageSet,
+				kind: 'steering',
+				id: 'steer-held',
+				message: {
+					text: 'still editing',
+					origin: { kind: MessageKind.User },
+					_meta: { 'vscode.pendingMessageHeld': true },
+				},
 			});
 		});
 

@@ -64,6 +64,7 @@ import { areAdditionalWorkingDirectoriesEqual } from '../../common/state/session
 import { AgentCustomization, CustomizationLoadStatus, CustomizationType, RuleCustomization, ChatInputResponseKind, SkillCustomization, customizationId, buildChatUri, buildDefaultChatUri, AH_META_WORKSPACELESS_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_EHCLI_LAST_TURN_DB_KEY, AH_META_IS_READ_DB_KEY, isDefaultChatUri, withSessionEhcliAdoptable, type ChildCustomization, type ClientPluginCustomization, type Customization, type DirectoryCustomization, type HookCustomization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type PluginCustomization, type PolicyState, type ChatInputAnswer, type ToolCallResult, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
 import { getByokLmAgentModelId, resolveByokLmEnablement } from '../../common/agentHostByokLm.js';
 import { isCustomizationEnabled } from '../../common/customizationEnablement.js';
+import { isPendingMessageHeld } from '../../common/meta/agentPendingMessageHeldMeta.js';
 import { ActiveClientToolSet, structuralToolsEqual } from '../activeClientState.js';
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
 import { IAgentHostManagedSettingsService } from '../agentHostManagedSettingsService.js';
@@ -4364,9 +4365,13 @@ export class CopilotAgent extends Disposable implements IAgent {
 			return;
 		}
 
-		// Steering: send with mode 'immediate' so the SDK injects it mid-turn
-		if (steeringMessage) {
+		// Steering: send with mode 'immediate' so the SDK injects it mid-turn.
+		// Held or cleared steering cancels any send that has not yet reached the SDK.
+		if (steeringMessage && !isPendingMessageHeld(steeringMessage)) {
+			target.cancelPendingSteeringExcept(steeringMessage.id);
 			target.sendSteering(steeringMessage);
+		} else {
+			target.cancelPendingSteering(steeringMessage?.id);
 		}
 
 		// Queued messages are consumed by the server (AgentSideEffects)

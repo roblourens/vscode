@@ -402,7 +402,14 @@ export class ChatViewModel extends Disposable implements IChatViewModel {
 			return;
 		}
 
+		const previous = this._editing;
 		this._editing = editing;
+		if (previous?.pendingKind !== undefined) {
+			this._model.setPendingRequestHeld(previous.id, false);
+		}
+		if (editing?.pendingKind !== undefined) {
+			this._model.setPendingRequestHeld(editing.id, true);
+		}
 		this._onDidChangeEditing.fire();
 	}
 

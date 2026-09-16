@@ -1214,7 +1214,11 @@ export interface IAgent {
 	/** Re-attach an exact chat from opaque provider data without inferring its role. */
 	materializeChat(chat: URI, context: URI | IAgentChatContext, providerData: string | undefined): Promise<IAgentCreateChatResult | void>;
 
-	/** Optional steering hook for providers that can accept messages during an active turn. */
+	/**
+	 * Optional steering hook for providers that can accept messages during an active turn.
+	 * Passing `undefined` (or a held steering message) MUST cancel any unsent in-flight
+	 * steering so a removed or edited queue item is not delivered.
+	 */
 	setPendingMessages?(chat: URI, steeringMessage: PendingMessage | undefined, queuedMessages: readonly PendingMessage[]): void;
 
 	/** Optional history mutation for providers with a native truncation operation. */

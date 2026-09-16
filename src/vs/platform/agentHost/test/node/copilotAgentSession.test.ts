@@ -6947,6 +6947,16 @@ suite('CopilotAgentSession', () => {
 			}]);
 		});
 
+		test('cancelPendingSteering prevents delivery before the SDK send (#336466)', async () => {
+			const { session, mockSession } = await createAgentSession(disposables);
+
+			const steeringPromise = session.sendSteering({ id: 'steer-cancel', message: { text: 'never send this', origin: { kind: MessageKind.User } } });
+			session.cancelPendingSteering('steer-cancel');
+			await steeringPromise;
+
+			assert.deepStrictEqual(mockSession.sendRequests, []);
+		});
+
 		test('sends a host-created text snapshot in a steering message as a read-only file reference with a <reminder> note (#331154)', async () => {
 			const snapshotUri = URI.file('/session/attachments/pasted.txt');
 			const { session, mockSession } = await createAgentSession(disposables);

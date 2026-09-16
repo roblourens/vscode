@@ -2101,6 +2101,35 @@ suite('ChatModel - Pending Requests', () => {
 		assert.strictEqual(eventCount, 0);
 	});
 
+	test('setPendingRequestHeld - pauses and resumes a pending request (#336466)', () => {
+		const model = createModel();
+		const request = addRequestToModel(model, 'queued');
+		model.addPendingRequest(request, ChatRequestQueueKind.Queued, {});
+
+		let eventCount = 0;
+		testDisposables.add(model.onDidChangePendingRequests(() => { eventCount++; }));
+
+		model.setPendingRequestHeld(request.id, true);
+		assert.strictEqual(model.isPendingRequestHeld(request.id), true);
+		assert.strictEqual(model.getPendingRequests()[0].request.id, request.id);
+
+		model.setPendingRequestHeld(request.id, true);
+		assert.strictEqual(eventCount, 1, 'holding twice should not fire again');
+
+		model.setPendingRequestHeld(request.id, false);
+		assert.strictEqual(model.isPendingRequestHeld(request.id), false);
+		assert.strictEqual(eventCount, 2);
+	});
+
+	test('removePendingRequest - clears a held flag (#336466)', () => {
+		const model = createModel();
+		const request = addRequestToModel(model, 'queued');
+		model.addPendingRequest(request, ChatRequestQueueKind.Queued, {});
+		model.setPendingRequestHeld(request.id, true);
+		model.removePendingRequest(request.id);
+		assert.strictEqual(model.isPendingRequestHeld(request.id), false);
+	});
+
 	test('dequeuePendingRequest - returns and removes first request', () => {
 		const model = createModel();
 		const [request1, request2] = ['r1', 'r2'].map(t => addRequestToModel(model, t));

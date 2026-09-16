@@ -1268,6 +1268,14 @@ export class ClaudeAgentSession extends Disposable {
 		pipeline.injectSteering(sdkMessage, steeringMessage.id);
 	}
 
+	/**
+	 * Drops a steering message that has been queued but not yet yielded to the
+	 * SDK. No-op if the pipeline is gone or the SDK already accepted it.
+	 */
+	dropPendingSteering(pendingMessageId?: string): void {
+		this._pipeline?.dropUnconsumedSteering(pendingMessageId);
+	}
+
 	/** Live permission-mode change. Forwards to the pipeline; the pipeline remembers it for re-application after a rebind. */
 	setPermissionMode(mode: PermissionMode): Promise<void> {
 		return this._requirePipeline().setPermissionMode(mode);
