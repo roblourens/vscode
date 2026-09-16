@@ -472,6 +472,24 @@ suite('ChatInputModelUtils', () => {
 			assert.strictEqual(findBestMatchingModel(byokNamesake, [prev]), undefined);
 		});
 
+		test('never carries a ChatGPT subscription selection onto a Copilot namesake', () => {
+			// Codex publishes GPT-5.6 Terra twice: Copilot CAPI (`vscode-proxy`) and the ChatGPT
+			// subscription (`openai`). Matching by name would spend Copilot quota for a ChatGPT pick.
+			const chatGPT = createSessionModel('@provider=openai:gpt-5.6-terra', 'GPT-5.6 Terra', 'agent-host-codex', {
+				vendor: 'agent-host-codex',
+				family: '@provider=openai:gpt-5.6-terra',
+				modelGroup: { id: 'chatgpt', sourceId: 'chatgptSubscription' },
+			});
+			const copilot = createSessionModel('@provider=vscode-proxy:gpt-5.6-terra', 'GPT-5.6 Terra', 'agent-host-codex', {
+				vendor: 'agent-host-codex',
+				family: '@provider=vscode-proxy:gpt-5.6-terra',
+				modelGroup: { id: 'copilot' },
+			});
+			assert.strictEqual(findBestMatchingModel(chatGPT, [copilot]), undefined);
+			assert.strictEqual(findBestMatchingModel(copilot, [chatGPT]), undefined);
+			assert.strictEqual(findBestMatchingModel(chatGPT, [copilot, chatGPT])?.identifier, chatGPT.identifier);
+		});
+
 		test('still carries a BYOK selection onto the agent host copy of the same key', () => {
 			// The renderer original sets `isBYOK`; the agent-host copy carries its identifier as
 			// `byokModelIdentifier`. Same key, so this is the carry-over the function exists for.

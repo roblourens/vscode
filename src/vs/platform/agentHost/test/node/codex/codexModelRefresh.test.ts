@@ -1518,6 +1518,39 @@ suite('CodexAgent model refresh', () => {
 		});
 	}
 
+	test('surfaces ChatGPT subscription models when config.model_provider is vscode-proxy', async () => {
+		const agent = createAgent(disposables, async () => []);
+		agent['_connection'] = {
+			kind: 'ready',
+			client: {
+				request: async (method: string) => {
+					if (method === 'account/read') {
+						return { account: { type: 'chatgpt', email: 'person@example.com', planType: 'plus' }, requiresOpenaiAuth: true };
+					}
+					if (method === 'config/read') {
+						return { config: { model_provider: 'vscode-proxy' } };
+					}
+					if (method === 'model/list') {
+						return modelListResponse;
+					}
+					throw new Error(`Unexpected request: ${method}`);
+				},
+			},
+			proxyHandle: { dispose() { } },
+			child: { kill: () => true },
+		} as never;
+
+		await agent.refreshModels();
+
+		assert.deepStrictEqual(agent.models.get().map(model => ({
+			id: model.id,
+			meta: model._meta,
+		})), [{
+			id: toCodexModelSelectionId('openai', 'gpt-5.6-sol'),
+			meta: { modelSourceId: 'chatgptSubscription', modelGroupId: 'chatgpt' },
+		}]);
+	});
+
 	test('surfaces current ChatGPT subscription models in the ChatGPT group', async () => {
 		const agent = createAgent(disposables, async () => []);
 		agent['_connection'] = {

@@ -356,6 +356,31 @@ export function parseCodexModelSelection(selection: ModelSelection): { readonly 
 }
 
 /**
+ * Resolves which catalog `model/list` should be published under.
+ *
+ * ChatGPT-authenticated `model/list` is the ChatGPT subscription catalog. Copilot CAPI
+ * models are published separately from the Copilot model list. If the merged Codex config
+ * currently points at `vscode-proxy` (the Copilot transport), those ChatGPT models must
+ * still be tagged as `openai` — otherwise selecting "GPT-5.6 Terra (ChatGPT)" starts a
+ * `vscode-proxy` thread and bills Copilot quota.
+ *
+ * A user-configured custom provider is left alone even when ChatGPT is signed in.
+ */
+export function resolveCodexSubscriptionCatalog(
+	configuredProvider: string | null | undefined,
+	account: { readonly status: string; readonly authType?: string },
+): { readonly modelProvider: string; readonly usesChatGPTSubscription: boolean; readonly pickerProvider: string } {
+	const modelProvider = configuredProvider ?? CODEX_OPENAI_MODEL_PROVIDER;
+	const hostManagedProvider = modelProvider === CODEX_OPENAI_MODEL_PROVIDER || modelProvider === CODEX_COPILOT_MODEL_PROVIDER;
+	const usesChatGPTSubscription = hostManagedProvider && account.status === 'signedIn' && account.authType === 'chatgpt';
+	return {
+		modelProvider: usesChatGPTSubscription ? CODEX_OPENAI_MODEL_PROVIDER : modelProvider,
+		usesChatGPTSubscription,
+		pickerProvider: usesChatGPTSubscription ? 'chatgpt' : modelProvider,
+	};
+}
+
+/**
  * Codex's Agent Mode schema, derived from the platform-generic Mode schema but
  * with "Autopilot" removed. Codex has only two native collaboration modes —
  * `plan` and `default` (see {@link ModeKind}) — so "Autopilot" would map to
@@ -2184,9 +2209,7 @@ export class CodexAgent extends Disposable implements IAgent {
 			if (!this._isCurrentConnection(connection)) {
 				return;
 			}
-			const modelProvider = configResponse.config.model_provider ?? CODEX_OPENAI_MODEL_PROVIDER;
-			const usesChatGPTSubscription = modelProvider === CODEX_OPENAI_MODEL_PROVIDER && account.status === 'signedIn' && account.authType === 'chatgpt';
-			const pickerProvider = usesChatGPTSubscription ? 'chatgpt' : modelProvider;
+			const { modelProvider, usesChatGPTSubscription, pickerProvider } = resolveCodexSubscriptionCatalog(configResponse.config.model_provider, account);
 			const data = [] as ModelListResponse['data'];
 			let cursor: string | null = null;
 			do {

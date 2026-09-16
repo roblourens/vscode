@@ -194,6 +194,9 @@ export function shouldRestorePerTypeModelOnSessionSwitch(isEmpty: boolean, sessi
 /**
  * Whether two models bill the same way. A BYOK model and a first-party one can share id, family and
  * name, so matching across them changes which account is billed; two copies of one key do match.
+ *
+ * ChatGPT-subscription and Copilot models are also distinct first-party billers. Matching a
+ * GPT-5.6 Terra (ChatGPT) pick onto the Copilot namesake silently spends Copilot quota.
  */
 function isSameBillingIdentity(
 	a: ILanguageModelChatMetadataAndIdentifier,
@@ -202,10 +205,18 @@ function isSameBillingIdentity(
 	if (isByokModel(a.metadata) !== isByokModel(b.metadata)) {
 		return false;
 	}
+	if (modelBillingSource(a) !== modelBillingSource(b)) {
+		return false;
+	}
 	if (!isByokModel(a.metadata)) {
 		return true;
 	}
 	return (a.metadata.byokModelIdentifier ?? a.identifier) === (b.metadata.byokModelIdentifier ?? b.identifier);
+}
+
+/** Trusted source that owns billing for a first-party model; empty when the producer did not say. */
+function modelBillingSource(model: ILanguageModelChatMetadataAndIdentifier): string {
+	return model.metadata.modelGroup?.sourceId ?? '';
 }
 
 /**

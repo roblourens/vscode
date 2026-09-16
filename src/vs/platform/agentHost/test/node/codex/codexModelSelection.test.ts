@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { parseCodexModelSelection, toCodexModelSelectionId } from '../../../node/codex/codexAgent.js';
+import { parseCodexModelSelection, resolveCodexSubscriptionCatalog, toCodexModelSelectionId } from '../../../node/codex/codexAgent.js';
 
 suite('CodexModelSelection', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -23,6 +23,25 @@ suite('CodexModelSelection', () => {
 		assert.notStrictEqual(
 			toCodexModelSelectionId('vscode-proxy', 'gpt-5.6-sol'),
 			toCodexModelSelectionId('openai', 'gpt-5.6-sol'),
+		);
+	});
+
+	test('publishes ChatGPT catalog models under openai even when config points at vscode-proxy', () => {
+		assert.deepStrictEqual(
+			resolveCodexSubscriptionCatalog('vscode-proxy', { status: 'signedIn', authType: 'chatgpt' }),
+			{ modelProvider: 'openai', usesChatGPTSubscription: true, pickerProvider: 'chatgpt' },
+		);
+		assert.deepStrictEqual(
+			resolveCodexSubscriptionCatalog('openai', { status: 'signedIn', authType: 'chatgpt' }),
+			{ modelProvider: 'openai', usesChatGPTSubscription: true, pickerProvider: 'chatgpt' },
+		);
+		assert.deepStrictEqual(
+			resolveCodexSubscriptionCatalog('vscode-proxy', { status: 'signedOut' }),
+			{ modelProvider: 'vscode-proxy', usesChatGPTSubscription: false, pickerProvider: 'vscode-proxy' },
+		);
+		assert.deepStrictEqual(
+			resolveCodexSubscriptionCatalog('custom-provider', { status: 'signedIn', authType: 'chatgpt' }),
+			{ modelProvider: 'custom-provider', usesChatGPTSubscription: false, pickerProvider: 'custom-provider' },
 		);
 	});
 });
