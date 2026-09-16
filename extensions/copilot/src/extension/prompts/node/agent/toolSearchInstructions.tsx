@@ -8,14 +8,22 @@ import type { LanguageModelToolInformation } from 'vscode';
 import { CUSTOM_TOOL_SEARCH_NAME } from '../../../../platform/networking/common/anthropic';
 import { IChatEndpoint } from '../../../../platform/networking/common/networking';
 import { IToolDeferralService } from '../../../../platform/networking/common/toolDeferralService';
+import { isToolSearchEnabledInPrompt } from '../../../../platform/networking/common/toolSearchPolicy';
 import { Tag } from '../base/tag';
 
 export interface ToolSearchToolPromptProps extends BasePromptElementProps {
 	readonly availableTools: readonly LanguageModelToolInformation[] | undefined;
+	/**
+	 * Request-scoped search policy. `false` for subagents (tools are eagerly
+	 * loaded and the search tool is omitted from the serialized request).
+	 * `undefined` falls back to endpoint capability.
+	 */
+	readonly enableToolSearch?: boolean;
 }
 
 export interface DeferredToolListReminderProps extends BasePromptElementProps {
 	readonly availableTools: readonly LanguageModelToolInformation[] | undefined;
+	readonly enableToolSearch?: boolean;
 }
 
 /**
@@ -46,7 +54,7 @@ export class ToolSearchToolPromptOptimized extends PromptElement<ToolSearchToolP
 
 	async render(state: void, sizing: PromptSizing) {
 		const endpoint = sizing.endpoint as IChatEndpoint | undefined;
-		if (!endpoint?.supportsToolSearch || !hasDeferredTool(this.props.availableTools, this.toolDeferralService)) {
+		if (!isToolSearchEnabledInPrompt(endpoint, this.props.enableToolSearch) || !hasDeferredTool(this.props.availableTools, this.toolDeferralService)) {
 			return;
 		}
 
@@ -66,7 +74,8 @@ export class ToolSearchToolPromptOptimized extends PromptElement<ToolSearchToolP
  * remainder of the session via `GlobalContextMessageMetadata` — keeps the
  * list out of every per-turn user message and out of the system prompt prefix.
  *
- * Self-gates on `endpoint.supportsToolSearch`. The surrounding `<Tag>` name
+ * Self-gates on the request-scoped search policy (`enableToolSearch`, falling
+ * back to `endpoint.supportsToolSearch`). The surrounding `<Tag>` name
  * matches the reference used by `tool_search`'s tool description.
  *
  * Note: the snapshot is taken at first render. Tools that become available
@@ -83,7 +92,7 @@ export class DeferredToolListReminder extends PromptElement<DeferredToolListRemi
 
 	async render(state: void, sizing: PromptSizing) {
 		const endpoint = sizing.endpoint as IChatEndpoint | undefined;
-		if (!endpoint?.supportsToolSearch || !this.props.availableTools) {
+		if (!isToolSearchEnabledInPrompt(endpoint, this.props.enableToolSearch) || !this.props.availableTools) {
 			return;
 		}
 
@@ -103,4 +112,4 @@ export class DeferredToolListReminder extends PromptElement<DeferredToolListRemi
 	}
 }
 
-export { CUSTOM_TOOL_SEARCH_NAME };
+export { CUSTOM_TOOL_SEARCH_NAME, isToolSearchEnabledInPrompt };

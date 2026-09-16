@@ -473,3 +473,88 @@ suite('AgentPrompt - Gemini Flash prompt additions experiment', () => {
 		assertAdditions(await renderForFamily('gemini-2.0-flash'), { readAst: false, toolBatching: false, searchPrecision: false });
 	});
 });
+
+suite('AgentPrompt - subagent tool search instructions', () => {
+	let accessor: ITestingServicesAccessor;
+
+	beforeAll(() => {
+		const services = createExtensionUnitTestingServices();
+		services.define(IWorkspaceService, new SyncDescriptor(TestWorkspaceService, [[URI.file('/workspace')]]));
+		services.define(IChatMLFetcher, new StaticChatMLFetcher([]));
+		accessor = services.createTestingAccessor();
+	});
+
+	afterAll(() => {
+		accessor.dispose();
+	});
+
+	function hasMandatoryToolSearchGuidance(rendered: string): boolean {
+		return rendered.includes('You MUST use tool_search to load deferred tools BEFORE calling them')
+			|| rendered.includes('You MUST use the tool_search tool to load deferred tools BEFORE calling them directly')
+			|| rendered.includes('You MUST first use tool_search to load it')
+			|| rendered.includes('Available deferred tools (must be loaded with tool_search before use)');
+	}
+
+	async function renderWithDeferredTool(family: string, isSubagent: boolean): Promise<string> {
+		const instaService = accessor.get(IInstantiationService);
+		const endpoint = instaService.createInstance(MockEndpoint, family);
+		const turn = new Turn('turnId', { type: 'user', message: 'hello' });
+		const conversation = new Conversation('sessionId', [turn]);
+		const customizations = await PromptRegistry.resolveAllCustomizations(instaService, endpoint);
+		const deferredTool: LanguageModelToolInformation = {
+			name: 'github-mcp-create_issue',
+			description: 'Create a GitHub issue',
+			inputSchema: undefined,
+			tags: [],
+			source: undefined,
+		};
+		const toolSearch: LanguageModelToolInformation = {
+			name: ToolName.ToolSearch,
+			description: 'Search tools',
+			inputSchema: undefined,
+			tags: [],
+			source: undefined,
+		};
+		const props: AgentPromptProps = {
+			priority: 1,
+			endpoint,
+			location: ChatLocation.Agent,
+			promptContext: {
+				chatVariables: new ChatVariablesCollection(),
+				history: [],
+				query: 'call the github tool',
+				conversation,
+				request: isSubagent ? { subAgentInvocationId: 'subagent-1' } as IBuildPromptContext['request'] : undefined,
+				tools: {
+					availableTools: [toolSearch, deferredTool],
+					toolInvocationToken: null as never,
+					toolReferences: [],
+				},
+			},
+			customizations,
+		};
+		const renderer = PromptRenderer.create(instaService, endpoint, AgentPrompt, props);
+		const r = await renderer.render();
+		return r.messages.map(m => messageToMarkdown(m)).join('\n\n');
+	}
+
+	test('top-level gpt-5.4 agent keeps discovery instructions for deferred tools', async () => {
+		const rendered = await renderWithDeferredTool('gpt-5.4', false);
+		expect(hasMandatoryToolSearchGuidance(rendered)).toBe(true);
+	});
+
+	test('gpt-5.4 subagent omits discovery instructions even when the endpoint supports search', async () => {
+		const rendered = await renderWithDeferredTool('gpt-5.4', true);
+		expect(hasMandatoryToolSearchGuidance(rendered)).toBe(false);
+	});
+
+	test('top-level claude-sonnet-4.5 agent keeps discovery instructions for deferred tools', async () => {
+		const rendered = await renderWithDeferredTool('claude-sonnet-4.5', false);
+		expect(hasMandatoryToolSearchGuidance(rendered)).toBe(true);
+	});
+
+	test('claude-sonnet-4.5 subagent omits discovery instructions even when the endpoint supports search', async () => {
+		const rendered = await renderWithDeferredTool('claude-sonnet-4.5', true);
+		expect(hasMandatoryToolSearchGuidance(rendered)).toBe(false);
+	});
+});

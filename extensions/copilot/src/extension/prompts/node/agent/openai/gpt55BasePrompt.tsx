@@ -16,7 +16,7 @@ import { ResponseRenderingRules } from '../../panel/editorIntegrationRules';
 import { ApplyPatchInstructions, DefaultAgentPromptProps, detectToolCapabilities, getEditingReminder, McpToolInstructions, ReminderInstructionsProps } from '../defaultAgentInstructions';
 import { FileLinkificationInstructionsOptimized } from '../fileLinkificationInstructions';
 import { CopilotIdentityRulesConstructor, IAgentPrompt, PromptRegistry, ReminderInstructionsConstructor, SafetyRulesConstructor, SystemPrompt } from '../promptRegistry';
-import { CUSTOM_TOOL_SEARCH_NAME, ToolSearchToolPromptOptimized } from '../toolSearchInstructions';
+import { CUSTOM_TOOL_SEARCH_NAME, isToolSearchEnabledInPrompt, ToolSearchToolPromptOptimized } from '../toolSearchInstructions';
 
 export class Gpt55Prompt extends PromptElement<DefaultAgentPromptProps> {
 	async render(state: void, sizing: PromptSizing) {
@@ -246,7 +246,7 @@ export class Gpt55Prompt extends PromptElement<DefaultAgentPromptProps> {
 				- Usually files provided in context will be the best place to start searching if we need to gather context up front.<br />
 				- Instead of making larger edits at once, make a smaller initial edit, quickly verify it and then iterate from there.<br />
 			</Tag>
-			<ToolSearchToolPromptOptimized availableTools={this.props.availableTools} />
+			<ToolSearchToolPromptOptimized availableTools={this.props.availableTools} enableToolSearch={this.props.enableToolSearch} />
 			<FileLinkificationInstructionsOptimized />
 			<ResponseTranslationRules />
 		</InstructionMessage >;
@@ -279,7 +279,7 @@ class Gpt55PromptResolver implements IAgentPrompt {
 
 export class Gpt55ReminderInstructions extends PromptElement<ReminderInstructionsProps> {
 	async render(state: void, sizing: PromptSizing) {
-		const toolSearchEnabled = !!this.props.endpoint.supportsToolSearch;
+		const toolSearchEnabled = isToolSearchEnabledInPrompt(this.props.endpoint, this.props.enableToolSearch);
 		return <>
 			You are an agent—keep going until the user's query is completely resolved before ending your turn. ONLY stop if solved or genuinely blocked.<br />
 			Take action when possible; the user expects you to do useful work without unnecessary questions.<br />

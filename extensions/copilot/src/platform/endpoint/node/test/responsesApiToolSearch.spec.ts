@@ -172,6 +172,40 @@ describe('createResponsesRequestBody tools', () => {
 		expect(tools.every(t => !t.defer_loading)).toBe(true);
 	});
 
+	it('does not defer tools for subagent requests and keeps ordinary schemas', () => {
+		const endpoint = createMockEndpoint('gpt-5.4');
+
+		const options = createMockOptions({
+			telemetryProperties: { subType: 'subagent' },
+		});
+		const body = accessor.get(IInstantiationService).invokeFunction(
+			createResponsesRequestBody, options, endpoint.model, endpoint
+		);
+
+		const tools = body.tools as any[];
+		expect(tools.find(t => t.type === 'tool_search')).toBeUndefined();
+		expect(tools.find(t => t.name === 'tool_search')).toBeUndefined();
+		// Deferred MCP-style tools must be sent with full definitions, not withheld for search.
+		expect(tools.find(t => t.name === 'some_mcp_tool')).toBeDefined();
+		expect(tools.find(t => t.name === 'another_deferred_tool')).toBeDefined();
+		expect(tools.find(t => t.name === 'read_file')).toBeDefined();
+	});
+
+	it('does not defer tools when enableToolSearch is explicitly false', () => {
+		const endpoint = createMockEndpoint('gpt-5.4');
+
+		const options = createMockOptions({
+			modelCapabilities: { enableToolSearch: false },
+		});
+		const body = accessor.get(IInstantiationService).invokeFunction(
+			createResponsesRequestBody, options, endpoint.model, endpoint
+		);
+
+		const tools = body.tools as any[];
+		expect(tools.find(t => t.type === 'tool_search')).toBeUndefined();
+		expect(tools.find(t => t.name === 'some_mcp_tool')).toBeDefined();
+	});
+
 	it('does not defer tools when tool_search is not in the request tool list', () => {
 		// Repro for https://github.com/microsoft/vscode/issues/311946: a custom agent with
 		// `tools: ['my-mcp-server/*']` filters out tool_search. Without this gate, every

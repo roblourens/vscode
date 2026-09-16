@@ -15,7 +15,6 @@ import { SSEParser } from '../../../util/vs/base/common/sseParser';
 import { isDefined } from '../../../util/vs/base/common/types';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { IInstantiationService, ServicesAccessor } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { ChatLocation } from '../../chat/common/commonTypes';
 import { ConfigKey, IConfigurationService } from '../../configuration/common/configurationService';
 import { ILogService } from '../../log/common/logService';
 import { CUSTOM_TOOL_SEARCH_NAME } from '../../networking/common/anthropic';
@@ -23,6 +22,7 @@ import { FinishedCallback, getRequestId, IResponseDelta, OpenAiFunctionTool, Ope
 import { IChatEndpoint, ICreateEndpointBodyOptions, IEndpointBody } from '../../networking/common/networking';
 import { APIErrorResponse, ChatCompletion, FilterReason, FinishedCompletionReason, modelsWithoutResponsesContextManagement, openAIContextManagementCompactionType, OpenAIContextManagementResponse, rawMessageToCAPI, TokenLogProb } from '../../networking/common/openai';
 import { IToolDeferralService } from '../../networking/common/toolDeferralService';
+import { isSubagentToolSearchExclusion, isToolSearchEnabledForRequest } from '../../networking/common/toolSearchPolicy';
 import { sendEngineMessagesTelemetry, sendResponsesApiCompactionTelemetry } from '../../networking/node/chatStream';
 import { IChatWebSocketManager } from '../../networking/node/chatWebSocketManager';
 import { IExperimentationService } from '../../telemetry/common/nullExperimentationService';
@@ -68,11 +68,14 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 	// (excluded from the request entirely). Uses OpenAI's client-executed tool search protocol: we add
 	// { type: 'tool_search', execution: 'client' }. The model emits tool_search_call, which we handle via
 	// our ToolSearchTool embeddings search, then round-trip as tool_search_output in the next request.
-	const toolSearchEnabled = !!endpoint.supportsToolSearch
-		&& !!options.requestOptions?.tools?.some(t => t.function.name === CUSTOM_TOOL_SEARCH_NAME);
-	const isAllowedConversationAgent = options.location === ChatLocation.Agent || options.location === ChatLocation.MessagesProxy;
-	const isSubagent = options.telemetryProperties?.subType?.startsWith('subagent') ?? false;
-	const shouldDeferTools = toolSearchEnabled && isAllowedConversationAgent && !isSubagent;
+	// Prompt generation uses the same policy so subagents are not told to call a search tool that
+	// this serializer will omit.
+	const shouldDeferTools = isToolSearchEnabledForRequest({
+		supportsToolSearch: endpoint.supportsToolSearch,
+		isSubagent: isSubagentToolSearchExclusion(options),
+		hasToolSearchTool: !!options.requestOptions?.tools?.some(t => t.function.name === CUSTOM_TOOL_SEARCH_NAME),
+		location: options.location,
+	});
 	const toolDeferralService = shouldDeferTools ? accessor.get(IToolDeferralService) : undefined;
 
 	type ResponsesFunctionTool = OpenAI.Responses.FunctionTool & OpenAiResponsesFunctionTool;

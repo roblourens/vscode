@@ -45,6 +45,11 @@ export interface DefaultAgentPromptProps extends BasePromptElementProps {
 	readonly availableTools: readonly LanguageModelToolInformation[] | undefined;
 	readonly modelFamily: string | undefined;
 	readonly codesearchMode: boolean | undefined;
+	/**
+	 * Request-scoped tool-search policy. `false` for subagents so prompts do
+	 * not require a search tool that the request serializer will omit.
+	 */
+	readonly enableToolSearch?: boolean;
 }
 
 export interface ToolReferencesHintProps extends BasePromptElementProps {
@@ -73,6 +78,11 @@ export interface ReminderInstructionsProps extends BasePromptElementProps {
 	readonly hasReplaceStringTool: boolean;
 	readonly hasMultiReplaceStringTool: boolean;
 	readonly hasMemoryTool: boolean;
+	/**
+	 * Request-scoped tool-search policy. `false` for subagents so reminders do
+	 * not require a search tool that the request serializer will omit.
+	 */
+	readonly enableToolSearch?: boolean;
 }
 
 export function getEditingReminder(hasEditFileTool: boolean, hasReplaceStringTool: boolean, useStrongReplaceStringHint: boolean, hasMultiStringReplace: boolean) {

@@ -15,6 +15,7 @@ import { IEnvService, OperatingSystem } from '../../../../platform/env/common/en
 import { IIgnoreService } from '../../../../platform/ignore/common/ignoreService';
 import { ILogService } from '../../../../platform/log/common/logService';
 import { IChatEndpoint } from '../../../../platform/networking/common/networking';
+import { isToolSearchEnabledForRequest } from '../../../../platform/networking/common/toolSearchPolicy';
 import { IAlternativeNotebookContentService } from '../../../../platform/notebook/common/alternativeContent';
 import { IPromptPathRepresentationService } from '../../../../platform/prompts/common/promptPathRepresentationService';
 import { ITabsAndEditorsService } from '../../../../platform/tabs/common/tabsAndEditorsService';
@@ -28,7 +29,7 @@ import { ChatRequestEditedFileEventKind, Position, Range } from '../../../../vsc
 import { GenericBasePromptElementProps } from '../../../context/node/resolvers/genericPanelIntentInvocation';
 import { ChatVariablesCollection, extractDebugTargetSessionIds, isCustomizationsIndex } from '../../../prompt/common/chatVariablesCollection';
 import { CustomizationsIndexMetadata, getGlobalContextCacheKey, GlobalContextMessageMetadata, RenderedUserMessageMetadata, Turn } from '../../../prompt/common/conversation';
-import { InternalToolReference } from '../../../prompt/common/intents';
+import { getSubAgentInvocationId, InternalToolReference } from '../../../prompt/common/intents';
 import { IPromptVariablesService } from '../../../prompt/node/promptVariablesService';
 import { ToolName } from '../../../tools/common/toolNames';
 import { MemoryContextPrompt, MemoryInstructionsPrompt } from '../../../tools/node/memoryContextPrompt';
@@ -89,6 +90,13 @@ export interface AgentPromptProps extends GenericBasePromptElementProps {
 
 /** Proportion of the prompt token budget any singular textual tool result is allowed to use. */
 const MAX_TOOL_RESPONSE_PCT = 0.5;
+
+function enableToolSearchForPrompt(endpoint: IChatEndpoint, promptContext: AgentPromptProps['promptContext']): boolean {
+	return isToolSearchEnabledForRequest({
+		supportsToolSearch: endpoint.supportsToolSearch,
+		isSubagent: !!getSubAgentInvocationId(promptContext),
+	});
+}
 
 /**
  * The agent mode prompt, rendered on each request
@@ -195,6 +203,7 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 				availableTools={this.props.promptContext.tools?.availableTools}
 				modelFamily={this.props.endpoint.family}
 				codesearchMode={this.props.codesearchMode}
+				enableToolSearch={enableToolSearchForPrompt(this.props.endpoint, this.props.promptContext)}
 			/>;
 		}
 
@@ -203,6 +212,7 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 			availableTools={this.props.promptContext.tools?.availableTools}
 			modelFamily={modelFamily}
 			codesearchMode={this.props.codesearchMode}
+			enableToolSearch={enableToolSearchForPrompt(this.props.endpoint, this.props.promptContext)}
 		/>;
 	}
 
@@ -302,9 +312,10 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 		const sessionResource = (this.props.promptContext.tools?.toolInvocationToken as any)?.sessionResource as string | undefined;
 		const workingDirectory = (this.props.promptContext.tools?.toolInvocationToken as any)?.workingDirectory as URI | undefined;
 		const workingDir = this.instantiationService.createInstance(WorkingDirectory, workingDirectory);
+		const enableToolSearch = enableToolSearchForPrompt(endpoint, this.props.promptContext);
 		const result = globalContext ?
 			renderedMessageToTsxChildren(globalContext, !!this.props.enableCacheBreakpoints) :
-			<GlobalAgentContext enableCacheBreakpoints={!!this.props.enableCacheBreakpoints} availableTools={this.props.promptContext.tools?.availableTools} isNewChat={isNewChat} sessionResource={sessionResource} workingDir={workingDir} />;
+			<GlobalAgentContext enableCacheBreakpoints={!!this.props.enableCacheBreakpoints} availableTools={this.props.promptContext.tools?.availableTools} enableToolSearch={enableToolSearch} isNewChat={isNewChat} sessionResource={sessionResource} workingDir={workingDir} />;
 
 		return result;
 	}
@@ -326,7 +337,7 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 		const sessionResource = (this.props.promptContext.tools?.toolInvocationToken as any)?.sessionResource as string | undefined;
 		const workingDirectory = (this.props.promptContext.tools?.toolInvocationToken as any)?.workingDirectory as URI | undefined;
 		const workingDir = this.instantiationService.createInstance(WorkingDirectory, workingDirectory);
-		const rendered = await renderPromptElement(this.instantiationService, endpoint, GlobalAgentContext, { enableCacheBreakpoints: this.props.enableCacheBreakpoints, availableTools: this.props.promptContext.tools?.availableTools, isNewChat, sessionResource, workingDir }, undefined, undefined);
+		const rendered = await renderPromptElement(this.instantiationService, endpoint, GlobalAgentContext, { enableCacheBreakpoints: this.props.enableCacheBreakpoints, availableTools: this.props.promptContext.tools?.availableTools, enableToolSearch: enableToolSearchForPrompt(endpoint, this.props.promptContext), isNewChat, sessionResource, workingDir }, undefined, undefined);
 		const msg = rendered.messages.at(0)?.content;
 		if (msg) {
 			firstTurn?.setMetadata(new GlobalContextMessageMetadata(msg, this.instantiationService.invokeFunction(getGlobalContextCacheKey)));
@@ -338,6 +349,7 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 interface GlobalAgentContextProps extends BasePromptElementProps {
 	readonly enableCacheBreakpoints?: boolean;
 	readonly availableTools?: readonly LanguageModelToolInformation[];
+	readonly enableToolSearch?: boolean;
 	readonly isNewChat?: boolean;
 	readonly sessionResource?: string;
 	readonly workingDir: WorkingDirectory;
@@ -363,7 +375,7 @@ class GlobalAgentContext extends PromptElement<GlobalAgentContextProps> {
 			</Tag>
 			<UserPreferences flexGrow={7} priority={800} />
 			{this.props.isNewChat && hasMemoryTool && <MemoryContextPrompt sessionResource={this.props.sessionResource} />}
-			<DeferredToolListReminder availableTools={this.props.availableTools} />
+			<DeferredToolListReminder availableTools={this.props.availableTools} enableToolSearch={this.props.enableToolSearch} />
 			{this.props.enableCacheBreakpoints && <cacheBreakpoint type={CacheType} />}
 		</UserMessage>;
 	}
@@ -385,6 +397,7 @@ export interface AgentUserMessageProps extends BasePromptElementProps, AgentUser
 	readonly endpoint: IChatEndpoint;
 	readonly toolReferences: readonly InternalToolReference[];
 	readonly availableTools?: readonly LanguageModelToolInformation[];
+	readonly enableToolSearch?: boolean;
 	readonly chatVariables: ChatVariablesCollection;
 	readonly enableCacheBreakpoints?: boolean;
 	readonly editedFileEvents?: readonly ChatRequestEditedFileEvent[];
@@ -438,6 +451,7 @@ export function getUserMessagePropsFromAgentProps(agentProps: AgentPromptProps, 
 		endpoint: agentProps.endpoint,
 		toolReferences: agentProps.promptContext.tools?.toolReferences ?? [],
 		availableTools: agentProps.promptContext.tools?.availableTools,
+		enableToolSearch: enableToolSearchForPrompt(agentProps.endpoint, agentProps.promptContext),
 		chatVariables: agentProps.promptContext.chatVariables,
 		enableCacheBreakpoints: agentProps.enableCacheBreakpoints,
 		editedFileEvents: agentProps.promptContext.editedFileEvents,
@@ -511,6 +525,7 @@ export class AgentUserMessage extends PromptElement<AgentUserMessageProps> {
 			hasReplaceStringTool,
 			hasMultiReplaceStringTool,
 			hasMemoryTool,
+			enableToolSearch: this.props.enableToolSearch,
 		};
 		const ToolReferencesHintClass = this.props.ToolReferencesHintClass ?? DefaultToolReferencesHint;
 		const toolReferencesHintProps: ToolReferencesHintProps = {

@@ -16,7 +16,7 @@ import { ResponseRenderingRules } from '../../panel/editorIntegrationRules';
 import { ApplyPatchInstructions, DefaultAgentPromptProps, detectToolCapabilities, getEditingReminder, McpToolInstructions, ReminderInstructionsProps } from '../defaultAgentInstructions';
 import { FileLinkificationInstructions } from '../fileLinkificationInstructions';
 import { CopilotIdentityRulesConstructor, IAgentPrompt, PromptRegistry, ReminderInstructionsConstructor, SafetyRulesConstructor, SystemPrompt } from '../promptRegistry';
-import { CUSTOM_TOOL_SEARCH_NAME, ToolSearchToolPromptOptimized } from '../toolSearchInstructions';
+import { CUSTOM_TOOL_SEARCH_NAME, isToolSearchEnabledInPrompt, ToolSearchToolPromptOptimized } from '../toolSearchInstructions';
 
 export class Gpt54Prompt extends PromptElement<DefaultAgentPromptProps> {
 	async render(state: void, sizing: PromptSizing) {
@@ -105,7 +105,7 @@ export class Gpt54Prompt extends PromptElement<DefaultAgentPromptProps> {
 				<ResponseRenderingRules />
 			</Tag>
 			{this.props.availableTools && <McpToolInstructions tools={this.props.availableTools} />}
-			<ToolSearchToolPromptOptimized availableTools={this.props.availableTools} />
+			<ToolSearchToolPromptOptimized availableTools={this.props.availableTools} enableToolSearch={this.props.enableToolSearch} />
 			{tools[ToolName.ApplyPatch] && <ApplyPatchInstructions {...this.props} tools={tools} />}
 			<Tag name='frontend_tasks'>
 				When doing frontend design tasks, avoid collapsing into "AI slop" or safe, average-looking layouts.<br />
@@ -242,7 +242,7 @@ class Gpt54PromptResolver implements IAgentPrompt {
 
 export class Gpt54ReminderInstructions extends PromptElement<ReminderInstructionsProps> {
 	async render(state: void, sizing: PromptSizing) {
-		const toolSearchEnabled = !!this.props.endpoint.supportsToolSearch;
+		const toolSearchEnabled = isToolSearchEnabledInPrompt(this.props.endpoint, this.props.enableToolSearch);
 		return <>
 			You are an agent—keep going until the user's query is completely resolved before ending your turn. ONLY stop if solved or genuinely blocked.<br />
 			Take action when possible; the user expects you to do useful work without unnecessary questions.<br />
