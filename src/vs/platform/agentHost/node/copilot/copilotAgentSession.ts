@@ -502,6 +502,13 @@ export interface ICopilotAgentSessionOptions {
 	 * this session off the current stack.
 	 */
 	readonly onTurnEnded?: () => void;
+	/**
+	 * Invoked when the SDK session's stdio/JSON-RPC transport dies without this
+	 * session initiating {@link CopilotSession.disconnect}. The agent must fail
+	 * the in-flight turn and recycle the Copilot client; schedule any dispose
+	 * off the current stack, same as {@link onTurnEnded}.
+	 */
+	readonly onTransportDisconnected?: () => void;
 
 	/**
 	 * Platform used to compute the SDK sandbox policy. Defaults to
@@ -1147,6 +1154,8 @@ export class CopilotAgentSession extends Disposable {
 	private _detectInterruptedTurnOnRestore: boolean;
 	/** Notifies the agent that this chat's turn ended. See {@link ICopilotAgentSessionOptions.onTurnEnded}. */
 	private readonly _onTurnEnded: () => void;
+	/** Notifies the agent that the SDK transport died. See {@link ICopilotAgentSessionOptions.onTransportDisconnected}. */
+	private readonly _onTransportDisconnected: () => void;
 	private readonly _shellManager: ShellManager | undefined;
 	/** Streams runtime-executed shell output into output-only (non-pty) terminal channels. */
 	private readonly _nonPtyShellTerminals: NonPtyShellTerminalStreams;
@@ -1240,6 +1249,7 @@ export class CopilotAgentSession extends Disposable {
 		this._launchPlan = options.launchPlan;
 		this._detectInterruptedTurnOnRestore = options.launchPlan.kind === 'resume';
 		this._onTurnEnded = options.onTurnEnded ?? (() => { });
+		this._onTransportDisconnected = options.onTransportDisconnected ?? (() => { });
 		this._shellManager = options.shellManager;
 		this._nonPtyShellTerminals = this._register(this._instantiationService.createInstance(NonPtyShellTerminalStreams, options.sessionUri, options.chatChannelUri));
 		this._workingDirectory = options.workingDirectory;
@@ -6747,6 +6757,15 @@ export class CopilotAgentSession extends Disposable {
 
 		this._register(wrapper.onUnhandledEvent(e => {
 			this._logService.trace(`[Copilot:${sessionId}] Unhandled SDK event: ${safeStringify(e)}`);
+		}));
+
+		this._register(wrapper.onTransportDisconnected(() => {
+			this._logService.error(`[Copilot:${sessionId}] SDK session disconnected because the Copilot backend transport closed`);
+			try {
+				this._onTransportDisconnected();
+			} catch (err) {
+				this._logService.error(err, `[Copilot:${sessionId}] onTransportDisconnected callback failed`);
+			}
 		}));
 
 		this._register(wrapper.onSessionStart(e => {

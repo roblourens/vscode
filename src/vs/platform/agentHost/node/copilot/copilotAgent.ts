@@ -202,6 +202,64 @@ function isCopilotConnectionClosedError(error: unknown): boolean {
 	return classifyCopilotClientOperationFailure(error) === 'connectionClosed';
 }
 
+const COPILOT_CONNECTION_CLOSED_ERROR_MESSAGE = 'Connection is closed.';
+
+/**
+ * Duck-typed surface used to notice a dead Copilot CLI stdio process.
+ *
+ * The published SDK 1.0.x client does not expose `onDidDisconnect`. After the
+ * child exits it also sets `messageWriter.suppressWriteErrors`, so later RPCs
+ * (including `session.send`) never reject and the chat spinner hangs. Tests
+ * implement {@link ICopilotClientDisconnectWatchable.onDidDisconnect}; the
+ * real client is observed via the stdio child and JSON-RPC `onClose`.
+ */
+export interface ICopilotClientDisconnectWatchable {
+	onDidDisconnect?(listener: () => void): IDisposable;
+	cliProcess?: { on?(event: 'exit', listener: () => void): unknown; off?(event: 'exit', listener: () => void): unknown } | null;
+	connection?: { onClose?(listener: () => void): unknown } | null;
+	connectionClosed?: boolean;
+	state?: string;
+}
+
+export function subscribeCopilotClientDisconnect(client: CopilotClient, listener: () => void): IDisposable {
+	const watchable = client as CopilotClient & ICopilotClientDisconnectWatchable;
+	if (typeof watchable.onDidDisconnect === 'function') {
+		return watchable.onDidDisconnect(listener);
+	}
+
+	const store = new DisposableStore();
+	let fired = false;
+	const fire = () => {
+		if (fired) {
+			return;
+		}
+		fired = true;
+		listener();
+	};
+
+	if (watchable.connectionClosed === true || watchable.state === 'disconnected' || watchable.state === 'error') {
+		queueMicrotask(fire);
+		return store;
+	}
+
+	const cliProcess = watchable.cliProcess;
+	if (cliProcess && typeof cliProcess.on === 'function') {
+		cliProcess.on('exit', fire);
+		store.add(toDisposable(() => {
+			if (typeof cliProcess.off === 'function') {
+				cliProcess.off('exit', fire);
+			}
+		}));
+	}
+
+	const connection = watchable.connection;
+	if (connection && typeof connection.onClose === 'function') {
+		connection.onClose(fire);
+	}
+
+	return store;
+}
+
 /**
  * Proxy env vars recognized by the Copilot runtime.
  */
@@ -823,6 +881,13 @@ export class CopilotAgent extends Disposable implements IAgent {
 	private _client: CopilotClient | undefined;
 	private _clientStarting: Promise<CopilotClient> | undefined;
 	/**
+	 * True from the moment the live CLI/stdio transport is observed dead until
+	 * the next successful {@link _ensureClientOnce} start. Prevents returning
+	 * the zombie `_client` to a send that races recovery.
+	 */
+	private _copilotBackendDead = false;
+	private readonly _clientDisconnectWatch = this._register(new MutableDisposable());
+	/**
 	 * Coalesces the whole acquire-and-self-heal sequence in `_ensureClient` so
 	 * that all concurrent callers share a single, global retry budget for
 	 * startup-config-changed aborts (rather than each caller getting its own).
@@ -1239,6 +1304,24 @@ export class CopilotAgent extends Disposable implements IAgent {
 				this._logService.error('[Copilot] Failed to apply deferred client restart', err)
 			);
 		});
+	}
+
+	/**
+	 * The Copilot CLI process or its stdio transport died. Fail any in-flight
+	 * turn with a recoverable error and drop the dead client so the next
+	 * `_ensureClient` spawns a replacement — otherwise chat spins forever.
+	 */
+	private _onCopilotBackendDisconnected(): void {
+		if (this._shutdownPromise || this._clientStopping || this._copilotBackendDead) {
+			return;
+		}
+		this._copilotBackendDead = true;
+		this._logService.error('[Copilot] Copilot backend connection closed');
+		void this._handleClientOperationFailure(new Error(COPILOT_CONNECTION_CLOSED_ERROR_MESSAGE), 'backend');
+	}
+
+	private _attachCopilotClientDisconnectWatch(client: CopilotClient): void {
+		this._clientDisconnectWatch.value = subscribeCopilotClientDisconnect(client, () => this._onCopilotBackendDisconnected());
 	}
 
 	private async _handleClientOperationFailure(error: unknown, operation: CopilotClientOperation, correlation?: ICopilotFailureCorrelation): Promise<ICopilotClosedConnectionRecoveryResult | undefined> {
@@ -2168,6 +2251,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 		// synchronously so a concurrent `_applyPendingClientRestart` bails rather
 		// than stopping a client this call is already tearing down.
 		this._pendingClientRestartReasons.clear();
+		this._clientDisconnectWatch.clear();
 		if (this._clientStopping) {
 			return this._clientStopping;
 		}
@@ -2268,6 +2352,15 @@ export class CopilotAgent extends Disposable implements IAgent {
 			if (this._shutdownPromise) {
 				throw new CancellationError();
 			}
+		}
+		if (this._copilotBackendDead) {
+			const recovery = this._closedConnectionRecovery?.promise;
+			if (recovery) {
+				await recovery;
+			} else if (this._client) {
+				await this._stopClient();
+			}
+			this._copilotBackendDead = false;
 		}
 		if (this._client) {
 			return this._client;
@@ -2405,8 +2498,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 				return this._stopClientAfterStartupTermination(client, new CopilotClientStartupConfigChangedError());
 			}
 			this._logService.info('[Copilot] CopilotClient started successfully');
+			this._copilotBackendDead = false;
 			this._client = client;
 			this._clientStarting = undefined;
+			this._attachCopilotClientDisconnectWatch(client);
 			return client;
 		};
 		const clientStarting = (async () => {
@@ -5409,6 +5504,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 				hostCustomizations: () => this._retainedHostCustomizations(sessionUri),
 				serverToolHost: this._serverToolHost,
 				onTurnEnded: () => this._onChatTurnEnded(),
+				onTransportDisconnected: () => this._onCopilotBackendDisconnected(),
 			},
 		);
 		return agentSession;

@@ -195,6 +195,13 @@ class MockCopilotSession {
 	disconnectGate: Promise<void> | undefined;
 	disconnectHook: (() => void) | undefined;
 	disconnectError: Error | undefined;
+	private _onDisconnected: (() => void) | undefined;
+	_setOnDisconnected(callback: () => void): void {
+		this._onDisconnected = callback;
+	}
+	simulateTransportDisconnect(): void {
+		this._onDisconnected?.();
+	}
 	/**
 	 * Per-call gates, consumed in call order, for holding individual reads in flight.
 	 * Lets a test make an earlier-issued read resolve after a later one.
@@ -834,6 +841,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	restrictedTelemetryContext?: IRestrictedTelemetryContext;
 	restrictedTelemetryContextError?: Error;
 	onTurnEnded?: () => void;
+	onTransportDisconnected?: () => void;
 	modelId?: string;
 	enableDevelopmentErrorInjection?: boolean;
 	resume?: boolean;
@@ -1128,6 +1136,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 			serverToolHost: options?.serverToolHost,
 			platform: options?.platform ?? 'linux',
 			onTurnEnded: options?.onTurnEnded,
+			onTransportDisconnected: options?.onTransportDisconnected,
 			enableDevelopmentErrorInjection: options?.enableDevelopmentErrorInjection ?? true,
 			realpath: options?.realpath,
 			controlPlaneRpcTimeoutMs: options?.controlPlaneRpcTimeoutMs,
@@ -1853,6 +1862,19 @@ suite('CopilotAgentSession', () => {
 					'disconnect wait completed: disconnectRpc=completed, shutdownReceived=false, disposed=false',
 				],
 			});
+		});
+
+		test('fires onTransportDisconnected when the SDK marks the session dead, but not for host-initiated disconnect', async () => {
+			const mockSession = new MockCopilotSession();
+			const wrapper = createWrapper(mockSession);
+			const events: string[] = [];
+			disposables.add(wrapper.onTransportDisconnected(() => events.push('unexpected')));
+
+			mockSession.simulateTransportDisconnect();
+			await wrapper.disconnect();
+			mockSession.simulateTransportDisconnect();
+
+			assert.deepStrictEqual(events, ['unexpected']);
 		});
 
 		test('returns to active and permits retry after disconnect rejects', async () => {
@@ -3145,6 +3167,18 @@ suite('CopilotAgentSession', () => {
 		await assert.rejects(() => session.send('hello', undefined, 'turn-failed'), /send failed/);
 
 		assert.deepStrictEqual({ hasActiveTurn: session.hasActiveTurn, turnEndCount }, { hasActiveTurn: false, turnEndCount: 1 });
+	});
+
+	test('notifies the agent when the SDK transport dies without a host-initiated disconnect', async () => {
+		const disconnects: string[] = [];
+		const { session, mockSession } = await createAgentSession(disposables, {
+			onTransportDisconnected: () => disconnects.push('dead'),
+		});
+		session.resetTurnState('turn-backend-death');
+		assert.strictEqual(session.hasActiveTurn, true);
+		mockSession.simulateTransportDisconnect();
+		await session.dispose();
+		assert.deepStrictEqual(disconnects, ['dead']);
 	});
 
 	test('`/env` runs the runtime command when listed and emits markdown output', async () => {

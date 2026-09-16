@@ -39,6 +39,12 @@ export class CopilotSessionWrapper extends Disposable {
 	readonly onUnhandledEvent = this._onUnhandledEvent.event;
 	private readonly _onModelCallFinished = this._register(new Emitter<ICopilotModelCallFinishedEvent>());
 	readonly onModelCallFinished = this._onModelCallFinished.event;
+	private readonly _onTransportDisconnected = this._register(new Emitter<void>());
+	/**
+	 * Fires when the SDK marks this session disconnected because the CLI
+	 * stdio/JSON-RPC transport died — not when we ourselves call {@link disconnect}.
+	 */
+	readonly onTransportDisconnected = this._onTransportDisconnected.event;
 	private readonly _shutdown = new DeferredPromise<void>();
 	private _disconnectPromise: Promise<void> | undefined;
 	private _disconnectRpcState: 'notStarted' | 'pending' | 'completed' | 'failed' = 'notStarted';
@@ -64,12 +70,33 @@ export class CopilotSessionWrapper extends Disposable {
 			}
 		});
 		this._register(toDisposable(unsubscribeAll));
+		this._listenForSdkTransportDisconnect();
 		this._register(toDisposable(() => {
 			void this.disconnect().catch(() => { /* best-effort */ });
 		}));
 	}
 
 	get sessionId(): string { return this.session.sessionId; }
+
+	/**
+	 * The SDK clears session event handlers on transport death without emitting
+	 * `session.shutdown`. Hook the internal disconnect callback so the host can
+	 * fail the in-flight turn instead of spinning until Extension Host restart.
+	 */
+	private _listenForSdkTransportDisconnect(): void {
+		const session = this.session as CopilotSession & { _setOnDisconnected?(callback: () => void): void };
+		if (typeof session._setOnDisconnected !== 'function') {
+			return;
+		}
+		session._setOnDisconnected(() => {
+			if (this._disconnectRpcState !== 'notStarted') {
+				return;
+			}
+			this._logService.error(this._lifecycleLogMessage('transport disconnected'));
+			this._onTransportDisconnected.fire();
+		});
+	}
+
 	get lifecycleState(): AgentTurnProviderSessionState {
 		return this._shutdown.isSettled
 			? 'shutdown'

@@ -64,7 +64,7 @@ import { IAgentHostGitService, type IAddWorktreeOptions, type IBranch, type IDef
 import { IAgentHostTerminalManager } from '../../node/agentHostTerminalManager.js';
 import { IAgentHostOTelService } from '../../common/otel/agentHostOTelService.js';
 import { AgentHostCompletions, IAgentHostCompletions } from '../../node/agentHostCompletions.js';
-import { COPILOT_AGENT_HOST_SYSTEM_MESSAGE, CopilotAgent, getCopilotManagedSettingsDiagnostics, rebaseUnder, REFRESH_DEBOUNCE_MS, resolveCopilotOtlpMetricsEndpoint } from '../../node/copilot/copilotAgent.js';
+import { COPILOT_AGENT_HOST_SYSTEM_MESSAGE, CopilotAgent, getCopilotManagedSettingsDiagnostics, rebaseUnder, REFRESH_DEBOUNCE_MS, resolveCopilotOtlpMetricsEndpoint, subscribeCopilotClientDisconnect } from '../../node/copilot/copilotAgent.js';
 import { CopilotGitHubSessionCredentials } from '../../node/copilot/copilotGitHubCredentials.js';
 import { GITHUB_MCP_SERVER_NAME } from '../../node/shared/githubMcpServer.js';
 import { AGENT_HOST_FILE_LINK_INSTRUCTIONS } from '../../node/shared/fileLinkInstructions.js';
@@ -649,6 +649,13 @@ class TestCopilotClient implements ITestCopilotClient {
 	readonly startCalled = new DeferredPromise<void>();
 	startGate: Promise<void> | undefined;
 	startError: Error | undefined;
+	private readonly _onDidDisconnect = new Emitter<void>();
+	onDidDisconnect(listener: () => void): IDisposable {
+		return this._onDidDisconnect.event(listener);
+	}
+	simulateDisconnect(): void {
+		this._onDidDisconnect.fire();
+	}
 	listSessionCallCount = 0;
 	sessionListStarted: DeferredPromise<void> | undefined;
 	sessionListGate: Promise<void> | undefined;
@@ -3386,6 +3393,137 @@ suite('CopilotAgent', () => {
 		} finally {
 			await disposeAgent(agent);
 		}
+	});
+
+	test('fails an active turn and recycles the client when the Copilot backend disconnects', async () => {
+		const client = new TestCopilotClient([], [{
+			id: 'gpt-4o',
+			name: 'GPT-4o',
+		}]);
+		const telemetryService = new RecordingTelemetryService();
+		const agent = createTestAgent(disposables, { copilotClient: client, telemetryService });
+		const chat = defaultChatUri(AgentSession.uri('copilotcli', 'backend-death'));
+		let active = true;
+		let failCalls = 0;
+		let disposeCalls = 0;
+		setDefaultSessionStub(agent, 'backend-death', {
+			sessionId: 'backend-death',
+			sessionUri: AgentSession.uri('copilotcli', 'backend-death'),
+			chatUri: chat,
+			get hasActiveTurn() { return active; },
+			failActiveTurn: () => {
+				if (!active) {
+					return undefined;
+				}
+				failCalls++;
+				active = false;
+				return 'backend-death-turn';
+			},
+			dispose: () => disposeCalls++,
+		});
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+			await waitForState(agent.models, models => models.length > 0);
+			client.simulateDisconnect();
+			for (let i = 0; i < 100 && !telemetryService.events.some(event => event.eventName === 'agentHost.copilotClientRecovery'); i++) {
+				await timeout(0);
+			}
+
+			const failure = telemetryService.errorEvents.find(event => event.eventName === 'agentHost.copilotClientFailure')?.data as Record<string, unknown>;
+			const recovery = telemetryService.events.find(event => event.eventName === 'agentHost.copilotClientRecovery')?.data as Record<string, unknown>;
+			assert.deepStrictEqual({
+				failCalls,
+				disposeCalls,
+				stopCount: client.stopCallCount,
+				remainingSessions: chatEntriesBySdkId(agent).size,
+				failure: {
+					failureKind: failure.failureKind,
+					operation: failure.operation,
+					activeTurnCount: failure.activeTurnCount,
+					recoveryStarted: failure.recoveryStarted,
+					msg: failure.msg,
+				},
+				recovery: {
+					failureKind: recovery.failureKind,
+					failedTurnCount: recovery.failedTurnCount,
+					stopSucceeded: recovery.stopSucceeded,
+				},
+			}, {
+				failCalls: 1,
+				disposeCalls: 1,
+				stopCount: 1,
+				remainingSessions: 0,
+				failure: {
+					failureKind: 'connectionClosed',
+					operation: 'backend',
+					activeTurnCount: 1,
+					recoveryStarted: true,
+					msg: 'Connection is closed.',
+				},
+				recovery: {
+					failureKind: 'connectionClosed',
+					failedTurnCount: 1,
+					stopSucceeded: true,
+				},
+			});
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('restarts the Copilot client after a dead backend so the next request is not hung', async () => {
+		const client = new TestCopilotClient([], [{
+			id: 'gpt-4o',
+			name: 'GPT-4o',
+		}]);
+		const agent = createTestAgent(disposables, { copilotClient: client });
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+			await waitForState(agent.models, models => models.length > 0);
+			assert.strictEqual(client.startCallCount, 1);
+			client.simulateDisconnect();
+			for (let i = 0; i < 100 && client.stopCallCount === 0; i++) {
+				await timeout(0);
+			}
+			assert.strictEqual(client.stopCallCount, 1);
+
+			await agent.listChatsToMigrate();
+			assert.deepStrictEqual({
+				startCallCount: client.startCallCount,
+				stopCallCount: client.stopCallCount,
+			}, {
+				startCallCount: 2,
+				stopCallCount: 1,
+			});
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('subscribeCopilotClientDisconnect fires once when the CLI process exits', () => {
+		const processListeners = new Map<string, Set<() => void>>();
+		const cliProcess = {
+			on(event: 'exit', listener: () => void) {
+				const listeners = processListeners.get(event) ?? new Set();
+				listeners.add(listener);
+				processListeners.set(event, listeners);
+			},
+			off(event: 'exit', listener: () => void) {
+				processListeners.get(event)?.delete(listener);
+			},
+		};
+		const client = { cliProcess } as unknown as CopilotClient;
+		const events: string[] = [];
+		const subscription = subscribeCopilotClientDisconnect(client, () => events.push('dead'));
+		for (const listener of processListeners.get('exit') ?? []) {
+			listener();
+			listener();
+		}
+		subscription.dispose();
+		for (const listener of processListeners.get('exit') ?? []) {
+			listener();
+		}
+		assert.deepStrictEqual({ events, remaining: processListeners.get('exit')?.size ?? 0 }, { events: ['dead'], remaining: 0 });
 	});
 
 	test('reports one successful Copilot client startup outcome for concurrent callers', async () => {
