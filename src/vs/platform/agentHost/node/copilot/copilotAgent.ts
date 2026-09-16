@@ -1331,9 +1331,9 @@ export class CopilotAgent extends Disposable implements IAgent {
 		return createCopilotFailureCorrelation(context.configurationResource, chat, turnId, context.target?.sessionId ?? context.configurationId, clientTelemetryContext);
 	}
 
-	/** Number of live chats (default or peer, across all sessions) with an in-flight turn. */
+	/** Number of live chats (default or peer, across all sessions) with an in-flight turn or unfinished session work. */
 	private _chatsWithActiveTurn(): number {
-		return this._allLiveSessions().filter(session => session.hasActiveTurn).length;
+		return this._allLiveSessions().filter(session => session.hasActiveTurn || session.isAwaitingSessionIdle).length;
 	}
 
 	protected _createCopilotClient(options: CopilotClientOptions): CopilotClient {
@@ -4780,7 +4780,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 		if (!target) {
 			return true;
 		}
-		if (target.hasActiveTurn) {
+		if (target.hasActiveTurn || target.isAwaitingSessionIdle) {
+			if (target.isAwaitingSessionIdle && !target.hasActiveTurn) {
+				this._logService.info(`[Copilot:${target.sessionId}] Deferring idle release until session idle`);
+			}
 			return false;
 		}
 		if (await target.hasRunningDetachedShells()) {
@@ -4798,7 +4801,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 		}
 		await lifetime.release(async () => {
 			const target = this._resolveChatContext(chat, operationContext).target;
-			if (!target || target.hasActiveTurn) {
+			if (!target || target.hasActiveTurn || target.isAwaitingSessionIdle) {
 				return;
 			}
 			await this._destroyLiveSession(target, true);

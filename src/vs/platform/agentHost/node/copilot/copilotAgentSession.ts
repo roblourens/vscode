@@ -541,11 +541,13 @@ type CopilotTurnState = 'pending' | 'running' | 'completed' | 'aborted';
  * transitions (running/completed/aborted) are explicit and checkable.
  *
  * The `pending → running` distinction guards turn completion against a stray
- * idle: an abort's terminal `session.idle` finds a queued message's turn still
- * `pending` (the SDK has not begun it) and leaves it open, rather than
- * completing it and orphaning its real response. A non-abort idle still
- * completes a `pending` turn defensively, so a degenerate no-op send cannot
- * hang the session.
+ * idle: an abort's terminal idle finds a queued message's turn still `pending`
+ * (the SDK has not begun it) and leaves it open, rather than completing it and
+ * orphaning its real response. A non-abort idle still completes a `pending`
+ * turn defensively, so a degenerate no-op send cannot hang the session.
+ * Foreground completion is driven by root `assistant.idle`; `session.idle` is
+ * the whole-session signal and a fallback when the runtime never emits the
+ * foreground event.
  */
 
 /**
@@ -625,8 +627,8 @@ class CopilotTurn extends Disposable {
 	 *
 	 * Accumulated synchronously as each event arrives rather than derived from
 	 * the SDK's session-wide total: that total is read asynchronously, and the
-	 * terminal `session.idle` can close the turn while a read is in flight,
-	 * which would drop the turn's last model call from its reported cost.
+	 * terminal idle can close the turn while a read is in flight, which would
+	 * drop the turn's last model call from its reported cost.
 	 */
 	copilotNanoAiu = 0;
 
@@ -932,6 +934,13 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _observedUsageEventIds = new Set<string>();
 	private _resumingTurnAwaitingProviderStart: CopilotTurn | undefined;
 	private _abortingTurn: CopilotTurn | undefined;
+	/**
+	 * Set when root `assistant.idle` ends the protocol turn before `session.idle`.
+	 * Cleared when the session itself goes idle. See {@link isAwaitingSessionIdle}.
+	 */
+	private _awaitingSessionIdle = false;
+	/** Turn currently draining/completing from an idle event; blocks a second idle from completing it. */
+	private _idleCompletingTurn: CopilotTurn | undefined;
 	private _developmentRecoverableError: { readonly turnId: string; remainingFailures: number; readonly totalFailures: number } | undefined;
 	private readonly _developmentErrorInjectionEnabled: boolean;
 	private _dropLateRootTurnEvents = false;
@@ -951,6 +960,13 @@ export class CopilotAgentSession extends Disposable {
 	 * non-destructive idle release to avoid disconnecting mid-turn.
 	 */
 	get hasActiveTurn(): boolean { return this._currentTurn.value !== undefined; }
+	/**
+	 * True after the foreground loop idled (`assistant.idle`) while whole-session
+	 * idle (`session.idle`) is still outstanding — typically because an attached
+	 * shell is still running. Blocks idle release and deferred CLI restarts so
+	 * completing the protocol turn does not tear that work down.
+	 */
+	get isAwaitingSessionIdle(): boolean { return this._awaitingSessionIdle; }
 	get usesStaticGitHubToken(): boolean { return this._launchPlan.githubCredentials.usesStaticToken; }
 	get chatUri(): URI { return this._chatChannelUri; }
 	get currentTurnId(): string | undefined { return this._currentTurn.value?.id; }
@@ -1941,6 +1957,132 @@ export class CopilotAgentSession extends Disposable {
 		this._agentMergeTurn = false;
 		this._streamingToolCalls.clear();
 		this._streamingToolDisplaySchedulers.clearAndDisposeAll();
+		this._notifyTurnEnded();
+	}
+
+	/**
+	 * Completes or tears down the foreground protocol turn.
+	 *
+	 * Root `assistant.idle` is the foreground-loop signal and completes the
+	 * chat turn even while attached shells keep `session.idle` deferred.
+	 * `session.idle` still does whole-session cleanup and is the fallback when
+	 * the runtime never emits `assistant.idle`. Subagent `assistant.idle` is
+	 * ignored: child loops must not close the parent response.
+	 */
+	private async _handleIdleEvent(e: { readonly agentId?: string; readonly data: { readonly aborted?: boolean } }, source: 'assistant' | 'session'): Promise<void> {
+		if (source === 'assistant' && e.agentId) {
+			this._logService.trace(`[Copilot:${this.sessionId}] Ignoring subagent assistant.idle: agentId=${e.agentId}`);
+			return;
+		}
+
+		this._logService.info(`[Copilot:${this.sessionId}] ${source === 'assistant' ? 'Assistant' : 'Session'} idle`);
+
+		const awaitingSessionIdle = this._awaitingSessionIdle;
+		if (source === 'session') {
+			this._awaitingSessionIdle = false;
+		}
+
+		if (e.data.aborted) {
+			this._resetAbortToken();
+		}
+		if (this._hasActivity) {
+			this._hasActivity = false;
+			this._emitAction({
+				type: ActionType.SessionActivityChanged,
+				activity: undefined,
+			});
+		}
+
+		const abortingTurn = this._abortingTurn;
+		if (source === 'session' || e.data.aborted) {
+			this._abortingTurn = undefined;
+		}
+
+		const turn = this._currentTurn.value;
+		if (source === 'session' && awaitingSessionIdle) {
+			// Foreground already finished. This event is background work catching
+			// up — do not complete a newer queued or in-flight turn, but do notify
+			// lifecycle so a deferred CLI restart can run now that the session is
+			// fully idle.
+			if (turn) {
+				this._logService.trace(`[Copilot:${this.sessionId}] Session idle after foreground completion; leaving ${turn.state} turn ${turn.id} open`);
+			}
+			this._notifyTurnEnded();
+			return;
+		}
+		if (!turn) {
+			return;
+		}
+		// An abort drives the loop to idle. That terminal idle must never
+		// complete a turn:
+		//  - if `turn` is the aborted (running) turn, the client-dispatched
+		//    `ChatTurnCancelled` finalizes the protocol turn; drop our handle
+		//    so a later idle can't complete it.
+		//  - if `turn` is the pending failed-turn continuation being aborted,
+		//    drop it before the provider starts.
+		//  - any other pending turn is a queued message started after the
+		//    abort; leave it open for its own non-abort idle.
+		if (e.data.aborted && (!abortingTurn || turn === abortingTurn)) {
+			this._cancelActiveRepoInfoTelemetry();
+			if (turn.isRunning || turn === this._resumingTurnAwaitingProviderStart) {
+				this._logService.trace(`[Copilot:${this.sessionId}] Idle from abort; tearing down cancelled turn ${turn.id}`);
+				if (turn.isRunning) {
+					this._reportToolCallDetails(turn, 'cancelled');
+				}
+				this._dropLateRootTurnEvents = true;
+				turn.markAborted();
+				this._clearActiveTurn();
+				if (source === 'assistant') {
+					this._awaitingSessionIdle = true;
+				}
+			} else {
+				this._logService.trace(`[Copilot:${this.sessionId}] Idle from abort; leaving ${turn.state} turn ${turn.id} open`);
+			}
+			return;
+		}
+		if (e.data.aborted && !turn.isRunning) {
+			this._logService.trace(`[Copilot:${this.sessionId}] Idle from abort; leaving ${turn.state} replacement turn ${turn.id} open`);
+			return;
+		}
+		if (e.data.aborted) {
+			this._logService.trace(`[Copilot:${this.sessionId}] Idle from abort reached running replacement turn ${turn.id}; completing replacement`);
+		}
+		if (turn === this._resumingTurnAwaitingProviderStart && !turn.providerTurnStarted) {
+			this._logService.trace(`[Copilot:${this.sessionId}] Ignoring idle from the failed execution while resumed turn ${turn.id} awaits provider start`);
+			return;
+		}
+		// Only a `running` turn is completed by a normal idle. A `pending`
+		// turn here means the SDK went idle before emitting any event for it
+		// (a degenerate no-op send); complete it defensively so the session
+		// does not hang.
+		if (this._idleCompletingTurn === turn) {
+			if (turn.hasPendingToolCompletions) {
+				await turn.drainToolCompletions();
+			}
+			return;
+		}
+		this._idleCompletingTurn = turn;
+		try {
+			if (turn.hasPendingToolCompletions) {
+				const abortToken = this._abortToken;
+				await turn.drainToolCompletions();
+				if (this._store.isDisposed || abortToken.isCancellationRequested || this._currentTurn.value !== turn) {
+					return;
+				}
+			}
+			this._completeActiveRepoInfoTelemetry();
+			this._completeActiveTurn();
+			if (source === 'assistant') {
+				this._awaitingSessionIdle = true;
+			}
+		} finally {
+			if (this._idleCompletingTurn === turn) {
+				this._idleCompletingTurn = undefined;
+			}
+		}
+	}
+
+	private _notifyTurnEnded(): void {
 		try {
 			this._onTurnEnded();
 		} catch (err) {
@@ -5587,73 +5729,8 @@ export class CopilotAgentSession extends Disposable {
 			turn?.trackToolCompletion(completion);
 		}));
 
-		this._register(wrapper.onIdle(async e => {
-			this._logService.info(`[Copilot:${sessionId}] Session idle`);
-			const abortingTurn = this._abortingTurn;
-			this._abortingTurn = undefined;
-			if (e.data.aborted) {
-				this._resetAbortToken();
-			}
-			if (this._hasActivity) {
-				this._hasActivity = false;
-				this._emitAction({
-					type: ActionType.SessionActivityChanged,
-					activity: undefined,
-				});
-			}
-			const turn = this._currentTurn.value;
-			if (!turn) {
-				return;
-			}
-			// An abort drives the loop to idle. That terminal idle must never
-			// complete a turn:
-			//  - if `turn` is the aborted (running) turn, the client-dispatched
-			//    `ChatTurnCancelled` finalizes the protocol turn; drop our handle
-			//    so a later idle can't complete it.
-			//  - if `turn` is the pending failed-turn continuation being aborted,
-			//    drop it before the provider starts.
-			//  - any other pending turn is a queued message started after the
-			//    abort; leave it open for its own non-abort idle.
-			if (e.data.aborted && (!abortingTurn || turn === abortingTurn)) {
-				this._cancelActiveRepoInfoTelemetry();
-				if (turn.isRunning || turn === this._resumingTurnAwaitingProviderStart) {
-					this._logService.trace(`[Copilot:${sessionId}] Idle from abort; tearing down cancelled turn ${turn.id}`);
-					if (turn.isRunning) {
-						this._reportToolCallDetails(turn, 'cancelled');
-					}
-					this._dropLateRootTurnEvents = true;
-					turn.markAborted();
-					this._clearActiveTurn();
-				} else {
-					this._logService.trace(`[Copilot:${sessionId}] Idle from abort; leaving ${turn.state} turn ${turn.id} open`);
-				}
-				return;
-			}
-			if (e.data.aborted && !turn.isRunning) {
-				this._logService.trace(`[Copilot:${sessionId}] Idle from abort; leaving ${turn.state} replacement turn ${turn.id} open`);
-				return;
-			}
-			if (e.data.aborted) {
-				this._logService.trace(`[Copilot:${sessionId}] Idle from abort reached running replacement turn ${turn.id}; completing replacement`);
-			}
-			if (turn === this._resumingTurnAwaitingProviderStart && !turn.providerTurnStarted) {
-				this._logService.trace(`[Copilot:${sessionId}] Ignoring idle from the failed execution while resumed turn ${turn.id} awaits provider start`);
-				return;
-			}
-			// Only a `running` turn is completed by a normal idle. A `pending`
-			// turn here means the SDK went idle before emitting any event for it
-			// (a degenerate no-op send); complete it defensively so the session
-			// does not hang.
-			if (turn.hasPendingToolCompletions) {
-				const abortToken = this._abortToken;
-				await turn.drainToolCompletions();
-				if (this._store.isDisposed || abortToken.isCancellationRequested || this._currentTurn.value !== turn) {
-					return;
-				}
-			}
-			this._completeActiveRepoInfoTelemetry();
-			this._completeActiveTurn();
-		}));
+		this._register(wrapper.onAssistantIdle(e => void this._handleIdleEvent(e, 'assistant')));
+		this._register(wrapper.onIdle(e => void this._handleIdleEvent(e, 'session')));
 
 		// The SDK emits a `skill` tool call (which we hide) and a richer
 		// `skill.invoked` event with the resolved SKILL.md path. Synthesize a
