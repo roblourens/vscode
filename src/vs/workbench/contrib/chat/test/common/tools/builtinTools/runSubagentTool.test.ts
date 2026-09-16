@@ -1342,7 +1342,7 @@ suite('RunSubagentTool', () => {
 				},
 			};
 
-			return testDisposables.add(new RunSubagentTool(
+			const tool = testDisposables.add(new RunSubagentTool(
 				mockChatAgentService as IChatAgentService,
 				mockChatService as IChatService,
 				mockToolsService,
@@ -1354,6 +1354,7 @@ suite('RunSubagentTool', () => {
 				{} as IProductService,
 				NullTelemetryService,
 			));
+			return { tool, mockChatAgentService };
 		}
 
 		function createInvocation(agentName: string): IToolInvocation {
@@ -1370,7 +1371,7 @@ suite('RunSubagentTool', () => {
 		const noProgress: ToolProgress = { report() { } };
 
 		test('prepareToolInvocation rejects a requested agent outside the current allowlist', async () => {
-			const tool = createAllowlistTool({
+			const { tool } = createAllowlistTool({
 				customAgents: [createAgent('Allowed'), createAgent('Forbidden')],
 				currentModeInstructions: { name: 'Coordinator', content: 'Coordinate', toolReferences: [], allowedSubagents: ['Allowed'] },
 			});
@@ -1390,7 +1391,7 @@ suite('RunSubagentTool', () => {
 
 		test('invoke rejects a requested agent outside the current allowlist', async () => {
 			const capturedRequests: IChatAgentRequest[] = [];
-			const tool = createAllowlistTool({
+			const { tool } = createAllowlistTool({
 				customAgents: [createAgent('Allowed'), createAgent('Forbidden')],
 				currentModeInstructions: { name: 'Coordinator', content: 'Coordinate', toolReferences: [], allowedSubagents: ['Allowed'] },
 				capturedRequests,
@@ -1409,7 +1410,7 @@ suite('RunSubagentTool', () => {
 
 		test('invoke forwards the selected subagent allowlist to nested requests', async () => {
 			const capturedRequests: IChatAgentRequest[] = [];
-			const tool = createAllowlistTool({
+			const { tool } = createAllowlistTool({
 				customAgents: [createAgent('Allowed', ['Nested']), createAgent('Nested')],
 				currentModeInstructions: { name: 'Coordinator', content: 'Coordinate', toolReferences: [], allowedSubagents: ['Allowed'] },
 				capturedRequests,
@@ -1425,6 +1426,104 @@ suite('RunSubagentTool', () => {
 				requestCount: 1,
 				subAgentName: 'Allowed',
 				allowedSubagents: ['Nested'],
+			});
+		});
+
+		test('nested invoke allows a target listed only on the intermediate agent', async () => {
+			const capturedRequests: IChatAgentRequest[] = [];
+			const nestedResults: string[] = [];
+			const { tool, mockChatAgentService } = createAllowlistTool({
+				customAgents: [
+					createAgent('agent-b', ['agent-c']),
+					createAgent('agent-c'),
+					createAgent('sibling'),
+				],
+				currentModeInstructions: { name: 'agent-a', content: 'Coordinate', toolReferences: [], allowedSubagents: ['agent-b'] },
+				capturedRequests,
+			});
+
+			mockChatAgentService.invokeAgent = async (_id: string, request: IChatAgentRequest) => {
+				capturedRequests.push(request);
+				if (request.subAgentName === 'agent-b') {
+					await tool.prepareToolInvocation({
+						parameters: { prompt: 'do something', description: 'test', agentName: 'agent-c' },
+						toolCallId: 'nested-prepare-agent-c',
+						chatSessionResource: URI.parse('test://session/allowlist'),
+					}, CancellationToken.None);
+					const nested = await tool.invoke(createInvocation('agent-c'), countTokens, noProgress, CancellationToken.None);
+					nestedResults.push(nested.content[0].kind === 'text' ? nested.content[0].value : '');
+				}
+				return {};
+			};
+
+			const result = await tool.invoke(createInvocation('agent-b'), countTokens, noProgress, CancellationToken.None);
+
+			assert.deepStrictEqual({
+				parentResult: result.content[0].kind === 'text' ? result.content[0].value : undefined,
+				nestedResult: nestedResults[0],
+				invokedAgents: capturedRequests.map(r => r.subAgentName),
+				nestedAllowlist: capturedRequests.find(r => r.subAgentName === 'agent-c')?.modeInstructions?.allowedSubagents,
+			}, {
+				parentResult: 'Agent completed with no output',
+				nestedResult: 'Agent completed with no output',
+				invokedAgents: ['agent-b', 'agent-c'],
+				nestedAllowlist: undefined,
+			});
+
+			await assert.rejects(
+				() => tool.prepareToolInvocation({
+					parameters: { prompt: 'do something', description: 'test', agentName: 'agent-c' },
+					toolCallId: 'after-nested-prepare-agent-c',
+					chatSessionResource: URI.parse('test://session/allowlist'),
+				}, CancellationToken.None),
+				(err: Error) => {
+					assert.ok(err.message.includes('Requested agent \'agent-c\' is not allowed'));
+					return true;
+				}
+			);
+		});
+
+		test('nested invoke still rejects a target outside the intermediate agent allowlist', async () => {
+			const capturedRequests: IChatAgentRequest[] = [];
+			const nestedResults: string[] = [];
+			const { tool, mockChatAgentService } = createAllowlistTool({
+				customAgents: [
+					createAgent('agent-b', ['agent-c']),
+					createAgent('agent-c'),
+					createAgent('sibling'),
+				],
+				currentModeInstructions: { name: 'agent-a', content: 'Coordinate', toolReferences: [], allowedSubagents: ['agent-b', 'sibling'] },
+				capturedRequests,
+			});
+
+			mockChatAgentService.invokeAgent = async (_id: string, request: IChatAgentRequest) => {
+				capturedRequests.push(request);
+				if (request.subAgentName === 'agent-b') {
+					await assert.rejects(
+						() => tool.prepareToolInvocation({
+							parameters: { prompt: 'do something', description: 'test', agentName: 'sibling' },
+							toolCallId: 'nested-prepare-sibling',
+							chatSessionResource: URI.parse('test://session/allowlist'),
+						}, CancellationToken.None),
+						(err: Error) => {
+							assert.ok(err.message.includes('Requested agent \'sibling\' is not allowed'));
+							return true;
+						}
+					);
+					const nested = await tool.invoke(createInvocation('sibling'), countTokens, noProgress, CancellationToken.None);
+					nestedResults.push(nested.content[0].kind === 'text' ? nested.content[0].value : '');
+				}
+				return {};
+			};
+
+			await tool.invoke(createInvocation('agent-b'), countTokens, noProgress, CancellationToken.None);
+
+			assert.deepStrictEqual({
+				requestCount: capturedRequests.length,
+				nestedResult: nestedResults[0],
+			}, {
+				requestCount: 1,
+				nestedResult: 'Error invoking subagent: Requested agent \'sibling\' is not allowed by the current agent.',
 			});
 		});
 	});

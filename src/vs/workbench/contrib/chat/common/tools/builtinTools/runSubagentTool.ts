@@ -98,6 +98,13 @@ export class RunSubagentTool extends Disposable implements IToolImpl {
 	/** Tracks the current subagent nesting depth per session to detect and limit recursion. */
 	private readonly _sessionDepth = new Map<string, number>();
 
+	/**
+	 * Stack of the currently executing subagent's mode instructions per session.
+	 * Nested `runSubagent` calls must validate against the intermediate agent's
+	 * `agents:` allowlist, not the top-level session agent's.
+	 */
+	private readonly _sessionModeInstructions = new Map<string, (IChatRequestModeInstructions | undefined)[]>();
+
 	private _autoModelResolution: Promise<string | undefined> | undefined;
 
 	constructor(
@@ -190,7 +197,7 @@ export class RunSubagentTool extends Disposable implements IToolImpl {
 			let subagent: ICustomAgent | undefined;
 			let resolvedModelName: string | undefined;
 			let modelSelectionSource: SubagentModelSelectionSource = 'mainModel';
-			const currentModeInstructions = request.modeInfo?.modeInstructions;
+			const currentModeInstructions = this.getCurrentModeInstructions(invocation.context.sessionResource);
 
 			const subAgentName = this.normalizeRequestedAgentName(args.agentName);
 			const effectiveSubAgentName = subAgentName ?? currentModeInstructions?.name;
@@ -390,6 +397,7 @@ export class RunSubagentTool extends Disposable implements IToolImpl {
 				selectionSource: modelSelectionSource,
 			});
 			this._sessionDepth.set(sessionKey, currentDepth + 1);
+			this.pushSessionModeInstructions(sessionKey, modeInstructions);
 			let result: IChatAgentResult | undefined;
 			try {
 				result = await this.chatAgentService.invokeAgent(
@@ -400,6 +408,7 @@ export class RunSubagentTool extends Disposable implements IToolImpl {
 					token
 				);
 			} finally {
+				this.popSessionModeInstructions(sessionKey);
 				const newDepth = (this._sessionDepth.get(sessionKey) ?? 1) - 1;
 				if (newDepth <= 0) {
 					this._sessionDepth.delete(sessionKey);
@@ -676,11 +685,35 @@ export class RunSubagentTool extends Disposable implements IToolImpl {
 	}
 
 	private getCurrentModeInstructions(sessionResource: URI): IChatRequestModeInstructions | undefined {
+		const stack = this._sessionModeInstructions.get(sessionResource.toString());
+		if (stack && stack.length > 0) {
+			return stack[stack.length - 1];
+		}
 		if (typeof this.chatService.getSession !== 'function') {
 			return undefined;
 		}
 		const model = this.chatService.getSession(sessionResource) as ChatModel | undefined;
 		return model?.getRequests().at(-1)?.modeInfo?.modeInstructions;
+	}
+
+	private pushSessionModeInstructions(sessionKey: string, instructions: IChatRequestModeInstructions | undefined): void {
+		let stack = this._sessionModeInstructions.get(sessionKey);
+		if (!stack) {
+			stack = [];
+			this._sessionModeInstructions.set(sessionKey, stack);
+		}
+		stack.push(instructions);
+	}
+
+	private popSessionModeInstructions(sessionKey: string): void {
+		const stack = this._sessionModeInstructions.get(sessionKey);
+		if (!stack) {
+			return;
+		}
+		stack.pop();
+		if (stack.length === 0) {
+			this._sessionModeInstructions.delete(sessionKey);
+		}
 	}
 
 	private validateSubagentAllowed(subAgentName: string, currentModeInstructions: IChatRequestModeInstructions | undefined): void {
