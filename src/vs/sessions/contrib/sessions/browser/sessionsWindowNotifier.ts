@@ -7,7 +7,7 @@ import { RunOnceScheduler, timeout } from '../../../../base/common/async.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { Disposable, DisposableMap, DisposableResourceMap, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
-import { autorunDelta } from '../../../../base/common/observable.js';
+import { autorunDelta, derived } from '../../../../base/common/observable.js';
 import { localize } from '../../../../nls.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FocusMode } from '../../../../platform/native/common/native.js';
@@ -18,7 +18,7 @@ import { ChatNotificationKind, getChatNotificationDedupeKey } from '../../../../
 import { ChatConfiguration, ChatNotificationMode } from '../../../../workbench/contrib/chat/common/constants.js';
 import { IHostService } from '../../../../workbench/services/host/browser/host.js';
 import { ISessionsService } from '../../../services/sessions/browser/sessionsService.js';
-import { ISession, SessionStatus } from '../../../services/sessions/common/session.js';
+import { isActiveSessionStatus, ISession, SessionStatus } from '../../../services/sessions/common/session.js';
 import { ISessionsManagementService } from '../../../services/sessions/common/sessionsManagement.js';
 
 export class SessionsWindowNotifier extends Disposable implements IWorkbenchContribution {
@@ -74,6 +74,13 @@ export class SessionsWindowNotifier extends Disposable implements IWorkbenchCont
 	private _trackSession(session: ISession): void {
 		const store = new DisposableStore();
 		const completedNotificationScheduler = store.add(new RunOnceScheduler(() => void this._notify(session, SessionStatus.Completed), this._getCompletedNotificationDelay()));
+		const scheduleCompletedIfReady = () => {
+			if (session.status.get() === SessionStatus.Completed && !this._shouldDeferCompletedNotification(session)) {
+				completedNotificationScheduler.schedule();
+			} else {
+				completedNotificationScheduler.cancel();
+			}
+		};
 		store.add(autorunDelta(session.status, ({ lastValue, newValue }) => {
 			if (lastValue === undefined || lastValue === newValue) {
 				return;
@@ -81,7 +88,7 @@ export class SessionsWindowNotifier extends Disposable implements IWorkbenchCont
 
 			this._clearNotification(session);
 			if (newValue === SessionStatus.Completed) {
-				completedNotificationScheduler.schedule();
+				scheduleCompletedIfReady();
 			} else {
 				completedNotificationScheduler.cancel();
 			}
@@ -89,11 +96,38 @@ export class SessionsWindowNotifier extends Disposable implements IWorkbenchCont
 				void this._notify(session, newValue);
 			}
 		}));
+		const mainChatStatus = derived(store, reader => session.mainChat.read(reader).status.read(reader));
+		store.add(autorunDelta(mainChatStatus, ({ lastValue, newValue }) => {
+			if (lastValue === undefined || lastValue === newValue) {
+				return;
+			}
+			if (session.status.get() !== SessionStatus.Completed) {
+				return;
+			}
+			if (isActiveSessionStatus(newValue)) {
+				this._clearNotification(session);
+				completedNotificationScheduler.cancel();
+			} else {
+				scheduleCompletedIfReady();
+			}
+		}));
 		this._statusListeners.set(session.sessionId, store);
+	}
+
+	/**
+	 * Session-level Completed can race a nested sub-agent finishing while the
+	 * user-facing main chat is still working. Defer the toast until the main
+	 * chat is no longer active.
+	 */
+	private _shouldDeferCompletedNotification(session: ISession): boolean {
+		return isActiveSessionStatus(session.mainChat.get().status.get());
 	}
 
 	private async _notify(session: ISession, status: SessionStatus): Promise<void> {
 		if (session.status.get() !== status) {
+			return;
+		}
+		if (status === SessionStatus.Completed && this._shouldDeferCompletedNotification(session)) {
 			return;
 		}
 		// A live chat model in this window is already covered by ChatWindowNotifier,
@@ -119,7 +153,8 @@ export class SessionsWindowNotifier extends Disposable implements IWorkbenchCont
 			// native deduplication and the toast would open the wrong window.
 			await timeout(this._getBackgroundNotificationDelay());
 			if (cts.token.isCancellationRequested || session.status.get() !== status
-				|| this._chatService.getSession(session.resource) || this._chatWidgetService.getWidgetBySessionResource(session.resource)) {
+				|| this._chatService.getSession(session.resource) || this._chatWidgetService.getWidgetBySessionResource(session.resource)
+				|| (status === SessionStatus.Completed && this._shouldDeferCompletedNotification(session))) {
 				return;
 			}
 			if (!this._hostService.hasFocus) {

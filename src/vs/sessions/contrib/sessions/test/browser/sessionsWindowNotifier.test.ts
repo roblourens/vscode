@@ -19,7 +19,7 @@ import { IChatService } from '../../../../../workbench/contrib/chat/common/chatS
 import { IChatWidgetService } from '../../../../../workbench/contrib/chat/browser/chat.js';
 import { IHostService, IToastOptions, IToastResult } from '../../../../../workbench/services/host/browser/host.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
-import { ISession, ISessionWorkspace, SessionStatus } from '../../../../services/sessions/common/session.js';
+import { IChat, ISession, ISessionWorkspace, SessionStatus } from '../../../../services/sessions/common/session.js';
 import { ISessionsChangeEvent, ISessionsManagementService } from '../../../../services/sessions/common/sessionsManagement.js';
 import { SessionsWindowNotifier } from '../../browser/sessionsWindowNotifier.js';
 
@@ -88,8 +88,21 @@ class TestChatWidgetService extends mock<IChatWidgetService>() {
 	}
 }
 
-function createSession(id: string, initialStatus: SessionStatus, workspaceLabel = 'vscode'): { session: ISession; status: ReturnType<typeof observableValue<SessionStatus>> } {
+function createChat(id: string, status: ReturnType<typeof observableValue<SessionStatus>>): IChat {
+	return new class extends mock<IChat>() {
+		override readonly resource = URI.parse(`test:///${id}`);
+		override readonly status = status;
+	};
+}
+
+function createSession(id: string, initialStatus: SessionStatus, workspaceLabel = 'vscode'): {
+	session: ISession;
+	status: ReturnType<typeof observableValue<SessionStatus>>;
+	mainChatStatus: ReturnType<typeof observableValue<SessionStatus>>;
+} {
 	const status = observableValue<SessionStatus>(`status-${id}`, initialStatus);
+	const mainChatStatus = observableValue<SessionStatus>(`main-chat-status-${id}`, initialStatus);
+	const mainChat = createChat(id, mainChatStatus);
 	const session = new class extends mock<ISession>() {
 		override readonly sessionId = id;
 		override readonly resource = URI.parse(`test:///${id}`);
@@ -98,8 +111,10 @@ function createSession(id: string, initialStatus: SessionStatus, workspaceLabel 
 		override readonly workspace = observableValue<ISessionWorkspace | undefined>(`workspace-${id}`, new class extends mock<ISessionWorkspace>() {
 			override readonly label = workspaceLabel;
 		});
+		override readonly mainChat = observableValue(`main-chat-${id}`, mainChat);
+		override readonly chats = observableValue<readonly IChat[]>(`chats-${id}`, [mainChat]);
 	};
-	return { session, status };
+	return { session, status, mainChatStatus };
 }
 
 suite('SessionsWindowNotifier', () => {
@@ -170,15 +185,17 @@ suite('SessionsWindowNotifier', () => {
 	});
 
 	test('uses response setting for completed and failed transitions', async () => {
-		const { session, status } = createSession('finished', SessionStatus.InProgress);
+		const { session, status, mainChatStatus } = createSession('finished', SessionStatus.InProgress);
 		const { host } = createNotifier(session, {
 			[ChatConfiguration.NotifyWindowOnResponseReceived]: ChatNotificationMode.Always,
 		});
 		host.hasFocus = true;
 
 		status.set(SessionStatus.Completed, undefined);
+		mainChatStatus.set(SessionStatus.Completed, undefined);
 		await flushNotifications();
 		status.set(SessionStatus.InProgress, undefined);
+		mainChatStatus.set(SessionStatus.InProgress, undefined);
 		status.set(SessionStatus.Error, undefined);
 		await flushNotifications();
 
@@ -203,13 +220,14 @@ suite('SessionsWindowNotifier', () => {
 	});
 
 	test('opens the exact session when the toast is activated', async () => {
-		const { session, status } = createSession('open-me', SessionStatus.InProgress);
+		const { session, status, mainChatStatus } = createSession('open-me', SessionStatus.InProgress);
 		const { sessions, host } = createNotifier(session, {
 			[ChatConfiguration.NotifyWindowOnResponseReceived]: ChatNotificationMode.WindowNotFocused,
 		});
 		host.toastResult = { supported: true, clicked: true };
 
 		status.set(SessionStatus.Completed, undefined);
+		mainChatStatus.set(SessionStatus.Completed, undefined);
 		await flushNotifications();
 
 		assert.deepStrictEqual({
@@ -222,15 +240,18 @@ suite('SessionsWindowNotifier', () => {
 	});
 
 	test('debounces completion notifications until the session stays completed', async () => {
-		const { session, status } = createSession('debounced', SessionStatus.InProgress);
+		const { session, status, mainChatStatus } = createSession('debounced', SessionStatus.InProgress);
 		const { host } = createNotifier(session, {
 			[ChatConfiguration.NotifyWindowOnResponseReceived]: ChatNotificationMode.Always,
 		});
 
 		status.set(SessionStatus.Completed, undefined);
+		mainChatStatus.set(SessionStatus.Completed, undefined);
 		status.set(SessionStatus.InProgress, undefined);
+		mainChatStatus.set(SessionStatus.InProgress, undefined);
 		await flushNotifications();
 		status.set(SessionStatus.Completed, undefined);
+		mainChatStatus.set(SessionStatus.Completed, undefined);
 		await flushNotifications();
 
 		assert.deepStrictEqual(host.toasts.map(toast => toast.body), [
@@ -239,7 +260,7 @@ suite('SessionsWindowNotifier', () => {
 	});
 
 	test('stays silent when a live chat model exists for the session', async () => {
-		const { session, status } = createSession('live-model', SessionStatus.InProgress);
+		const { session, status, mainChatStatus } = createSession('live-model', SessionStatus.InProgress);
 		const management = new TestSessionsManagementService([session]);
 		const sessions = new TestSessionsService();
 		const host = new TestHostService();
@@ -258,8 +279,39 @@ suite('SessionsWindowNotifier', () => {
 		store.add(management);
 
 		status.set(SessionStatus.Completed, undefined);
+		mainChatStatus.set(SessionStatus.Completed, undefined);
 		await flushNotifications();
 
 		assert.deepStrictEqual(host.toasts, []);
+	});
+
+	test('does not notify completed while the main chat is still active', async () => {
+		const { session, status } = createSession('parent-still-working', SessionStatus.InProgress);
+		const { host } = createNotifier(session, {
+			[ChatConfiguration.NotifyWindowOnResponseReceived]: ChatNotificationMode.Always,
+		});
+
+		status.set(SessionStatus.Completed, undefined);
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts, []);
+	});
+
+	test('notifies completed after a deferred main chat becomes idle', async () => {
+		const { session, status, mainChatStatus } = createSession('parent-then-idle', SessionStatus.InProgress);
+		const { host } = createNotifier(session, {
+			[ChatConfiguration.NotifyWindowOnResponseReceived]: ChatNotificationMode.Always,
+		});
+
+		status.set(SessionStatus.Completed, undefined);
+		await flushNotifications();
+		assert.deepStrictEqual(host.toasts, []);
+
+		mainChatStatus.set(SessionStatus.Completed, undefined);
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts.map(toast => toast.body), [
+			'Completed in vscode.',
+		]);
 	});
 });

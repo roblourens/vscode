@@ -19,7 +19,7 @@ import { IChatModel, IChatRequestNeedsInputInfo } from '../common/model/chatMode
 import { observeChatModelIsIdle } from '../common/model/chatModelIdle.js';
 import { IChatService, IChatToolInvocation, ToolConfirmKind } from '../common/chatService/chatService.js';
 import { migrateLegacyTerminalToolSpecificData } from '../common/chat.js';
-import { ChatNotificationKind, getChatNotificationDedupeKey } from '../common/chatNotification.js';
+import { ChatNotificationKind, getChatNotificationDedupeKey, isSubagentChatSessionResource } from '../common/chatNotification.js';
 import { ChatConfiguration, ChatNotificationMode } from '../common/constants.js';
 import { IChatWidgetService } from './chat.js';
 
@@ -35,6 +35,26 @@ import { IChatWidgetService } from './chat.js';
 function hasCompletedSince(model: IChatModel, watchingSince: number): boolean {
 	const completedAt = model.lastRequest?.response?.completionTimestamp;
 	return completedAt !== undefined && completedAt >= watchingSince;
+}
+
+/**
+ * True when the last response still has nested sub-agent work in flight. The
+ * parent model can look idle between sub-agent tool results even though the
+ * user-facing turn is not done.
+ */
+function hasActiveSubagentInvocation(model: IChatModel): boolean {
+	const response = model.lastRequest?.response;
+	const parts = response?.entireResponse?.value ?? response?.response?.value ?? [];
+	return parts.some(part =>
+		(part.kind === 'toolInvocation' || part.kind === 'toolInvocationSerialized')
+		&& part.toolSpecificData?.kind === 'subagent'
+		&& part.toolSpecificData.isActive === true
+	);
+}
+
+/** Completion toasts are for the parent turn/session, not nested sub-agent chats. */
+function shouldSuppressIdleNotification(model: IChatModel): boolean {
+	return isSubagentChatSessionResource(model.sessionResource) || hasActiveSubagentInvocation(model);
 }
 
 /**
@@ -182,7 +202,7 @@ export class ChatWindowNotifier extends Disposable implements IWorkbenchContribu
 	}
 
 	private async _notifyIdleIfNeeded(model: IChatModel, isIdle: IObservable<boolean>, watchingSince: number): Promise<void> {
-		if (!hasCompletedSince(model, watchingSince) || !isIdle.get() || model.requestNeedsInput.get()) {
+		if (!hasCompletedSince(model, watchingSince) || !isIdle.get() || model.requestNeedsInput.get() || shouldSuppressIdleNotification(model)) {
 			return;
 		}
 		const mode = this._configurationService.getValue<ChatNotificationMode>(ChatConfiguration.NotifyWindowOnResponseReceived);
@@ -192,7 +212,7 @@ export class ChatWindowNotifier extends Disposable implements IWorkbenchContribu
 		const widget = this._chatWidgetService.getWidgetBySessionResource(model.sessionResource);
 		const targetWindow = widget ? dom.getWindow(widget.domNode) : mainWindow;
 		await this._delayForBackgroundWindow(widget?.visible === true);
-		if (!isIdle.get() || model.requestNeedsInput.get()) {
+		if (!isIdle.get() || model.requestNeedsInput.get() || shouldSuppressIdleNotification(model)) {
 			return;
 		}
 		const isFocused = targetWindow.document.hasFocus();

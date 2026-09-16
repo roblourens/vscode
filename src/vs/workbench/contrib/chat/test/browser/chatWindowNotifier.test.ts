@@ -16,8 +16,9 @@ import { TestConfigurationService } from '../../../../../platform/configuration/
 import { FocusMode } from '../../../../../platform/native/common/native.js';
 import { IChatWidget, IChatWidgetService } from '../../browser/chat.js';
 import { ChatWindowNotifier } from '../../browser/chatWindowNotifier.js';
-import { IChatResponseErrorDetails, IChatService } from '../../common/chatService/chatService.js';
-import { ChatConfiguration, ChatNotificationMode } from '../../common/constants.js';
+import { IChatResponseErrorDetails, IChatService, IChatToolInvocation } from '../../common/chatService/chatService.js';
+import { isSubagentChatSessionResource } from '../../common/chatNotification.js';
+import { CHAT_SUBAGENT_RESOURCE_QUERY_PARAM, ChatConfiguration, ChatNotificationMode } from '../../common/constants.js';
 import { IChatModel, IChatPendingRequest, IChatRequestModel, IChatRequestNeedsInputInfo, IChatResponseModel, IResponse } from '../../common/model/chatModel.js';
 import { IChatAgentResult } from '../../common/participants/chatAgents.js';
 import { IHostService, IToastOptions, IToastResult } from '../../../../services/host/browser/host.js';
@@ -60,7 +61,12 @@ class TestChatWidgetService extends mock<IChatWidgetService>() {
 	}
 }
 
-function createModel(store: Pick<DisposableStore, 'add'>, id: string, options: { requestInProgress?: boolean; hasRequest?: boolean } = {}): {
+function createModel(store: Pick<DisposableStore, 'add'>, id: string, options: {
+	requestInProgress?: boolean;
+	hasRequest?: boolean;
+	sessionResource?: URI;
+	responseValue?: IChatResponseModel['response']['value'];
+} = {}): {
 	model: IChatModel;
 	requestInProgress: ReturnType<typeof observableValue<boolean>>;
 	requestNeedsInput: ReturnType<typeof observableValue<IChatRequestNeedsInputInfo | undefined>>;
@@ -76,7 +82,7 @@ function createModel(store: Pick<DisposableStore, 'add'>, id: string, options: {
 		override result: IChatAgentResult | undefined = undefined;
 		override completionTimestamp: number | undefined = undefined;
 		override readonly response = new class extends mock<IResponse>() {
-			override readonly value = [];
+			override readonly value = options.responseValue ?? [];
 		};
 	};
 	const lastRequest = options.hasRequest === false ? undefined : new class extends mock<IChatRequestModel>() {
@@ -84,7 +90,7 @@ function createModel(store: Pick<DisposableStore, 'add'>, id: string, options: {
 	};
 	const lastRequestObs = observableValue<IChatRequestModel | undefined>(`last-request-${id}`, lastRequest);
 	const model = new class extends mock<IChatModel>() {
-		override readonly sessionResource = URI.parse(`test:///${id}`);
+		override readonly sessionResource = options.sessionResource ?? URI.parse(`test:///${id}`);
 		override readonly title = `Fix ${id}`;
 		override readonly lastRequest = lastRequest;
 		override readonly lastRequestObs = lastRequestObs;
@@ -228,6 +234,70 @@ suite('ChatWindowNotifier', () => {
 
 		assert.deepStrictEqual(host.toasts.map(toast => toast.dedupeKey), [
 			'chat-session:test:/needs-input:needsInput',
+		]);
+	});
+
+	test('does not notify when a nested sub-agent chat becomes idle', async () => {
+		const query = new URLSearchParams();
+		query.set(CHAT_SUBAGENT_RESOURCE_QUERY_PARAM, 'ahp://chat/child');
+		const sessionResource = URI.parse(`test:///parent?${query.toString()}`);
+		assert.strictEqual(isSubagentChatSessionResource(sessionResource), true);
+
+		const { model, endLastResponse } = createModel(store, 'subagent', { sessionResource });
+		const host = createNotifier(model);
+
+		endLastResponse();
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts, []);
+	});
+
+	test('does not notify while the parent response still has an active sub-agent', async () => {
+		const { model, endLastResponse } = createModel(store, 'parent-waiting', {
+			responseValue: [{
+				kind: 'toolInvocation',
+				toolSpecificData: { kind: 'subagent', isActive: true },
+			} as IChatToolInvocation],
+		});
+		const host = createNotifier(model);
+
+		endLastResponse();
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts, []);
+	});
+
+	test('notifies when nested sub-agent work on the parent response has finished', async () => {
+		const { model, endLastResponse } = createModel(store, 'parent-done', {
+			responseValue: [{
+				kind: 'toolInvocation',
+				toolSpecificData: { kind: 'subagent', isActive: false },
+			} as IChatToolInvocation],
+		});
+		const host = createNotifier(model);
+
+		endLastResponse();
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts.map(toast => toast.dedupeKey), [
+			'chat-session:test:/parent-done:idle',
+		]);
+	});
+
+	test('still notifies when a nested sub-agent chat needs input', async () => {
+		const query = new URLSearchParams();
+		query.set(CHAT_SUBAGENT_RESOURCE_QUERY_PARAM, 'ahp://chat/child');
+		const { model, requestInProgress, requestNeedsInput } = createModel(store, 'subagent-input', {
+			sessionResource: URI.parse(`test:///parent?${query.toString()}`),
+		});
+		const host = createNotifier(model);
+
+		requestNeedsInput.set({ title: 'Fix subagent-input' }, undefined);
+		requestInProgress.set(false, undefined);
+		await flushNotifications();
+
+		assert.deepStrictEqual(host.toasts.map(toast => toast.dedupeKey), [
+			`chat-session:${model.sessionResource.toString()}:needsInput`,
 		]);
 	});
 });
