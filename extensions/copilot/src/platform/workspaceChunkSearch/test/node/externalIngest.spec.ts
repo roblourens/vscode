@@ -105,6 +105,7 @@ function createFileFromBytes(content: Uint8Array, mtime = Date.now()): MockFileE
 class MockFileSystem extends mock<IFileSystemService & ISearchService>() implements IFileSystemService, ISearchService {
 	readonly readFileCalls = new ResourceMap<number>();
 	readonly statCalls = new ResourceMap<number>();
+	findFilesCallCount = 0;
 
 	constructor(private readonly _files: ResourceMap<MockFileEntry>) {
 		super();
@@ -174,6 +175,7 @@ class MockFileSystem extends mock<IFileSystemService & ISearchService>() impleme
 	// #region ISearchService
 
 	override findFilesWithDefaultExcludes(): any {
+		this.findFilesCallCount++;
 		return Promise.resolve([...this._files.keys()]);
 	}
 
@@ -342,6 +344,21 @@ suite('ExternalIngestIndex', () => {
 		// Tests can verify file operations and ingestion behavior
 		assert.ok(mockClient, 'Mock client is available for assertions');
 		assert.ok(mockFs, 'Mock file system is available for assertions');
+	});
+
+	test('constructor does not scan workspace files', async () => {
+		const workspaceRoot = URI.file('/workspace');
+		const files = new ResourceMap<MockFileEntry>();
+		files.set(URI.joinPath(workspaceRoot, 'src', 'file1.ts'), createFileFromString('const x = 1;'));
+
+		const { mockFs, index } = setupTestContext(workspaceRoot, files);
+
+		assert.strictEqual(mockFs.findFilesCallCount, 0, 'Constructing the index must not walk the workspace');
+		assert.strictEqual(mockFs.statCalls.size, 0);
+
+		await index.initialize();
+
+		assert.ok(mockFs.findFilesCallCount > 0, 'initialize() should discover workspace files');
 	});
 
 	test('initialize discovers files from workspace and passes ingestable files to client', async () => {

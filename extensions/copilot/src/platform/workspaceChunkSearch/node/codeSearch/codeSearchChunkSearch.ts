@@ -231,6 +231,9 @@ export class CodeSearchChunkSearch extends Disposable {
 		}));
 
 		if (this.isCodeSearchEnabled()) {
+			// Resolve git remotes for status UI, but do not scan the workspace
+			// for external ingest here. Walking every file pegs a CPU core on
+			// large trees (for example Unreal Engine) even when the window is idle.
 			this.initialize();
 		}
 	}
@@ -267,7 +270,9 @@ export class CodeSearchChunkSearch extends Disposable {
 						return;
 					}
 
-					await this.ensureExternalIngestInitialized();
+					// External ingest reconcile walks the entire workspace with
+					// findFiles + per-file stats. Keep that off the idle/startup
+					// path and start it only when search or indexing needs it (#336535).
 				} finally {
 					this._hasFinishedInitialization = true;
 					this._onDidFinishInitialization.fire();
@@ -511,11 +516,14 @@ export class CodeSearchChunkSearch extends Disposable {
 			};
 		}
 
-		// Kick of request but do not wait for it to finish
+		// Kick off repo discovery but do not wait for it to finish.
+		// Do not initialize external ingest here: getState() only needs the
+		// local checkpoint, and reconcileDbFiles would scan the whole tree.
 		this.initialize();
 
-		// Get external ingest state if enabled
-		const externalIngestState = this.isExternalIngestEnabled() && this._externalIngestIndex.hasValue
+		// Get external ingest state if enabled. Constructing the index reads
+		// the checkpoint from workspace storage and does not walk files.
+		const externalIngestState = this.isExternalIngestEnabled()
 			? this._externalIngestIndex.value.getState()
 			: undefined;
 
@@ -568,7 +576,10 @@ export class CodeSearchChunkSearch extends Disposable {
 	}
 
 	public async *getDiagnosticsDump(): AsyncIterable<string> {
-		await this._initializePromise;
+		await this.initialize();
+		if (this.isExternalIngestEnabled()) {
+			await this.ensureExternalIngestInitialized();
+		}
 
 		yield '# Codebase Index Diagnostics\n\n';
 
@@ -775,6 +786,8 @@ export class CodeSearchChunkSearch extends Disposable {
 			return undefined;
 		}
 
+		await raceCancellationError(this.ensureExternalIngestInitialized(), token);
+
 		if (Array.isArray(diffArray)) {
 			// Force it to search the local diff too so we can override stale code-search results.
 			await raceCancellationError(this._externalIngestIndex.value.updateForceIncludeFiles(diffArray, token), token);
@@ -936,6 +949,7 @@ export class CodeSearchChunkSearch extends Disposable {
 		// Update external ingest index if enabled
 		const externalIndexEnabled = this.isExternalIngestEnabled();
 		if (externalIndexEnabled) {
+			await raceCancellationError(this.ensureExternalIngestInitialized(), token);
 			const result = await raceCancellationError(this._externalIngestIndex.value.doIngest(telemetryInfo, onProgress, token), token);
 			if (result.isError()) {
 				return Result.error(result.err);
