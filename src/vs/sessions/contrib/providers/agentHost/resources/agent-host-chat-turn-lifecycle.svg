@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 910" role="img" aria-labelledby="title description">
+	<title id="title">Agent Host chat turn lifecycle</title>
+	<desc id="description">A sequence diagram showing draft edits and turn actions moving from the Monaco composer through the client and connection to the Agent Host, followed by immutable chat state snapshots returning to the React view.</desc>
+	<defs>
+		<marker id="arrow-state" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="9" markerHeight="7" orient="auto">
+			<polygon points="0 0, 10 3.5, 0 7" fill="#3578b8"/>
+		</marker>
+		<marker id="arrow-action" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="9" markerHeight="7" orient="auto">
+			<polygon points="0 0, 10 3.5, 0 7" fill="#c56a16"/>
+		</marker>
+	</defs>
+	<rect width="1200" height="910" fill="#f8f9fa"/>
+	<g font-family="Segoe UI, system-ui, -apple-system, sans-serif" fill="#24292f">
+		<text x="600" y="38" text-anchor="middle" font-size="22" font-weight="700">Draft and turn lifecycle</text>
+		<text x="600" y="64" text-anchor="middle" font-size="12" fill="#57606a">Orange moves intent to the host. Blue returns immutable state to React.</text>
+
+		<g>
+			<rect x="40" y="88" width="160" height="58" rx="8" fill="#e8f0fe" stroke="#4a90d9"/>
+			<text x="120" y="113" text-anchor="middle" font-size="13" font-weight="700">Monaco composer</text>
+			<text x="120" y="131" text-anchor="middle" font-size="10" fill="#2c5f9a">focused local draft</text>
+			<rect x="280" y="88" width="160" height="58" rx="8" fill="#d9eed9" stroke="#5a9a6a"/>
+			<text x="360" y="113" text-anchor="middle" font-size="13" font-weight="700">React view</text>
+			<text x="360" y="131" text-anchor="middle" font-size="10" fill="#3a7a4a">external-store consumer</text>
+			<rect x="520" y="88" width="160" height="58" rx="8" fill="#d9eed9" stroke="#5a9a6a" stroke-width="1.5"/>
+			<text x="600" y="113" text-anchor="middle" font-size="13" font-weight="700">Chat client</text>
+			<text x="600" y="131" text-anchor="middle" font-size="10" fill="#3a7a4a">snapshot and operations</text>
+			<rect x="760" y="88" width="160" height="58" rx="8" fill="#fff3e0" stroke="#d48a20"/>
+			<text x="840" y="113" text-anchor="middle" font-size="13" font-weight="700">IAgentConnection</text>
+			<text x="840" y="131" text-anchor="middle" font-size="10" fill="#a06a10">dispatch and subscriptions</text>
+			<rect x="1000" y="88" width="160" height="58" rx="8" fill="#fff3e0" stroke="#d48a20"/>
+			<text x="1080" y="113" text-anchor="middle" font-size="13" font-weight="700">Agent Host</text>
+			<text x="1080" y="131" text-anchor="middle" font-size="10" fill="#a06a10">authoritative channel</text>
+		</g>
+
+		<g stroke="#c8cdd2" stroke-dasharray="4 4">
+			<line x1="120" y1="146" x2="120" y2="850"/>
+			<line x1="360" y1="146" x2="360" y2="850"/>
+			<line x1="600" y1="146" x2="600" y2="850"/>
+			<line x1="840" y1="146" x2="840" y2="850"/>
+			<line x1="1080" y1="146" x2="1080" y2="850"/>
+		</g>
+
+		<text x="50" y="178" font-size="10" font-weight="600" fill="#8c959f" letter-spacing="1">DRAFT RECONCILIATION</text>
+		<line x1="120" y1="204" x2="590" y2="204" stroke="#c56a16" stroke-width="1.7" marker-end="url(#arrow-action)"/>
+		<text x="355" y="195" text-anchor="middle" font-size="10" fill="#a06a10">debounced setDraft(message)</text>
+		<line x1="600" y1="244" x2="830" y2="244" stroke="#c56a16" stroke-width="1.7" marker-end="url(#arrow-action)"/>
+		<text x="715" y="235" text-anchor="middle" font-size="10" fill="#a06a10">dispatch ChatDraftChanged</text>
+		<line x1="840" y1="284" x2="1070" y2="284" stroke="#c56a16" stroke-width="1.7" marker-end="url(#arrow-action)"/>
+		<text x="955" y="275" text-anchor="middle" font-size="10" fill="#a06a10">protocol action</text>
+		<line x1="1070" y1="324" x2="850" y2="324" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="960" y="315" text-anchor="middle" font-size="10" fill="#2c5f9a">immutable ChatState</text>
+		<line x1="830" y1="350" x2="610" y2="350" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="720" y="341" text-anchor="middle" font-size="10" fill="#2c5f9a">subscription changed</text>
+		<line x1="590" y1="376" x2="370" y2="376" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="480" y="367" text-anchor="middle" font-size="10" fill="#2c5f9a">stable external-store snapshot</text>
+		<path d="M350 396 H130" fill="none" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="240" y="417" text-anchor="middle" font-size="10" fill="#2c5f9a">update Monaco only when it is not focused</text>
+
+		<line x1="50" y1="446" x2="1150" y2="446" stroke="#d8dee4"/>
+		<text x="50" y="470" font-size="10" font-weight="600" fill="#8c959f" letter-spacing="1">SEND, STREAM, COMPLETE</text>
+		<line x1="120" y1="496" x2="590" y2="496" stroke="#c56a16" stroke-width="1.7" marker-end="url(#arrow-action)"/>
+		<text x="355" y="487" text-anchor="middle" font-size="10" fill="#a06a10">send(text)</text>
+		<line x1="600" y1="536" x2="830" y2="536" stroke="#c56a16" stroke-width="1.7" marker-end="url(#arrow-action)"/>
+		<text x="715" y="527" text-anchor="middle" font-size="10" fill="#a06a10">dispatch ChatTurnStarted</text>
+		<line x1="830" y1="576" x2="610" y2="576" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="720" y="567" text-anchor="middle" font-size="10" fill="#2c5f9a">optimistic ChatState with activeTurn</text>
+		<line x1="590" y1="606" x2="370" y2="606" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="480" y="597" text-anchor="middle" font-size="10" fill="#2c5f9a">render active turn after virtual history</text>
+		<line x1="1070" y1="646" x2="850" y2="646" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="960" y="637" text-anchor="middle" font-size="10" fill="#2c5f9a">streamed response actions</text>
+		<line x1="830" y1="676" x2="610" y2="676" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="720" y="667" text-anchor="middle" font-size="10" fill="#2c5f9a">new immutable ChatState</text>
+		<line x1="590" y1="706" x2="370" y2="706" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="480" y="697" text-anchor="middle" font-size="10" fill="#2c5f9a">re-render streamed response parts</text>
+		<line x1="1070" y1="746" x2="850" y2="746" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="960" y="737" text-anchor="middle" font-size="10" fill="#2c5f9a">turn completed</text>
+		<line x1="830" y1="776" x2="610" y2="776" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="720" y="767" text-anchor="middle" font-size="10" fill="#2c5f9a">activeTurn removed · appended to turns</text>
+		<line x1="590" y1="806" x2="370" y2="806" stroke="#3578b8" stroke-width="1.7" marker-end="url(#arrow-state)"/>
+		<text x="480" y="797" text-anchor="middle" font-size="10" fill="#2c5f9a">completed row enters virtual history</text>
+
+		<rect x="210" y="852" width="780" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+		<text x="600" y="876" text-anchor="middle" font-size="11" font-style="italic" fill="#57606a">If activeTurn already exists, send dispatches a queued pending message instead of starting a second turn.</text>
+	</g>
+</svg>

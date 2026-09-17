@@ -7,12 +7,13 @@ EventEmitter.defaultMaxListeners = 100;
 
 import glob from 'glob';
 import { createRequire } from 'node:module';
+import * as path from 'path';
 import { monacoTypecheckTask /* , monacoTypecheckWatchTask */ } from './gulpfile.editor.ts';
 import { compileExtensionMediaTask, compileExtensionsTask, watchExtensionsTask } from './gulpfile.extensions.ts';
 import * as compilation from './lib/compilation.ts';
 import * as task from './lib/gulp/task.ts';
 import * as util from './lib/util.ts';
-import { runEsbuildTranspile } from './lib/esbuild.ts';
+import { bundleBrowserRuntimeDependencies, runEsbuildTranspile } from './lib/esbuild.ts';
 
 // Extension point names
 task.task(compilation.compileExtensionPointNamesTask);
@@ -30,11 +31,12 @@ task.task(task.define('transpile-client-esbuild', task.series(
 )));
 
 // Transpile only
-const transpileClientTask = task.define('transpile-client', task.series(util.rimraf('out'), compilation.transpileTask('src', 'out')));
+const bundleBrowserRuntimeTask = task.define('bundle-browser-runtime', () => bundleBrowserRuntimeDependencies(path.join(import.meta.dirname, '..', 'out')));
+const transpileClientTask = task.define('transpile-client', task.series(util.rimraf('out'), compilation.transpileTask('src', 'out'), bundleBrowserRuntimeTask));
 task.task(transpileClientTask);
 
 // Fast compile for development time
-const compileClientTask = task.define('compile-client', task.series(util.rimraf('out'), compilation.copyCodiconsTask, compilation.compileApiProposalNamesTask, compilation.compileExtensionPointNamesTask, compilation.compileTask('src', 'out', false)));
+const compileClientTask = task.define('compile-client', task.series(util.rimraf('out'), compilation.copyCodiconsTask, compilation.compileApiProposalNamesTask, compilation.compileExtensionPointNamesTask, compilation.compileTask('src', 'out', false), bundleBrowserRuntimeTask));
 task.task(compileClientTask);
 
 const watchClientTask = task.define('watch-client', task.parallel(compilation.watchTypeCheckTask('src'), compilation.watchApiProposalNamesTask, compilation.watchExtensionPointNamesTask, compilation.watchCodiconsTask));

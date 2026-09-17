@@ -72,7 +72,7 @@ export function createCompile(src: string, { build, emitError, transpileOnly, pr
 
 	function pipeline(token?: util.ICancellationToken) {
 
-		const tsFilter = util.filter(data => /\.ts$/.test(data.path));
+		const tsFilter = util.filter(data => /\.tsx?$/.test(data.path) && !isDiffFixtureTsx(data.path));
 		const isUtf8Test = (f: File) => /(\/|\\)test(\/|\\).*utf8/.test(f.path);
 		const isRuntimeJs = (f: File) => f.path.endsWith('.js') && !f.path.includes('fixtures');
 		const noDeclarationsFilter = util.filter(data => !(/\.d\.ts$/.test(data.path)));
@@ -96,6 +96,10 @@ export function createCompile(src: string, { build, emitError, transpileOnly, pr
 			.pipe(reporter.end(!!emitError));
 
 		return es.duplex(input, output);
+	}
+
+	function isDiffFixtureTsx(filePath: string): boolean {
+		return /(^|[\\/])vs[\\/]editor[\\/]test[\\/]node[\\/]diffing[\\/]fixtures[\\/].+\.tsx$/.test(filePath);
 	}
 	pipeline.tsProjectSrc = () => {
 		return compilation.src({ base: src });
@@ -403,18 +407,18 @@ function generateExtensionPointNames() {
 const extensionPointNamesReporter = createReporter('extension-point-names');
 
 export const compileExtensionPointNamesTask = task.define('compile-extension-point-names', () => {
-	return gulp.src('src/vs/workbench/**/*.ts')
+	return gulp.src('src/vs/workbench/**/*.{ts,tsx}')
 		.pipe(generateExtensionPointNames())
 		.pipe(gulp.dest('src'))
 		.pipe(extensionPointNamesReporter.end(true));
 });
 
 export const watchExtensionPointNamesTask = task.define('watch-extension-point-names', () => {
-	const task = () => gulp.src('src/vs/workbench/**/*.ts')
+	const task = () => gulp.src('src/vs/workbench/**/*.{ts,tsx}')
 		.pipe(generateExtensionPointNames())
 		.pipe(extensionPointNamesReporter.end(true));
 
-	return watch('src/vs/workbench/**/*.ts', { readDelay: 200 })
+	return watch('src/vs/workbench/**/*.{ts,tsx}', { readDelay: 200 })
 		.pipe(util.debounce(task))
 		.pipe(gulp.dest('src'));
 });

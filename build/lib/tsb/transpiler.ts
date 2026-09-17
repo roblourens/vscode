@@ -12,6 +12,7 @@ import { cpus } from 'node:os';
 import { getTargetStringFromTsConfig } from '../tsconfigUtils.ts';
 
 interface TranspileReq {
+	readonly fileNames: string[];
 	readonly tsSrcs: string[];
 	readonly options: ts.TranspileOptions;
 }
@@ -21,14 +22,14 @@ interface TranspileRes {
 	readonly diagnostics: ts.Diagnostic[][];
 }
 
-function transpile(tsSrc: string, options: ts.TranspileOptions): { jsSrc: string; diag: ts.Diagnostic[] } {
+export function transpileTypeScript(tsSrc: string, fileName: string, options: ts.TranspileOptions): { jsSrc: string; diag: ts.Diagnostic[] } {
 
 	const isAmd = /\n(import|export)/m.test(tsSrc);
 	if (!isAmd && options.compilerOptions?.module === ts.ModuleKind.AMD) {
 		// enforce NONE module-system for not-amd cases
 		options = { ...options, ...{ compilerOptions: { ...options.compilerOptions, module: ts.ModuleKind.None } } };
 	}
-	const out = ts.transpileModule(tsSrc, options);
+	const out = ts.transpileModule(tsSrc, { ...options, fileName });
 	return {
 		jsSrc: out.outputText,
 		diag: out.diagnostics ?? []
@@ -42,8 +43,8 @@ if (!threads.isMainThread) {
 			jsSrcs: [],
 			diagnostics: []
 		};
-		for (const tsSrc of req.tsSrcs) {
-			const out = transpile(tsSrc, req.options);
+		for (let index = 0; index < req.tsSrcs.length; index++) {
+			const out = transpileTypeScript(req.tsSrcs[index], req.fileNames[index], req.options);
 			res.jsSrcs.push(out.jsSrc);
 			res.diagnostics.push(out.diag);
 		}
@@ -127,12 +128,14 @@ class TranspileWorker {
 				}
 				const SuffixTypes = {
 					Dts: 5,
+					Tsx: 4,
 					Ts: 3,
 					Unknown: 0
 				} as const;
 				const suffixLen = file.path.endsWith('.d.ts') ? SuffixTypes.Dts
-					: file.path.endsWith('.ts') ? SuffixTypes.Ts
-						: SuffixTypes.Unknown;
+					: file.path.endsWith('.tsx') ? SuffixTypes.Tsx
+						: file.path.endsWith('.ts') ? SuffixTypes.Ts
+							: SuffixTypes.Unknown;
 
 				// check if output of a DTS-files isn't just "empty" and iff so
 				// skip this file
@@ -178,6 +181,7 @@ class TranspileWorker {
 			this._pending = [resolve, reject, files, options, Date.now()];
 			const req: TranspileReq = {
 				options,
+				fileNames: files.map(file => file.path),
 				tsSrcs: files.map(file => String(file.contents))
 			};
 			this._worker.postMessage(req);
@@ -335,7 +339,6 @@ export class ESBuildTranspiler implements ITranspiler {
 			target: [target],
 			format: isExtension ? 'cjs' : 'esm',
 			platform: isExtension ? 'node' : undefined,
-			loader: 'ts',
 			sourcemap: 'inline',
 			tsconfigRaw: JSON.stringify({
 				compilerOptions: {
@@ -366,6 +369,7 @@ export class ESBuildTranspiler implements ITranspiler {
 		const t1 = Date.now();
 		this._jobs.push(esbuild.transform(file.contents, {
 			...this._transformOpts,
+			loader: file.path.endsWith('.tsx') ? 'tsx' : 'ts',
 			sourcefile: file.path,
 		}).then(result => {
 

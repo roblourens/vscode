@@ -45,7 +45,7 @@ export default new class NoUnexternalizedStrings implements eslint.Rule.RuleModu
 		const doubleQuotedStringLiterals = new Set<TSESTree.Node>();
 
 		function collectDoubleQuotedStrings(node: ESTree.Literal) {
-			if (isStringLiteral(node) && isDoubleQuoted(node)) {
+			if (isStringLiteral(node) && isDoubleQuoted(node) && node.parent.type !== AST_NODE_TYPES.JSXAttribute) {
 				doubleQuotedStringLiterals.add(node);
 			}
 		}
@@ -177,6 +177,11 @@ export default new class NoUnexternalizedStrings implements eslint.Rule.RuleModu
 		return {
 			['Literal']: (node: ESTree.Literal) => collectDoubleQuotedStrings(node),
 			['ExpressionStatement[directive] Literal:exit']: (node: TSESTree.Literal) => doubleQuotedStringLiterals.delete(node),
+			['JSXAttribute:exit']: (node: TSESTree.JSXAttribute) => {
+				if (node.value?.type === AST_NODE_TYPES.Literal) {
+					doubleQuotedStringLiterals.delete(node.value);
+				}
+			},
 
 			// localize(...)
 			['CallExpression[callee.type="MemberExpression"][callee.object.name="nls"][callee.property.name="localize"]:exit']: (node: TSESTree.CallExpression) => visitLocalizeCall(node),

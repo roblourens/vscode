@@ -15,6 +15,7 @@ import fancyLog from 'fancy-log';
 import ansiColors from 'ansi-colors';
 import { getTargetStringFromTsConfig } from './tsconfigUtils.ts';
 import { createRequire } from 'module';
+import { browserRuntimeProductionDefines, inlineBrowserRuntimeDependenciesPlugin } from './esbuild.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -140,7 +141,7 @@ function bundleESMTask(opts: IBundleESMTaskOpts): NodeJS.ReadWriteStream {
 				platform: 'neutral', // makes esm
 				format: 'esm',
 				sourcemap: 'external',
-				plugins: [contentsMapper, externalOverride],
+				plugins: [contentsMapper, externalOverride, inlineBrowserRuntimeDependenciesPlugin()],
 				target: [target],
 				loader: {
 					'.ttf': 'file',
@@ -150,6 +151,7 @@ function bundleESMTask(opts: IBundleESMTaskOpts): NodeJS.ReadWriteStream {
 				},
 				assetNames: 'media/[name]', // moves media assets into a sub-folder "media"
 				banner,
+				define: browserRuntimeProductionDefines,
 				entryPoints: [
 					{
 						in: path.join(REPO_ROOT_PATH, opts.src, `${entryPoint.name}.js`),
@@ -281,4 +283,3 @@ function getBuildTarget() {
 	const tsconfigPath = path.join(REPO_ROOT_PATH, 'src', 'tsconfig.base.json');
 	return getTargetStringFromTsConfig(tsconfigPath);
 }
-

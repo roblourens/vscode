@@ -9,7 +9,7 @@ import { timeout } from '../../../../base/common/async.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { mock } from '../../../../base/test/common/mock.js';
-import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey } from '../../common/agentHostSchema.js';
+import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey, AgentHostSessionLifecycleTimeOffsetDaysConfigKey } from '../../common/agentHostSchema.js';
 import { ActionType } from '../../common/state/sessionActions.js';
 import { isSessionStatusArchived, SessionStatus, withSessionExternal, withSessionGitHubState, withSessionGitState, type SessionSummary } from '../../common/state/sessionState.js';
 import { AgentConfigurationService } from '../../node/agentConfigurationService.js';
@@ -717,6 +717,29 @@ suite('AgentHostSessionLifecycle', () => {
 			archiveCutoff: NOW - 13 * DAY_MS,
 			deleteCutoff: undefined,
 		}]);
+	});
+
+	test('runs immediately with the advanced lifecycle time', async () => {
+		const { configurationService, listed, autoArchiveTimestamps } = createHarness({
+			archiveAfterDays: 3,
+			deleteAfterDays: 0,
+			modifiedTime: NOW - 2 * DAY_MS,
+			status: mergedPullRequestStatus(),
+		});
+
+		configurationService.updateRootConfig({ [AgentHostSessionLifecycleTimeOffsetDaysConfigKey]: 1 });
+		await timeout(10);
+
+		assert.deepStrictEqual({
+			listed,
+			autoArchiveTimestamps,
+		}, {
+			listed: [{
+				archiveCutoff: NOW - 2 * DAY_MS,
+				deleteCutoff: undefined,
+			}],
+			autoArchiveTimestamps: [NOW + DAY_MS],
+		});
 	});
 });
 

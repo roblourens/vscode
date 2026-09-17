@@ -8,6 +8,8 @@ The Agent Host provider family adapts Agent Host Protocol sessions into the prov
 
 Remote connection-specific behavior is specified in [REMOTE_AGENT_HOST_SESSIONS_PROVIDER.md](../remoteAgentHost/REMOTE_AGENT_HOST_SESSIONS_PROVIDER.md).
 
+The committed-chat implementation and its state/action diagrams are described in [AGENT_HOST_CHAT_RENDERER.md](./AGENT_HOST_CHAT_RENDERER.md).
+
 ## Implementations
 
 | Implementation | Responsibility |
@@ -22,6 +24,7 @@ The shared base owns session adaptation, draft creation, catalog publication, re
 
 Agent Host providers implement `IAgentHostSessionsProvider`, which extends `ISessionsProvider` with:
 
+- acquisition of a ref-counted, protocol-native chat client for committed chats;
 - optional remote connection state and connect/disconnect operations;
 - observable host-declared session configuration;
 - observable Agent Merge state for committed sessions;
@@ -29,6 +32,16 @@ Agent Host providers implement `IAgentHostSessionsProvider`, which extends `ISes
 - optional local-draft Dev Container availability and selection.
 
 Consumers use the extended type guard rather than matching provider IDs. Provider-neutral features continue to depend on `ISessionsProvider`.
+
+## Chat state and rendering
+
+Committed Agent Host chats in the Agents Window use the provider-registered React renderer rather than the legacy `IChatModel` and `ChatWidget` renderer. `SessionState` and `ChatState` subscriptions are the authoritative state: the React layer consumes immutable snapshots through `useSyncExternalStore` and does not mirror the conversation into Zustand or another client store.
+
+`AgentHostChatClient` owns the protocol boundary. It holds ref-counted session and chat subscriptions, dispatches optimistic client actions through `IAgentConnection`, loads older turns with `fetchTurns`, maps client resource attachments back to Agent Host URIs, and exposes explicit loading, ready, and error snapshots. The renderer keeps only ephemeral presentation state locally.
+
+Completed history is virtualized with TanStack Virtual. The active streaming turn and queued tail stay outside the virtualized history so streaming updates do not invalidate the completed-turn window. Screen-reader-optimized mode renders the full completed transcript instead of virtualizing it. Agent-authored Markdown continues through `ChatContentMarkdownRenderer`.
+
+The initial implementation intentionally retains the existing New Session and new peer-chat shells. They own workspace selection, configuration, eager creation, and draft graduation; after a session or chat is committed, the view switches to the protocol-native renderer. Programmatic provider sends and the regular Chat panel remain on the compatibility path until their lifecycle responsibilities are extracted independently.
 
 ## Dev Container handoff
 

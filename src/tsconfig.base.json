@@ -4,6 +4,7 @@
 		"moduleResolution": "nodenext",
 		"moduleDetection": "legacy",
 		"experimentalDecorators": true,
+		"jsx": "react",
 		"noImplicitReturns": true,
 		"noImplicitOverride": true,
 		"noUnusedLocals": true,

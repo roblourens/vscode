@@ -9,10 +9,11 @@ import * as esbuild from 'esbuild';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGitCommitDate } from '../lib/date.ts';
+import { bundleBrowserRuntimeDependencies } from '../lib/esbuild.ts';
 import { applyIncrementalClientChanges, mapWithConcurrency, MAX_CONCURRENT_FILE_OPERATIONS } from './transpile.ts';
 
 const STATE_SCHEMA = 1;
-const BUILD_RECIPE = 1;
+const BUILD_RECIPE = 2;
 const LOCK_STALE_AFTER_MS = 30_000;
 const BUILD_SCOPES = ['src', 'extensions', '.vscode/extensions', 'build', 'gulpfile.mjs', 'package.json', 'package-lock.json', '.nvmrc'];
 const API_PROPOSALS_OUTPUT = 'src/vs/platform/extensions/common/extensionsApiProposals.ts';
@@ -110,7 +111,10 @@ export async function runBuildFast(repoRoot: string, force: boolean): Promise<vo
 		if (plan.client === 'full') {
 			tasks.push(runCommand(repoRoot, process.execPath, [path.join(repoRoot, 'build', 'next', 'index.ts'), 'transpile'], 'client'));
 		} else if (plan.client === 'incremental') {
-			tasks.push(runTimed('client', () => applyIncrementalClientChanges(repoRoot, 'out', prerequisites.clientChangedPaths)));
+			tasks.push(runTimed('client', async () => {
+				await applyIncrementalClientChanges(repoRoot, 'out', prerequisites.clientChangedPaths);
+				await bundleBrowserRuntimeDependencies(path.join(repoRoot, 'out'), repoRoot);
+			}));
 		}
 		if (plan.extensions === 'full') {
 			tasks.push(runCommand(repoRoot, npmCommand(), EXTENSION_BUILD_ARGS, 'extensions'));

@@ -102,7 +102,7 @@ function createHotClassSupport(): Plugin {
 		transform: {
 			order: 'pre',
 			handler: (code, id) => {
-				if (id.endsWith('.ts')) {
+				if (/\.tsx?$/.test(id)) {
 					let needsHMRAccept = false;
 					const hasCreateHotClass = code.includes('createHotClass');
 					const hasDomWidget = code.includes('DomWidget');
@@ -168,7 +168,7 @@ export default defineConfig({
 		createHotClassSupport(),
 		componentExplorer({
 			logLevel: 'verbose',
-			include: join(__dirname, '../../src/**/*.fixture.ts'),
+			include: join(__dirname, '../../src/**/*.fixture.{ts,tsx}'),
 			build: 'all',
 		}),
 	],

@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title description">
+	<title id="title">Agent Host chat renderer data flow</title>
+	<desc id="description">Renderer selection flows from ChatGroupView through the chat view factory to the React Agent Host view. Protocol state flows from Agent Host channels through the connection and client into React, while typed actions flow back to the host. Unsupported chats use the legacy renderer.</desc>
+	<defs>
+		<marker id="arrow-neutral" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="9" markerHeight="7" orient="auto">
+			<polygon points="0 0, 10 3.5, 0 7" fill="#6e7781"/>
+		</marker>
+		<marker id="arrow-state" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="9" markerHeight="7" orient="auto">
+			<polygon points="0 0, 10 3.5, 0 7" fill="#3578b8"/>
+		</marker>
+		<marker id="arrow-action" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="9" markerHeight="7" orient="auto">
+			<polygon points="0 0, 10 3.5, 0 7" fill="#c56a16"/>
+		</marker>
+		<filter id="shadow" x="-4%" y="-8%" width="108%" height="116%">
+			<feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.10"/>
+		</filter>
+	</defs>
+	<rect width="1200" height="720" fill="#f8f9fa"/>
+	<g font-family="Segoe UI, system-ui, -apple-system, sans-serif" fill="#24292f">
+		<text x="600" y="40" text-anchor="middle" font-size="22" font-weight="700">Agent Host chat renderer</text>
+		<text x="600" y="66" text-anchor="middle" font-size="12" fill="#57606a">Committed chats use protocol state directly; other chats retain the legacy renderer.</text>
+
+		<text x="60" y="100" font-size="10" font-weight="600" fill="#8c959f" letter-spacing="1">VIEW SELECTION AND LIVE DATA</text>
+		<line x1="60" y1="108" x2="1140" y2="108" stroke="#d8dee4"/>
+
+		<g>
+			<rect x="30" y="135" width="180" height="76" rx="8" fill="#e8f0fe" stroke="#4a90d9" stroke-width="1.5"/>
+			<text x="120" y="166" text-anchor="middle" font-size="14" font-weight="700">ChatGroupView</text>
+			<text x="120" y="186" text-anchor="middle" font-size="10" fill="#2c5f9a">derives view kind · replaces view</text>
+		</g>
+		<g>
+			<rect x="255" y="135" width="180" height="76" rx="8" fill="#e8f0fe" stroke="#4a90d9" stroke-width="1.5"/>
+			<text x="345" y="166" text-anchor="middle" font-size="14" font-weight="700">IChatViewFactory</text>
+			<text x="345" y="186" text-anchor="middle" font-size="10" fill="#2c5f9a">selects renderer · legacy fallback</text>
+		</g>
+		<g filter="url(#shadow)">
+			<rect x="500" y="130" width="200" height="86" rx="8" fill="#d9eed9" stroke="#5a9a6a" stroke-width="2"/>
+			<text x="600" y="164" text-anchor="middle" font-size="15" font-weight="700">AgentHostChatView</text>
+			<text x="600" y="184" text-anchor="middle" font-size="10" fill="#3a7a4a">React · TanStack Virtual · Monaco</text>
+			<text x="600" y="200" text-anchor="middle" font-size="10" fill="#3a7a4a">useSyncExternalStore</text>
+		</g>
+		<g filter="url(#shadow)">
+			<rect x="755" y="130" width="200" height="86" rx="8" fill="#d9eed9" stroke="#5a9a6a" stroke-width="2"/>
+			<text x="855" y="164" text-anchor="middle" font-size="15" font-weight="700">AgentHostChatClient</text>
+			<text x="855" y="184" text-anchor="middle" font-size="10" fill="#3a7a4a">stable immutable snapshots</text>
+			<text x="855" y="200" text-anchor="middle" font-size="10" fill="#3a7a4a">typed chat operations</text>
+		</g>
+		<g>
+			<rect x="1010" y="135" width="160" height="76" rx="8" fill="#fff3e0" stroke="#d48a20" stroke-width="1.5"/>
+			<text x="1090" y="166" text-anchor="middle" font-size="14" font-weight="700">IAgentConnection</text>
+			<text x="1090" y="186" text-anchor="middle" font-size="10" fill="#a06a10">subscriptions · dispatch · fetch</text>
+		</g>
+
+		<line x1="210" y1="173" x2="247" y2="173" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="228" y="159" text-anchor="middle" font-size="10" fill="#57606a">asks</text>
+		<line x1="435" y1="173" x2="492" y2="173" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="464" y="159" text-anchor="middle" font-size="10" fill="#57606a">creates</text>
+
+		<line x1="747" y1="154" x2="708" y2="154" stroke="#3578b8" stroke-width="2" marker-end="url(#arrow-state)"/>
+		<text x="728" y="142" text-anchor="middle" font-size="10" fill="#2c5f9a">state</text>
+		<line x1="708" y1="194" x2="747" y2="194" stroke="#c56a16" stroke-width="2" marker-end="url(#arrow-action)"/>
+		<text x="728" y="209" text-anchor="middle" font-size="10" fill="#a06a10">actions</text>
+		<line x1="1002" y1="154" x2="963" y2="154" stroke="#3578b8" stroke-width="2" marker-end="url(#arrow-state)"/>
+		<text x="983" y="142" text-anchor="middle" font-size="10" fill="#2c5f9a">state</text>
+		<line x1="963" y1="194" x2="1002" y2="194" stroke="#c56a16" stroke-width="2" marker-end="url(#arrow-action)"/>
+		<text x="983" y="209" text-anchor="middle" font-size="10" fill="#a06a10">actions</text>
+
+		<text x="60" y="270" font-size="10" font-weight="600" fill="#8c959f" letter-spacing="1">WIRING AND FALLBACK</text>
+		<line x1="60" y1="278" x2="1140" y2="278" stroke="#d8dee4"/>
+
+		<g>
+			<rect x="255" y="310" width="180" height="70" rx="8" fill="#f0f1f2" stroke="#8c959f" stroke-dasharray="5 4"/>
+			<text x="345" y="338" text-anchor="middle" font-size="13" font-weight="600">Legacy ChatView</text>
+			<text x="345" y="358" text-anchor="middle" font-size="10" fill="#57606a">IChatModel · ChatWidget</text>
+		</g>
+		<g>
+			<rect x="500" y="310" width="200" height="70" rx="8" fill="#e8f0fe" stroke="#4a90d9"/>
+			<text x="600" y="338" text-anchor="middle" font-size="13" font-weight="600">Renderer contribution</text>
+			<text x="600" y="358" text-anchor="middle" font-size="10" fill="#2c5f9a">registers before UI restoration</text>
+		</g>
+		<g>
+			<rect x="755" y="310" width="200" height="70" rx="8" fill="#d9eed9" stroke="#5a9a6a"/>
+			<text x="855" y="338" text-anchor="middle" font-size="13" font-weight="600">Agent Host provider</text>
+			<text x="855" y="358" text-anchor="middle" font-size="10" fill="#3a7a4a">maps Sessions URI · acquires client</text>
+		</g>
+		<g>
+			<rect x="1010" y="310" width="160" height="70" rx="8" fill="#fff3e0" stroke="#d48a20"/>
+			<text x="1090" y="338" text-anchor="middle" font-size="13" font-weight="600">AHP channels</text>
+			<text x="1090" y="358" text-anchor="middle" font-size="10" fill="#a06a10">SessionState · ChatState</text>
+		</g>
+
+		<path d="M345 219 V302" fill="none" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="355" y="261" font-size="10" fill="#57606a">no renderer accepts</text>
+		<path d="M600 302 V224 H445" fill="none" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="610" y="255" font-size="10" fill="#57606a">registers</text>
+		<path d="M700 345 H747" fill="none" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="724" y="333" text-anchor="middle" font-size="10" fill="#57606a">uses</text>
+		<path d="M855 302 V224" fill="none" stroke="#6e7781" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+		<text x="866" y="266" font-size="10" fill="#57606a">owns reference</text>
+		<path d="M1090 302 V219" fill="none" stroke="#3578b8" stroke-width="1.5" marker-end="url(#arrow-state)"/>
+		<text x="1100" y="266" font-size="10" fill="#2c5f9a">reduced state</text>
+
+		<rect x="140" y="450" width="920" height="112" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+		<text x="600" y="480" text-anchor="middle" font-size="14" font-weight="700">One authoritative model</text>
+		<text x="600" y="506" text-anchor="middle" font-size="12" fill="#57606a">SessionState and ChatState are reduced by the connection, exposed as stable client snapshots,</text>
+		<text x="600" y="526" text-anchor="middle" font-size="12" fill="#57606a">and consumed directly by React. Presentation state remains local; conversation state is not mirrored.</text>
+		<text x="600" y="546" text-anchor="middle" font-size="11" font-style="italic" fill="#57606a">The same path works for local and remote providers because transport variation stays behind IAgentConnection.</text>
+
+		<g transform="translate(330 620)">
+			<line x1="0" y1="0" x2="42" y2="0" stroke="#3578b8" stroke-width="2" marker-end="url(#arrow-state)"/>
+			<text x="54" y="4" font-size="11" fill="#2c5f9a">immutable state toward React</text>
+			<line x1="260" y1="0" x2="302" y2="0" stroke="#c56a16" stroke-width="2" marker-end="url(#arrow-action)"/>
+			<text x="314" y="4" font-size="11" fill="#a06a10">typed actions toward Agent Host</text>
+		</g>
+	</g>
+</svg>

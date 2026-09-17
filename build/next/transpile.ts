@@ -13,7 +13,6 @@ const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 export const MAX_CONCURRENT_FILE_OPERATIONS = 256;
 
 const transformOptions: esbuild.TransformOptions = {
-	loader: 'ts',
 	format: 'esm',
 	target: 'es2024',
 	sourcemap: 'inline',
@@ -28,13 +27,19 @@ const transformOptions: esbuild.TransformOptions = {
 
 export async function transpileFile(srcPath: string, destPath: string): Promise<void> {
 	const source = await fs.promises.readFile(srcPath, 'utf-8');
-	const result = await esbuild.transform(source, {
-		...transformOptions,
-		sourcefile: srcPath,
-	});
+	const code = await transpileSource(source, srcPath);
 
 	await fs.promises.mkdir(path.dirname(destPath), { recursive: true });
-	await fs.promises.writeFile(destPath, adjustEsmUrl(result.code));
+	await fs.promises.writeFile(destPath, code);
+}
+
+export async function transpileSource(source: string, sourcePath: string): Promise<string> {
+	const result = await esbuild.transform(source, {
+		...transformOptions,
+		loader: sourcePath.endsWith('.tsx') ? 'tsx' : 'ts',
+		sourcefile: sourcePath,
+	});
+	return adjustEsmUrl(result.code);
 }
 
 export async function copyFile(srcPath: string, destPath: string): Promise<void> {
@@ -93,14 +98,17 @@ export async function applyIncrementalClientChanges(repoRoot: string, outDir: st
 		const destinationPath = path.join(repoRoot, outDir, destination);
 		const resourceSource = path.join(repoRoot, 'src', destination);
 
-		if (!resourceSource.endsWith('.ts') && await isFile(resourceSource)) {
+		if (!isTypeScriptSourceFile(resourceSource) && await isFile(resourceSource)) {
 			return { destinationPath, sourcePath: resourceSource, kind: 'copy' as const };
 		}
 
 		if (destination.endsWith('.js')) {
-			const typeScriptSource = path.join(repoRoot, 'src', destination.slice(0, -'.js'.length) + '.ts');
-			if (await isFile(typeScriptSource) && !typeScriptSource.endsWith('.d.ts')) {
-				return { destinationPath, sourcePath: typeScriptSource, kind: 'transpile' as const };
+			const sourceWithoutExtension = path.join(repoRoot, 'src', destination.slice(0, -'.js'.length));
+			for (const extension of ['.ts', '.tsx']) {
+				const typeScriptSource = sourceWithoutExtension + extension;
+				if (await isFile(typeScriptSource)) {
+					return { destinationPath, sourcePath: typeScriptSource, kind: 'transpile' as const };
+				}
 			}
 		}
 
@@ -132,13 +140,21 @@ export async function applyIncrementalClientChanges(repoRoot: string, outDir: st
 }
 
 export function getOutputRelativePath(sourceRelativePath: string): string {
-	return sourceRelativePath.endsWith('.ts') && !sourceRelativePath.endsWith('.d.ts')
-		? sourceRelativePath.slice(0, -'.ts'.length) + '.js'
+	return isTypeScriptSourceFile(sourceRelativePath) && !sourceRelativePath.endsWith('.d.ts')
+		? sourceRelativePath.replace(/\.tsx?$/, '.js')
 		: sourceRelativePath;
 }
 
 function adjustEsmUrl(code: string): string {
-	return code.replace(/\.ts(\?esm['"])/g, '.js$1');
+	return code.replace(/\.tsx?(\?esm['"])/g, '.js$1');
+}
+
+function isTypeScriptFile(filePath: string): boolean {
+	return /\.tsx?$/.test(filePath);
+}
+
+export function isTypeScriptSourceFile(filePath: string): boolean {
+	return isTypeScriptFile(filePath) && !/(^|[\\/])vs[\\/]editor[\\/]test[\\/]node[\\/]diffing[\\/]fixtures[\\/].+\.tsx$/.test(filePath);
 }
 
 function needsBomAdded(filePath: string): boolean {

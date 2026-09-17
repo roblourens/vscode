@@ -165,7 +165,8 @@ export function createTypeScriptBuilder(config: IConfiguration, projectFile: str
 								const extname = path.extname(vinyl.relative);
 								const basename = path.basename(vinyl.relative, extname);
 								const dirname = path.dirname(vinyl.relative);
-								const tsname = (dirname === '.' ? '' : dirname + '/') + basename + '.ts';
+								const sourceExtension = fileName.endsWith('.tsx') ? '.tsx' : '.ts';
+								const tsname = (dirname === '.' ? '' : dirname + '/') + basename + sourceExtension;
 
 								let sourceMap = JSON.parse(sourcemapFile.text) as RawSourceMap;
 								sourceMap.sources[0] = tsname.replace(/\\/g, '/');
@@ -737,6 +738,10 @@ class LanguageServiceHost implements ts.LanguageServiceHost {
 
 				if (this.getScriptSnapshot(normalizedPath + '.ts')) {
 					this._dependencies.inertEdge(filename, normalizedPath + '.ts');
+					found = true;
+
+				} else if (this.getScriptSnapshot(normalizedPath + '.tsx')) {
+					this._dependencies.inertEdge(filename, normalizedPath + '.tsx');
 					found = true;
 
 				} else if (this.getScriptSnapshot(normalizedPath + '.d.ts')) {

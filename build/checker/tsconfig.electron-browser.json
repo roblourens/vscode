@@ -3,7 +3,9 @@
 	"include": [
 		"../../src/**/common/**/*.ts",
 		"../../src/**/browser/**/*.ts",
+		"../../src/**/browser/**/*.tsx",
 		"../../src/**/electron-browser/**/*.ts",
+		"../../src/**/electron-browser/**/*.tsx",
 		"../../src/typings/*.d.ts",
 		"../../src/vs/monaco.d.ts",
 		"../../src/vscode-dts/vscode.proposed.*.d.ts",

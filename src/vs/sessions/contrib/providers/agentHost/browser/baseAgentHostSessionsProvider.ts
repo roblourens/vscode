@@ -58,7 +58,7 @@ import { ChatAgentLocation, ChatConfiguration, ChatModeKind, ChatPermissionLevel
 import { isAutoApprovePolicyRestricted, normalizeSessionConfigValue } from '../../../../../workbench/contrib/chat/common/agentHostConfigPolicy.js';
 import { ILanguageModelChatMetadata, ILanguageModelsService } from '../../../../../workbench/contrib/chat/common/languageModels.js';
 import { getRegisteredLanguageModels, resolveConfiguredModel, resolveModelIdentifier, resolveModelIdentifierFromLanguageModels } from '../../../../../workbench/contrib/chat/common/modelSelection.js';
-import { buildMutableConfigSchema, IAgentHostMcpServer, IAgentHostSessionsProvider, IAgentMergeClientState, resolvedConfigsEqual } from '../../../../common/agentHostSessionsProvider.js';
+import { buildMutableConfigSchema, IAgentHostChatClientReference, IAgentHostMcpServer, IAgentHostSessionsProvider, IAgentMergeClientState, resolvedConfigsEqual } from '../../../../common/agentHostSessionsProvider.js';
 import { agentHostSessionWorkspaceKey } from '../../../../common/agentHostSessionWorkspace.js';
 import { USE_WORKTREE_SETTING, isSessionConfigComplete } from '../../../../common/sessionConfig.js';
 import { linkKey } from '../../../../common/sessionLinks.js';
@@ -74,6 +74,7 @@ import { parseGitHubPullRequestUrl } from '../../../github/common/utils.js';
 import { mapProtocolStatus } from './agentHostDiffs.js';
 import { createActiveSessionSubscriptionObs, createChangesets, IAgentHostChangeset, selectMostRecentChatUri } from './agentHostSessionChangesets.js';
 import { createSessionOutputObs, ISessionOutputObs } from './agentHostSessionFiles.js';
+import { AgentHostChatClient, createUserMessage } from './chat/agentHostChatClient.js';
 
 const STORAGE_KEY_REMEMBERED_SESSION_CONFIG_VALUES = 'sessions.agentHost.sessionConfigPicker.selectedValues';
 const UNSAFE_SESSION_CONFIG_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -4598,6 +4599,43 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		} catch {
 			return undefined;
 		}
+	}
+
+	acquireChatClient(sessionId: string, chatResource: URI): IAgentHostChatClientReference | undefined {
+		const connection = this.connection;
+		const rawId = this._rawIdFromChatId(sessionId);
+		const session = rawId ? this._sessionCache.get(rawId) : undefined;
+		const backendChatResource = this.getBackendChatResource(chatResource);
+		if (!connection || !session || !backendChatResource) {
+			return undefined;
+		}
+
+		const client = new AgentHostChatClient({
+			connection,
+			sessionResource: session.backendUri,
+			chatResource: backendChatResource,
+			createMessage: (text, attachments) => {
+				const mode = session.getChatMode(chatResource);
+				return createUserMessage(
+					text,
+					attachments,
+					session.getChatModelSelection(chatResource),
+					mode ? { uri: mode.id } : undefined,
+				);
+			},
+		});
+		return {
+			object: client,
+			dispose: () => client.dispose(),
+		};
+	}
+
+	canAcquireChatClient(sessionId: string, chatResource: URI): boolean {
+		const rawId = this._rawIdFromChatId(sessionId);
+		return this.connection !== undefined
+			&& rawId !== undefined
+			&& this._sessionCache.has(rawId)
+			&& this.getBackendChatResource(chatResource) !== undefined;
 	}
 
 	getWorkingDirectories(sessionId: string): readonly string[] {

@@ -6,7 +6,7 @@
 import { RunOnceScheduler } from '../../../base/common/async.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { URI } from '../../../base/common/uri.js';
-import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey, platformRootSchema } from '../common/agentHostSchema.js';
+import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey, AgentHostSessionLifecycleTimeOffsetDaysConfigKey, platformRootSchema } from '../common/agentHostSchema.js';
 import { getSessionRelatedPullRequestUrls, isSessionStatusArchived, readSessionGitHubState, SessionStatus, type SessionSummary } from '../common/state/sessionState.js';
 import { IAgentConfigurationService } from './agentConfigurationService.js';
 import { IAgentHostProviderService } from './agentHostProviderService.js';
@@ -53,7 +53,7 @@ export class AgentHostSessionLifecycle extends Disposable {
 	private readonly _now: () => number;
 	private _runPromise = Promise.resolve();
 	private _disposed = false;
-	private _settings: { readonly archiveAfterDays: number; readonly deleteAfterDays: number };
+	private _settings: { readonly archiveAfterDays: number; readonly deleteAfterDays: number; readonly timeOffsetDays: number };
 
 	constructor(
 		private readonly _accessor: IAgentHostSessionLifecycleAccessor,
@@ -66,13 +66,15 @@ export class AgentHostSessionLifecycle extends Disposable {
 	) {
 		super();
 		this._intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
-		this._now = options.now ?? Date.now;
 		this._settings = this._readSettings();
+		const now = options.now ?? Date.now;
+		this._now = () => now() + this._settings.timeOffsetDays * DAY_MS;
 		this._scheduler = this._register(new RunOnceScheduler(() => this._runScheduled(), this._intervalMs));
 		this._register(this._configurationService.onDidRootConfigChange(() => {
 			const settings = this._readSettings();
 			if (settings.archiveAfterDays === this._settings.archiveAfterDays
-				&& settings.deleteAfterDays === this._settings.deleteAfterDays) {
+				&& settings.deleteAfterDays === this._settings.deleteAfterDays
+				&& settings.timeOffsetDays === this._settings.timeOffsetDays) {
 				return;
 			}
 			this._settings = settings;
@@ -120,14 +122,20 @@ export class AgentHostSessionLifecycle extends Disposable {
 		}
 	}
 
-	private _readSettings(): { readonly archiveAfterDays: number; readonly deleteAfterDays: number } {
+	private _readSettings(): { readonly archiveAfterDays: number; readonly deleteAfterDays: number; readonly timeOffsetDays: number } {
 		const archiveAfterDays = this._readThreshold(AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey);
 		const deleteAfterDays = this._readThreshold(AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey);
-		return { archiveAfterDays, deleteAfterDays };
+		const timeOffsetDays = this._readTimeOffsetDays();
+		return { archiveAfterDays, deleteAfterDays, timeOffsetDays };
 	}
 
 	private _readThreshold(key: typeof AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey | typeof AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey): number {
 		const value = this._configurationService.getRootValue(platformRootSchema, key);
+		return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
+	}
+
+	private _readTimeOffsetDays(): number {
+		const value = this._configurationService.getRootValue(platformRootSchema, AgentHostSessionLifecycleTimeOffsetDaysConfigKey);
 		return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
 	}
 

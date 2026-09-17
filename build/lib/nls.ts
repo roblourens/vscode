@@ -176,8 +176,9 @@ const _nls = (() => {
 	}
 
 	function patch(typescript: string, javascript: string, sourcemap: sm.RawSourceMap, options: { preserveEnglish: boolean }): INlsPatchResult {
-		const localizeCalls = analyzeLocalizeCalls(typescript, 'localize');
-		const localize2Calls = analyzeLocalizeCalls(typescript, 'localize2');
+		const sourceFileName = sourcemap.sources[0];
+		const localizeCalls = analyzeLocalizeCalls(typescript, 'localize', sourceFileName);
+		const localize2Calls = analyzeLocalizeCalls(typescript, 'localize2', sourceFileName);
 
 		if (localizeCalls.length === 0 && localize2Calls.length === 0) {
 			return { javascript, sourcemap };

@@ -66,6 +66,12 @@ The view service:
 
 It delegates model lifecycle operations to `ISessionsManagementService`.
 
+### `IChatViewFactory`
+
+The chat-view factory owns the presentation boundary for a session chat. Providers may register a renderer with a stable identifier and a predicate over the provider-neutral active session, chat, and view kind. The first matching renderer owns the view; otherwise the factory falls back to the legacy Chat widget renderer.
+
+`ChatGroupView` tracks both view kind and renderer identifier. A provider can therefore replace the legacy renderer without putting provider-specific imports in shared Sessions code, while unrelated providers continue to use the existing `IChatModel` and `ChatWidget` stack.
+
 ### Scoped session context
 
 Surfaces that can represent a session other than the window-global active session use `ISessionContext`. Commands and menus resolve their target through that scope rather than assuming the active session.

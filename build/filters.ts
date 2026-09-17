@@ -231,9 +231,9 @@ export const copyrightFilter = Object.freeze<string[]>([
 ]);
 
 export const tsFormattingFilter = Object.freeze<string[]>([
-	'src/**/*.ts',
-	'test/**/*.ts',
-	'extensions/**/*.ts',
+	'src/**/*.{ts,tsx}',
+	'test/**/*.{ts,tsx}',
+	'extensions/**/*.{ts,tsx}',
 	'!src/vs/*/**/*.d.ts',
 	'!src/typings/**/*.d.ts',
 	'!extensions/**/*.d.ts',

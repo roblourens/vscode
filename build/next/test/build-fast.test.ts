@@ -191,24 +191,28 @@ suite('incremental client output', () => {
 		const repoRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'vscode-build-fast-'));
 		try {
 			await write(repoRoot, 'src/sample.ts', 'export const value: number = 1;\n');
+			await write(repoRoot, 'src/component.tsx', 'export const Component = () => <span>value</span>;\n');
 			await write(repoRoot, 'src/sample.d.ts', 'export declare const value: number;\n');
 			await write(repoRoot, 'src/data.json', '{"value":1}\n');
 
-			await applyIncrementalClientChanges(repoRoot, 'out', ['src/sample.ts', 'src/sample.d.ts', 'src/data.json']);
+			await applyIncrementalClientChanges(repoRoot, 'out', ['src/sample.ts', 'src/component.tsx', 'src/sample.d.ts', 'src/data.json']);
 
 			const initial = {
 				js: await fs.promises.readFile(path.join(repoRoot, 'out/sample.js'), 'utf8'),
+				jsx: await fs.promises.readFile(path.join(repoRoot, 'out/component.js'), 'utf8'),
 				declaration: await fs.promises.readFile(path.join(repoRoot, 'out/sample.d.ts'), 'utf8'),
 				resource: await fs.promises.readFile(path.join(repoRoot, 'out/data.json'), 'utf8'),
 			};
 			assert.deepStrictEqual({
 				jsContainsType: initial.js.includes(': number'),
 				jsContainsValue: initial.js.includes('const value = 1'),
+				jsxContainsCreateElement: initial.jsx.includes('React.createElement("span"'),
 				declaration: initial.declaration,
 				resource: initial.resource,
 			}, {
 				jsContainsType: false,
 				jsContainsValue: true,
+				jsxContainsCreateElement: true,
 				declaration: 'export declare const value: number;\n',
 				resource: '{"value":1}\n',
 			});
@@ -280,7 +284,7 @@ suite('incremental client output', () => {
 function state(dirty: Readonly<Record<string, string | null>> = {}): BuildFastState {
 	return {
 		schema: 1,
-		recipe: 1,
+		recipe: 2,
 		head: 'saved',
 		environment,
 		dirty,

@@ -174,7 +174,7 @@ export class SessionView extends Disposable implements ISerializableView {
 			this._groupsView.setSession(undefined, options);
 			let view = this._standaloneView.value;
 			if (!view || view.kind !== 'newSession') {
-				view = this._chatViewFactory.createNewChatView(false, options, this._scopedInstantiationService);
+				view = this._chatViewFactory.createNewChatView(session, undefined, false, options, this._scopedInstantiationService);
 				this._standaloneView.value = view;
 			}
 			if (view.element.parentElement !== this._contentContainer) {
@@ -191,7 +191,7 @@ export class SessionView extends Disposable implements ISerializableView {
 			this._showSessionGroups(session, options);
 		} else {
 			this._groupsView.setSession(undefined, options);
-			const view = this._chatViewFactory.createNewChatView(false, options, this._scopedInstantiationService);
+			const view = this._chatViewFactory.createNewChatView(undefined, undefined, false, options, this._scopedInstantiationService);
 			this._standaloneView.value = view;
 			this._contentContainer.replaceChildren(view.element);
 			view.setActive(this._isActive);
@@ -276,6 +276,10 @@ export class SessionView extends Disposable implements ISerializableView {
 
 	getFocusedChat(): IChat | undefined {
 		return this._groupsView.getFocusedChat();
+	}
+
+	getAccessibleContent(): string | undefined {
+		return this._standaloneView.value?.getAccessibleContent() ?? this._groupsView.getAccessibleContent();
 	}
 
 	getSession(): IActiveSession | undefined {

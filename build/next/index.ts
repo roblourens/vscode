@@ -20,7 +20,8 @@ import { useEsbuildTranspile } from '../buildConfig.ts';
 import { isWebExtension, type IScannedBuiltinExtension } from '../lib/extensions.ts';
 import { runBuildFast } from './build-fast.ts';
 import { bundleDevTunnelsWeb } from './devTunnelsWeb.ts';
-import { copyFile, mapWithConcurrency, MAX_CONCURRENT_FILE_OPERATIONS, transpileFile } from './transpile.ts';
+import { copyFile, isTypeScriptSourceFile, mapWithConcurrency, MAX_CONCURRENT_FILE_OPERATIONS, transpileFile } from './transpile.ts';
+import { browserRuntimeProductionDefines, bundleBrowserRuntimeDependencies, inlineBrowserRuntimeDependenciesPlugin } from '../lib/esbuild.ts';
 
 const globAsync = promisify(glob);
 
@@ -526,8 +527,8 @@ async function copyAllNonTsFiles(outDir: string, excludeTests: boolean): Promise
 	console.log(`[resources] Copying all non-TS files to ${outDir}...`);
 
 	const ignorePatterns = [
-		// Exclude .ts files but keep .d.ts files (they're needed at runtime for type references)
-		'**/*.ts',
+		// Exclude source files but keep .d.ts files (they're needed at runtime for type references)
+		'**/*.{ts,tsx}',
 	];
 	if (excludeTests) {
 		ignorePatterns.push('**/test/**');
@@ -539,13 +540,17 @@ async function copyAllNonTsFiles(outDir: string, excludeTests: boolean): Promise
 		ignore: ignorePatterns,
 	});
 
-	// Re-include .d.ts files that were excluded by the *.ts ignore
+	// Re-include .d.ts files that were excluded by the TypeScript source ignore
 	const dtsFiles = await globAsync('**/*.d.ts', {
 		cwd: path.join(REPO_ROOT, SRC_DIR),
 		ignore: excludeTests ? ['**/test/**'] : [],
 	});
+	const nonSourceTsxFiles = await globAsync('vs/editor/test/node/diffing/fixtures/**/*.tsx', {
+		cwd: path.join(REPO_ROOT, SRC_DIR),
+		ignore: excludeTests ? ['**/test/**'] : [],
+	});
 
-	const allFiles = [...new Set([...files, ...dtsFiles])];
+	const allFiles = [...new Set([...files, ...dtsFiles, ...nonSourceTsxFiles])];
 
 	await mapWithConcurrency(allFiles, MAX_CONCURRENT_FILE_OPERATIONS, file => {
 		const srcPath = path.join(REPO_ROOT, SRC_DIR, file);
@@ -630,7 +635,7 @@ function fileContentMapperPlugin(outDir: string, target: BuildTarget): esbuild.P
 	return {
 		name: 'file-content-mapper',
 		setup(build) {
-			build.onLoad({ filter: /\.ts$/ }, async (args) => {
+			build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
 				// Skip .d.ts files
 				if (args.path.endsWith('.d.ts')) {
 					return undefined;
@@ -679,7 +684,7 @@ function fileContentMapperPlugin(outDir: string, target: BuildTarget): esbuild.P
 				}
 
 				if (modified) {
-					return { contents, loader: 'ts' };
+					return { contents, loader: args.path.endsWith('.tsx') ? 'tsx' : 'ts' };
 				}
 
 				// No modifications, let esbuild handle normally
@@ -694,13 +699,16 @@ function fileContentMapperPlugin(outDir: string, target: BuildTarget): esbuild.P
 // ============================================================================
 
 async function transpile(outDir: string, excludeTests: boolean): Promise<void> {
-	// Find all .ts files
-	const ignorePatterns = ['**/*.d.ts'];
+	// Find all TypeScript source files
+	const ignorePatterns = [
+		'**/*.d.ts',
+		'vs/editor/test/node/diffing/fixtures/**/*.tsx',
+	];
 	if (excludeTests) {
 		ignorePatterns.push('**/test/**');
 	}
 
-	const files = await globAsync('**/*.ts', {
+	const files = await globAsync('**/*.{ts,tsx}', {
 		cwd: path.join(REPO_ROOT, SRC_DIR),
 		ignore: ignorePatterns,
 	});
@@ -709,7 +717,7 @@ async function transpile(outDir: string, excludeTests: boolean): Promise<void> {
 
 	await mapWithConcurrency(files, MAX_CONCURRENT_FILE_OPERATIONS, file => {
 		const srcPath = path.join(REPO_ROOT, SRC_DIR, file);
-		const destPath = path.join(REPO_ROOT, outDir, file.replace(/\.ts$/, '.js'));
+		const destPath = path.join(REPO_ROOT, outDir, file.replace(/\.tsx?$/, '.js'));
 		return transpileFile(srcPath, destPath);
 	});
 }
@@ -781,6 +789,7 @@ ${tslib}`,
 
 		// Use CSS external plugin for entry points that don't need bundled CSS
 		const plugins: esbuild.Plugin[] = bundleCssEntryPoints.has(entryPoint) ? [] : [cssExternalPlugin()];
+		plugins.push(inlineBrowserRuntimeDependenciesPlugin());
 		// Add content mapper plugin to inject product config and builtin extensions
 		plugins.push(contentMapperPlugin);
 		if (doNls) {
@@ -811,6 +820,7 @@ ${tslib}`,
 			minify: doMinify,
 			treeShaking: true,
 			banner,
+			define: browserRuntimeProductionDefines,
 			loader: {
 				'.ttf': 'file',
 				'.svg': 'file',
@@ -1059,6 +1069,7 @@ async function watch(): Promise<void> {
 	try {
 		await transpile(outDir, false);
 		await copyAllNonTsFiles(outDir, false);
+		await bundleBrowserRuntimeDependencies(path.join(REPO_ROOT, outDir));
 		console.log(`Finished transpilation with 0 errors after ${Date.now() - t1} ms`);
 	} catch (err) {
 		console.error('[watch] Initial build failed:', err);
@@ -1082,6 +1093,7 @@ async function watch(): Promise<void> {
 				const t1 = Date.now();
 				const tsFiles = [...pendingTsFiles];
 				const filesToCopy = [...pendingCopyFiles];
+				const browserRuntimeChanged = tsFiles.some(file => path.relative(srcDir, file).replaceAll('\\', '/') === 'vs/sessions/browser/browserRuntime.ts');
 				pendingTsFiles = new Set();
 				pendingCopyFiles = new Set();
 
@@ -1090,9 +1102,12 @@ async function watch(): Promise<void> {
 						console.log(`[watch] Transpiling ${tsFiles.length} file(s)...`);
 						await mapWithConcurrency(tsFiles, MAX_CONCURRENT_FILE_OPERATIONS, srcPath => {
 							const relativePath = path.relative(path.join(REPO_ROOT, SRC_DIR), srcPath);
-							const destPath = path.join(REPO_ROOT, outDir, relativePath.replace(/\.ts$/, '.js'));
+							const destPath = path.join(REPO_ROOT, outDir, relativePath.replace(/\.tsx?$/, '.js'));
 							return transpileFile(srcPath, destPath);
 						});
+						if (browserRuntimeChanged) {
+							await bundleBrowserRuntimeDependencies(path.join(REPO_ROOT, outDir));
+						}
 					}
 
 					if (filesToCopy.length > 0) {
@@ -1122,7 +1137,7 @@ async function watch(): Promise<void> {
 	const watchStream = gulpWatch('src/**', { base: srcDir, readDelay: 200 });
 
 	watchStream.on('data', (file: { path: string }) => {
-		if (file.path.endsWith('.ts') && !file.path.endsWith('.d.ts')) {
+		if (isTypeScriptSourceFile(file.path) && !file.path.endsWith('.d.ts')) {
 			pendingTsFiles.add(file.path);
 		} else {
 			// Copy any non-TS file (matches old gulp build's `src/**` behavior)
@@ -1135,7 +1150,7 @@ async function watch(): Promise<void> {
 		}
 	});
 
-	console.log('[watch] Watching src/**/*.{ts,css,...} (Ctrl+C to stop)');
+	console.log('[watch] Watching src/**/*.{ts,tsx,css,...} (Ctrl+C to stop)');
 
 	// Keep process alive
 	process.on('SIGINT', () => {
@@ -1212,6 +1227,7 @@ async function main(): Promise<void> {
 					const t1 = Date.now();
 					await transpile(outDir, options.excludeTests);
 					await copyAllNonTsFiles(outDir, options.excludeTests);
+					await bundleBrowserRuntimeDependencies(path.join(REPO_ROOT, outDir));
 					console.log(`[transpile] Done in ${Date.now() - t1}ms`);
 				}
 				break;

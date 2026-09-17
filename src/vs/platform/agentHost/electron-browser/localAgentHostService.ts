@@ -60,7 +60,7 @@ import {
 } from '../common/agentService.js';
 import type { IRemoteWatchHandle } from '../common/agentHostFileSystemProvider.js';
 import type { IActiveSubscriptionInfo, IAgentSubscription } from '../common/state/agentSubscription.js';
-import type { CompletionsParams, CompletionsResult, ContentEncoding, CreateTerminalParams, ResolveSessionConfigResult, SessionConfigCompletionsResult } from '../common/state/protocol/commands.js';
+import type { CompletionsParams, CompletionsResult, ContentEncoding, CreateTerminalParams, FetchTurnsParams, FetchTurnsResult, ResolveSessionConfigResult, SessionConfigCompletionsResult } from '../common/state/protocol/commands.js';
 import type { Implementation, InitializeResult } from '../common/state/protocol/common/commands.js';
 import { NonReconnectableTransportError } from '../common/state/sessionTransport.js';
 import type { InvokeChangesetOperationParams, InvokeChangesetOperationResult } from '../common/state/protocol/channels-changeset/commands.js';
@@ -454,6 +454,10 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 
 	completions(params: CompletionsParams): Promise<CompletionsResult> {
 		return this._requireClient().completions(params);
+	}
+
+	fetchTurns(params: FetchTurnsParams): Promise<FetchTurnsResult> {
+		return this._requireClient().fetchTurns(params);
 	}
 
 	listAutomationTriggerDefinitions(params: ListAutomationTriggerDefinitionsParams): Promise<ListAutomationTriggerDefinitionsResult> {

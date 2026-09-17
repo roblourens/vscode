@@ -575,6 +575,9 @@ export const AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey = 'autoArchive
 /** Root config key controlling permanent deletion of automatically archived sessions with merged pull requests. */
 export const AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey = 'autoDeleteArchivedMergedSessionsAfterDays';
 
+/** Root config key advancing the clock used to evaluate automatic merged-session cleanup. */
+export const AgentHostSessionLifecycleTimeOffsetDaysConfigKey = 'sessionLifecycleTimeOffsetDays';
+
 /**
  * Root config key forwarded from the renderer that gates multiple-working-directory
  * support for the Copilot provider. When `true`, the Copilot provider advertises
@@ -921,6 +924,12 @@ export const platformRootSchema = createSchema({
 		type: 'number',
 		title: localize('agentHost.config.autoDeleteArchivedMergedSessionsAfterDays.title', "Auto-Delete Archived Merged Sessions"),
 		description: localize('agentHost.config.autoDeleteArchivedMergedSessionsAfterDays.description', "Number of days after automatic archival before a session with a merged pull request is permanently deleted. Zero disables permanent deletion."),
+		default: 0,
+	}),
+	[AgentHostSessionLifecycleTimeOffsetDaysConfigKey]: schemaProperty<number>({
+		type: 'number',
+		title: localize('agentHost.config.sessionLifecycleTimeOffsetDays.title', "Session Lifecycle Time Offset"),
+		description: localize('agentHost.config.sessionLifecycleTimeOffsetDays.description', "Number of days to advance the clock used to evaluate automatic merged-session cleanup."),
 		default: 0,
 	}),
 	[AgentHostCopilotMultiRootEnabledConfigKey]: schemaProperty<boolean>({

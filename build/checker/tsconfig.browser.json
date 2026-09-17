@@ -15,6 +15,7 @@
 		"../../src/*.ts",
 		"../../src/**/common/**/*.ts",
 		"../../src/**/browser/**/*.ts",
+		"../../src/**/browser/**/*.tsx",
 		"../../src/typings/*.d.ts",
 		"../../src/vs/monaco.d.ts",
 		"../../src/vscode-dts/vscode.proposed.*.d.ts",

@@ -34,10 +34,17 @@ export class SessionsChatAccessibilityHelp implements IAccessibleViewImplementat
 		const sessionsPartService = accessor.get(ISessionsPartService);
 		const sessionsService = accessor.get(ISessionsService);
 		const previouslyFocused = getActiveElement();
+		const sessionView = sessionsPartService.getFocusedSessionView()
+			?? sessionsPartService.getSessionView(sessionsService.activeSession?.get()?.sessionId);
+		const hasAccessibleChatContent = sessionView?.getAccessibleContent() !== undefined;
 
 		const content: string[] = [];
 		content.push(localize('sessionsChat.overview', "You are in the Agents window. The Agents window is a dedicated workspace for working with AI agents. It provides a chat interface, a changes view for reviewing agent-generated changes, a file explorer, and customization options."));
 		content.push(localize('sessionsChat.input', "You are in the chat input. Type a message and press Enter to send it."));
+		if (hasAccessibleChatContent) {
+			content.push(localize('sessionsChat.agentHostPrompts', "When an agent needs approval or structured input, the request replaces the chat input. Use Tab and Shift+Tab to move between its controls, then activate an approval, Continue, or Decline."));
+			content.push(localize('sessionsChat.agentHostAccessibleView', "Use Open Accessible View to read the current conversation, including tool status and pending input, as text."));
+		}
 		content.push(getModePickerAccessibilityHelp());
 		content.push(localize('sessionsChat.inputPills', "When session metadata or active-turn status pills appear above the input, press Tab to reach them, use the Left and Right arrow keys to move between them, and press Enter or Space to activate one. Open the context menu{0} to choose which pills are shown. Pull Requests Options lets you show all pull requests or only open and draft ones, remembered across sessions. If every pull request is filtered out, use the toolbar context menu to show all again.", '<keybinding:editor.action.showContextMenu>'));
 		content.push(localize('sessionsChat.removePullRequestArtifact', "For pull requests recorded as session artifacts, the pull request dropdown offers Remove Pull Request Artifact from Session on each row. Use Tab to reach its actions. When only one pull request is visible, use the pull request pill's context menu instead. Removal is immediate and only deletes the artifact record; it does not close the pull request or remove independent session associations."));
@@ -66,6 +73,7 @@ export class SessionsChatAccessibilityHelp implements IAccessibleViewImplementat
 		content.push(localize('sessionsChat.failingChecksPullRequest', "When a session pull request has failing checks, use Reveal in its banner item to open that pull request, or use Fix Checks to ask the agent to address the failures."));
 		content.push(localize('sessionsChat.pickFolderQuickPick', "To choose a folder from a searchable list instead, use the New Session in Folder command{0}.", '<keybinding:workbench.action.sessions.newSession.pickFolderQuickPick>'));
 		content.push(localize('sessionsChat.quickChat', "To start a workspace-less quick chat, use the New Quick Chat command{0} or the plus button on the Chats section in the sessions list. When consolidated remote workspaces are enabled, this opens the new-session composer, where you can choose No workspace. Otherwise, it starts a workspace-less chat directly. The Toggle Side Panel command is disabled for quick chats.", '<keybinding:sessionsView.newQuickChat>'));
+		content.push(localize('sessionsChat.agentHostModelPicker', "In an Agent Host conversation, use the model picker below the message input to choose the model for that chat. The selection applies to the next message and does not change peer chats."));
 		content.push(localize('sessionsChat.mobileConfig', "On mobile, the mode and model pickers appear as tappable chips below the input. Tap a chip to open a bottom sheet where you can change the selection."));
 		content.push(localize('sessionsChat.history', "Use up and down arrows to navigate your request history in the input box."));
 		content.push(localize('sessionsChat.background', "Outside high contrast themes, use Set Background to choose no background, the built-in theme-aware Codicons pattern, a new image, or one of the five most recently selected images. Use Change Background Layout to choose whether an image repeats, stretches, or appears at an edge or corner for the current color theme. Moving through the layout picker previews each option; select one to save it, or press Escape to restore the previous layout. Both commands are available from the Command Palette and by right-clicking empty chat space. Change Background Layout is shown only for images. Background customization is unavailable while a high contrast theme is active."));
@@ -121,6 +129,37 @@ export class SessionsChatAccessibilityHelp implements IAccessibleViewImplementat
 				}
 				const view = sessionsPartService.getSessionView(sessionsService.activeSession.get()?.sessionId);
 				view?.focus();
+			},
+			AccessibilityVerbositySettingId.SessionsChat,
+		);
+	}
+}
+
+export class SessionsChatAccessibleView implements IAccessibleViewImplementation {
+	readonly priority = 120;
+	readonly name = 'sessionsChatView';
+	readonly type = AccessibleViewType.View;
+	readonly when = ContextKeyExpr.and(IsSessionsWindowContext, CustomViewVisibleContext.negate());
+
+	getProvider(accessor: ServicesAccessor): AccessibleContentProvider | undefined {
+		const sessionsPartService = accessor.get(ISessionsPartService);
+		const sessionsService = accessor.get(ISessionsService);
+		const sessionView = sessionsPartService.getFocusedSessionView()
+			?? sessionsPartService.getSessionView(sessionsService.activeSession?.get()?.sessionId);
+		if (!sessionView?.getAccessibleContent()) {
+			return undefined;
+		}
+		const previouslyFocused = getActiveElement();
+		return new AccessibleContentProvider(
+			AccessibleViewProviderId.SessionsChat,
+			{ type: AccessibleViewType.View },
+			() => sessionView.getAccessibleContent() ?? '',
+			() => {
+				if (isHTMLElement(previouslyFocused) && previouslyFocused.isConnected) {
+					previouslyFocused.focus();
+				} else {
+					sessionView.focus();
+				}
 			},
 			AccessibilityVerbositySettingId.SessionsChat,
 		);

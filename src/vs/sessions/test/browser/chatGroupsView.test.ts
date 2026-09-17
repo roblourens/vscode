@@ -43,6 +43,7 @@ class TestChatView extends AbstractChatView {
 
 	constructor(
 		readonly kind: ChatViewKind,
+		override readonly rendererId: string,
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super();
@@ -70,18 +71,23 @@ class TestChatView extends AbstractChatView {
 
 class TestChatViewFactory extends mock<IChatViewFactory>() {
 	readonly views: TestChatView[] = [];
+	rendererId = 'legacy';
 
-	override createNewChatView(isNewChatInSession: boolean, _options: IChatViewOptions, instantiationService?: IInstantiationService): AbstractChatView {
+	override getRendererId(): string {
+		return this.rendererId;
+	}
+
+	override createNewChatView(_session: IActiveSession | undefined, _chat: IChat | undefined, isNewChatInSession: boolean, _options: IChatViewOptions, instantiationService?: IInstantiationService): AbstractChatView {
 		return this._createView(isNewChatInSession ? 'newChatInSession' : 'newSession', instantiationService);
 	}
 
-	override createChatView(instantiationService?: IInstantiationService): AbstractChatView {
+	override createChatView(_session: IActiveSession, _chat: IChat | undefined, instantiationService?: IInstantiationService): AbstractChatView {
 		return this._createView('chat', instantiationService);
 	}
 
 	private _createView(kind: ChatViewKind, instantiationService?: IInstantiationService): TestChatView {
 		assert.ok(instantiationService);
-		const view = instantiationService.createInstance(TestChatView, kind);
+		const view = instantiationService.createInstance(TestChatView, kind, this.rendererId);
 		this.views.push(view);
 		return view;
 	}
@@ -318,6 +324,29 @@ suite('Sessions - ChatGroupsView', () => {
 			focusedKind: 'chat',
 			activeTab: child.resource.toString(),
 			tabs: [main.resource.toString(), child.resource.toString()],
+		});
+	});
+
+	test('replaces a chat view when its provider renderer changes', () => {
+		const { view, chatViewFactory } = createHarness(disposables);
+		const chat = createChat('main');
+		view.setSession(new TestActiveSession([chat]), options);
+		const legacyView = chatViewFactory.views.at(-1);
+		const createdViewCount = chatViewFactory.views.length;
+
+		chatViewFactory.rendererId = 'agentHostReact';
+		chat.interactivity.set(ChatInteractivity.ReadOnly, undefined);
+
+		assert.deepStrictEqual({
+			replacementViews: chatViewFactory.views.length - createdViewCount,
+			legacyRenderer: legacyView?.rendererId,
+			currentRenderer: chatViewFactory.views.at(-1)?.rendererId,
+			renderedRenderer: view.element.querySelector<HTMLElement>('.chat-view') === chatViewFactory.views.at(-1)?.element,
+		}, {
+			replacementViews: 1,
+			legacyRenderer: 'legacy',
+			currentRenderer: 'agentHostReact',
+			renderedRenderer: true,
 		});
 	});
 

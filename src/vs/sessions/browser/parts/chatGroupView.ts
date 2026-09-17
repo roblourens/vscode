@@ -282,11 +282,12 @@ export class ChatGroupView extends Disposable implements ISerializableView {
 				desiredKind = 'chat';
 			}
 
+			const desiredRendererId = this._chatViewFactory.getRendererId(session, chat, desiredKind);
 			let view = this._currentView.value;
-			if (!view || view.kind !== desiredKind) {
+			if (!view || view.kind !== desiredKind || view.rendererId !== desiredRendererId) {
 				view = desiredKind === 'chat'
-					? this._chatViewFactory.createChatView(this._scopedInstantiationService)
-					: this._chatViewFactory.createNewChatView(desiredKind === 'newChatInSession', context.options, this._scopedInstantiationService);
+					? this._chatViewFactory.createChatView(session, chat, this._scopedInstantiationService)
+					: this._chatViewFactory.createNewChatView(session, chat, desiredKind === 'newChatInSession', context.options, this._scopedInstantiationService);
 				this._contentContainer.replaceChildren(view.element, this._remoteHostUnavailableEmptyState.domNode);
 				this._currentView.value = view;
 				currentView.set(view, undefined);
@@ -412,5 +413,9 @@ export class ChatGroupView extends Disposable implements ISerializableView {
 			return;
 		}
 		this._currentView.value?.focus();
+	}
+
+	getAccessibleContent(): string | undefined {
+		return this._currentView.value?.getAccessibleContent();
 	}
 }

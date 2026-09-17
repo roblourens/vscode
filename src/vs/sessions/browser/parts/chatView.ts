@@ -50,6 +50,7 @@ export type WorkspaceSelectionResult = 'applied' | 'notReady' | 'preserved';
 export abstract class AbstractChatView extends Disposable implements ISerializableView {
 
 	readonly element: HTMLElement = $('.chat-view');
+	readonly rendererId: string = 'legacy';
 
 	readonly minimumWidth = 200;
 	readonly maximumWidth = Number.POSITIVE_INFINITY;
@@ -137,6 +138,13 @@ export abstract class AbstractChatView extends Disposable implements ISerializab
 	 */
 	attach(_uris: URI[]): void {
 		// no-op by default
+	}
+
+	/**
+	 * Returns the current conversation as text for the Accessible View.
+	 */
+	getAccessibleContent(): string | undefined {
+		return undefined;
 	}
 
 	/**

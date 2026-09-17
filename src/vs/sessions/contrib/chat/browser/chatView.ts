@@ -9,7 +9,7 @@ import { $, addDisposableListener, EventHelper, EventType, getWindow, isHTMLElem
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { renderAsPlaintext } from '../../../../base/browser/markdownRenderer.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
-import { MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, IDisposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { autorun, derived, IObservable, observableFromEvent, observableValue } from '../../../../base/common/observable.js';
 import { isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -38,7 +38,8 @@ import { getChatSessionType } from '../../../../workbench/contrib/chat/common/mo
 import { IChatSessionsService, localChatSessionType } from '../../../../workbench/contrib/chat/common/chatSessionsService.js';
 import { AbstractChatView, ChatViewKind, IChatViewOptions, ISelectWorkspaceOptions, WorkspaceSelectionResult } from '../../../browser/parts/chatView.js';
 import { ChatInteractivity, getSessionStatusMessage, IChat, isActiveSessionStatus, ISession, SessionStatus } from '../../../services/sessions/common/session.js';
-import { IChatViewFactory } from '../../../services/chatView/browser/chatViewFactory.js';
+import { IChatViewFactory, IChatViewRenderer, LEGACY_CHAT_VIEW_RENDERER_ID } from '../../../services/chatView/browser/chatViewFactory.js';
+import { IActiveSession } from '../../../services/sessions/common/sessionsManagement.js';
 import { NewChatWidget } from './newChatWidget.js';
 import { NewChatInSessionWidget } from './newChatInSessionWidget.js';
 import { SessionInputBanners } from '../../sessionInputBanners/browser/sessionInputBanners.js';
@@ -831,19 +832,61 @@ export function findInitialTranscriptContextEntry(requests: readonly { readonly 
  * layer where the concrete views are defined and is registered as an eager
  * singleton via the entry point.
  */
-export class ChatViewFactory implements IChatViewFactory {
+export class ChatViewFactory extends Disposable implements IChatViewFactory {
 
 	declare readonly _serviceBrand: undefined;
+	private readonly _renderers = new Map<string, IChatViewRenderer>();
 
 	constructor(
 		@IInstantiationService private readonly instantiationService: IInstantiationService
-	) { }
+	) {
+		super();
+		this._register(toDisposable(() => this._renderers.clear()));
+	}
 
-	createNewChatView(isNewChatInSession: boolean, options: IChatViewOptions, instantiationService = this.instantiationService): AbstractChatView {
+	registerRenderer(renderer: IChatViewRenderer): IDisposable {
+		if (renderer.id === LEGACY_CHAT_VIEW_RENDERER_ID || this._renderers.has(renderer.id)) {
+			throw new Error(`Chat view renderer '${renderer.id}' is already registered`);
+		}
+		this._renderers.set(renderer.id, renderer);
+		return toDisposable(() => {
+			if (this._renderers.get(renderer.id) === renderer) {
+				this._renderers.delete(renderer.id);
+			}
+		});
+	}
+
+	getRendererId(session: IActiveSession, chat: IChat | undefined, kind: ChatViewKind): string {
+		for (const renderer of this._renderers.values()) {
+			if (renderer.canRender(session, chat, kind)) {
+				return renderer.id;
+			}
+		}
+		return LEGACY_CHAT_VIEW_RENDERER_ID;
+	}
+
+	createNewChatView(session: IActiveSession | undefined, chat: IChat | undefined, isNewChatInSession: boolean, options: IChatViewOptions, instantiationService = this.instantiationService): AbstractChatView {
+		const renderer = session ? this._getRenderer(session, chat, isNewChatInSession ? 'newChatInSession' : 'newSession') : undefined;
+		if (renderer) {
+			return renderer.createNewChatView(isNewChatInSession, options, instantiationService);
+		}
 		return instantiationService.createInstance(NewChatView, isNewChatInSession, options);
 	}
 
-	createChatView(instantiationService = this.instantiationService): AbstractChatView {
+	createChatView(session: IActiveSession, chat: IChat | undefined, instantiationService = this.instantiationService): AbstractChatView {
+		const renderer = chat ? this._getRenderer(session, chat, 'chat') : undefined;
+		if (renderer && chat) {
+			return renderer.createChatView(session, chat, instantiationService);
+		}
 		return instantiationService.createInstance(ChatView);
+	}
+
+	private _getRenderer(session: IActiveSession, chat: IChat | undefined, kind: ChatViewKind): IChatViewRenderer | undefined {
+		for (const renderer of this._renderers.values()) {
+			if (renderer.canRender(session, chat, kind)) {
+				return renderer;
+			}
+		}
+		return undefined;
 	}
 }

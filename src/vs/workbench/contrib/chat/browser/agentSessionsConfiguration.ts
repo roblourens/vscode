@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as nls from '../../../../nls.js';
-import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey } from '../../../../platform/agentHost/common/agentHostSchema.js';
+import { AgentHostAutoArchiveMergedSessionsAfterDaysConfigKey, AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey, AgentHostSessionLifecycleTimeOffsetDaysConfigKey } from '../../../../platform/agentHost/common/agentHostSchema.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import product from '../../../../platform/product/common/product.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -38,6 +38,16 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			tags: ['preview', AGENT_SESSION_CLEANUP_SETTINGS_TAG],
 			markdownDescription: nls.localize('autoDeleteArchivedMergedSessions.description', "Controls the number of days after automatic archival before agent sessions with a merged pull request are permanently deleted. Retained eligible worktrees are safely removed before deletion. Automatic archival is controlled separately by {0}. Set to 0 to disable permanent deletion. The recommended value is 15.", '`#chat.agentSessions.autoArchiveMergedSessionsAfterDays#`'),
 			agentHost: { key: AgentHostAutoDeleteArchivedMergedSessionsAfterDaysConfigKey },
+		},
+		[ChatConfiguration.SessionLifecycleTimeOffsetDays]: {
+			type: 'integer',
+			minimum: 0,
+			default: 0,
+			scope: ConfigurationScope.APPLICATION,
+			included: !product.commit,
+			ignoreSync: true,
+			description: nls.localize('sessionLifecycleTimeOffsetDays.description', "Internal offset used by the Developer commands that simulate the passage of time for automatic merged-session cleanup."),
+			agentHost: { key: AgentHostSessionLifecycleTimeOffsetDaysConfigKey },
 		},
 	},
 });

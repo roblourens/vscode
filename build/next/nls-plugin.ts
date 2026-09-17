@@ -172,10 +172,11 @@ interface NLSEdit {
 
 function transformToPlaceholders(
 	source: string,
-	moduleId: string
+	moduleId: string,
+	sourceFileName: string
 ): { code: string; entries: NLSEntry[]; edits: NLSEdit[] } {
-	const localizeCalls = analyzeLocalizeCalls(source, 'localize');
-	const localize2Calls = analyzeLocalizeCalls(source, 'localize2');
+	const localizeCalls = analyzeLocalizeCalls(source, 'localize', sourceFileName);
+	const localize2Calls = analyzeLocalizeCalls(source, 'localize2', sourceFileName);
 
 	// Tag calls with their type so we can handle them differently later
 	const taggedLocalize = localizeCalls.map(call => ({ call, isLocalize2: false }));
@@ -400,7 +401,7 @@ export function nlsPlugin(options: NLSPluginOptions): esbuild.Plugin {
 		name: 'nls',
 		setup(build) {
 			// Transform TypeScript files to replace localize() calls with placeholders
-			build.onLoad({ filter: /\.ts$/ }, async (args) => {
+			build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
 				// Skip .d.ts files
 				if (args.path.endsWith('.d.ts')) {
 					return undefined;
@@ -412,10 +413,10 @@ export function nlsPlugin(options: NLSPluginOptions): esbuild.Plugin {
 				const relativePath = path.relative(options.baseDir, args.path);
 				const moduleId = relativePath
 					.replace(/\\/g, '/')
-					.replace(/\.ts$/, '');
+					.replace(/\.tsx?$/, '');
 
 				// Transform localize() calls to placeholders
-				const { code, entries: fileEntries, edits } = transformToPlaceholders(source, moduleId);
+				const { code, entries: fileEntries, edits } = transformToPlaceholders(source, moduleId, args.path);
 
 				// Collect entries
 				for (const entry of fileEntries) {
@@ -435,7 +436,7 @@ export function nlsPlugin(options: NLSPluginOptions): esbuild.Plugin {
 					const sourcemap = generateNLSSourceMap(source, sourceName, edits);
 					const encodedMap = Buffer.from(sourcemap).toString('base64');
 					const contentsWithMap = code + `\n//# sourceMappingURL=data:application/json;base64,${encodedMap}\n`;
-					return { contents: contentsWithMap, loader: 'ts' };
+					return { contents: contentsWithMap, loader: args.path.endsWith('.tsx') ? 'tsx' : 'ts' };
 				}
 
 				// No NLS calls, return undefined to let esbuild handle normally

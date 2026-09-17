@@ -110,13 +110,14 @@ export class SingleFileServiceHost implements ts.LanguageServiceHost {
  */
 export function analyzeLocalizeCalls(
 	contents: string,
-	functionName: 'localize' | 'localize2'
+	functionName: 'localize' | 'localize2',
+	filename = 'file.ts'
 ): ILocalizeCall[] {
-	const filename = 'file.ts';
 	const options: ts.CompilerOptions = { noResolve: true };
 	const serviceHost = new SingleFileServiceHost(options, filename, contents);
 	const service = ts.createLanguageService(serviceHost);
-	const sourceFile = ts.createSourceFile(filename, contents, ts.ScriptTarget.ES5, true);
+	const scriptKind = filename.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+	const sourceFile = ts.createSourceFile(filename, contents, ts.ScriptTarget.ES5, true, scriptKind);
 
 	// Find all imports
 	const imports = collect(sourceFile, n => isImportNode(n) ? CollectStepResult.YesAndRecurse : CollectStepResult.NoAndRecurse);

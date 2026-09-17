@@ -846,6 +846,10 @@ export class ChatGroupsView extends Themable {
 		this._activeGroup?.view.focus();
 	}
 
+	getAccessibleContent(): string | undefined {
+		return this._activeGroup?.view.getAccessibleContent();
+	}
+
 	layout(width: number, height: number, top: number, left: number): void {
 		this._lastLayout = { width, height, top, left };
 		this._applyLayout();

@@ -49,11 +49,11 @@ export default {
 		},
 	},
 	resolve: {
-		// Component Explorer fixtures live in `src` as `.ts` and import sibling
-		// modules via `.js` specifiers; try `.ts` first so those resolve, then
+		// Component Explorer fixtures live in `src` as `.ts`/`.tsx` and import sibling
+		// modules via `.js` specifiers; try TypeScript first so those resolve, then
 		// fall back to `.js` for everything loaded from `out`.
 		extensionAlias: {
-			'.js': ['.ts', '.js'],
+			'.js': ['.ts', '.tsx', '.js'],
 			'.mjs': ['.mts', '.mjs'],
 		},
 		fallback: {
@@ -73,12 +73,13 @@ export default {
 			{
 				// Component Explorer fixtures (and any `src` TypeScript they pull
 				// in) are compiled on the fly with rspack's built-in SWC.
-				test: /\.ts$/,
+				test: /\.tsx?$/,
 				loader: 'builtin:swc-loader',
 				options: {
 					jsc: {
 						parser: {
 							syntax: 'typescript',
+							tsx: true,
 							decorators: true,
 						},
 						transform: {
@@ -123,7 +124,7 @@ export default {
 			})),
 		})] : []),
 		new ComponentExplorerPlugin({
-			include: 'src/**/*.fixture.ts',
+			include: 'src/**/*.fixture.{ts,tsx}',
 		}),
 		new rspack.NormalModuleReplacementPlugin(/\.css$/, resource => {
 			if (!resource.request.startsWith('.')) {

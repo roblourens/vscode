@@ -18,6 +18,7 @@ import { ISessionsProvidersService } from '../../../../services/sessions/browser
 import { SessionStatus } from '../../../../services/sessions/common/session.js';
 import { IAgentHostEnablementService } from '../../../../../platform/agentHost/common/agentHostEnablementService.js';
 import { LocalAgentHostSessionsProvider } from './localAgentHostSessionsProvider.js';
+import './chat/agentHostChatRenderer.contribution.js';
 import './codexCustomizationSettings.contribution.js';
 
 /**

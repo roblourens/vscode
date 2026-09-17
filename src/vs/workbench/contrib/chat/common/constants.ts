@@ -56,6 +56,7 @@ export enum ChatConfiguration {
 	UnifiedWorkspacePicker = 'sessions.chat.unifiedWorkspacePicker.enabled',
 	AutoArchiveMergedSessionsAfterDays = 'chat.agentSessions.autoArchiveMergedSessionsAfterDays',
 	AutoDeleteArchivedMergedSessionsAfterDays = 'chat.agentSessions.autoDeleteArchivedMergedSessionsAfterDays',
+	SessionLifecycleTimeOffsetDays = 'chat.agentSessions.sessionLifecycleTimeOffsetDays',
 	ExtensionToolsEnabled = 'chat.extensionTools.enabled',
 	RepoInfoEnabled = 'chat.repoInfo.enabled',
 	EditRequests = 'chat.editRequests',

@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import { suite, test } from 'node:test';
-import { mapWithConcurrency } from '../transpile.ts';
+import { getOutputRelativePath, isTypeScriptSourceFile, mapWithConcurrency, transpileSource } from '../transpile.ts';
 
 suite('transpile', () => {
 	test('bounds concurrent work and preserves result order', async () => {
@@ -38,5 +38,34 @@ suite('transpile', () => {
 		}), /expected failure/);
 
 		assert.deepStrictEqual(started, [0, 1]);
+	});
+
+	test('transpiles TSX and maps its output path', async () => {
+		const output = await transpileSource(
+			'export const Example = ({ label }: { label: string }) => <span>{label}</span>;',
+			'example.tsx'
+		);
+
+		assert.deepStrictEqual({
+			outputPath: getOutputRelativePath('example.tsx'),
+			containsTypeAnnotation: output.includes('label: string'),
+			containsCreateElement: output.includes('React.createElement("span"'),
+		}, {
+			outputPath: 'example.js',
+			containsTypeAnnotation: false,
+			containsCreateElement: true,
+		});
+	});
+
+	test('preserves TSX diff fixtures as resources', () => {
+		const fixturePath = 'vs/editor/test/node/diffing/fixtures/ws-alignment/1.tsx';
+
+		assert.deepStrictEqual({
+			isTypeScriptSource: isTypeScriptSourceFile(fixturePath),
+			outputPath: getOutputRelativePath(fixturePath),
+		}, {
+			isTypeScriptSource: false,
+			outputPath: fixturePath,
+		});
 	});
 });

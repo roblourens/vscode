@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Event } from '../../base/common/event.js';
+import { IDisposable, IReference } from '../../base/common/lifecycle.js';
 import { IObservable } from '../../base/common/observable.js';
 import { equals } from '../../base/common/objects.js';
 import { ThemeIcon } from '../../base/common/themables.js';
@@ -11,7 +12,7 @@ import { URI } from '../../base/common/uri.js';
 import { AuthenticateParams, AuthenticateResult, IAgentConnection } from '../../platform/agentHost/common/agentService.js';
 import { RemoteAgentHostConnectionStatus } from '../../platform/agentHost/common/remoteAgentHostService.js';
 import { ResolveSessionConfigResult, SessionConfigValueItem } from '../../platform/agentHost/common/state/protocol/commands.js';
-import { AgentCustomization, Customization, McpServerStatus, RootConfigState, type CustomizationEnablement, type McpServerState, type RootState, type TextRange } from '../../platform/agentHost/common/state/protocol/state.js';
+import { AgentCustomization, ChatInputAnswer, ChatInputResponseKind, ChatState, Customization, McpServerStatus, Message, MessageAttachment, PendingMessageKind, RootConfigState, SessionState, type CustomizationEnablement, type McpServerState, type RootState, type TextRange } from '../../platform/agentHost/common/state/protocol/state.js';
 import { type CustomizationDisabledReason } from '../../platform/agentHost/common/customizationEnablement.js';
 import { ISessionsProvider } from '../services/sessions/common/sessionsProvider.js';
 import { ISessionAgentRef } from '../services/sessions/common/session.js';
@@ -111,11 +112,41 @@ export interface IAgentHostMcpServer {
 	setEnabled(enabled: boolean): void;
 }
 
+export type AgentHostChatClientSnapshot =
+	| { readonly status: 'loading' }
+	| { readonly status: 'error'; readonly error: Error }
+	| { readonly status: 'ready'; readonly session: SessionState; readonly chat: ChatState };
+
+export interface IAgentHostChatClient {
+	readonly sessionResource: URI;
+	readonly chatResource: URI;
+	getSnapshot(): AgentHostChatClientSnapshot;
+	subscribe(listener: () => void): IDisposable;
+	send(text: string, attachments?: readonly MessageAttachment[]): Promise<void>;
+	cancel(): void;
+	resume(turnId: string): void;
+	setDraft(draft: Message | undefined): void;
+	attachResources(resources: readonly URI[]): void;
+	setPendingMessage(kind: PendingMessageKind, id: string, message: Message): void;
+	removePendingMessage(kind: PendingMessageKind, id: string): void;
+	reorderQueuedMessages(order: readonly string[]): void;
+	truncate(turnId?: string): void;
+	confirmToolCall(turnId: string, toolCallId: string, approved: boolean, selectedOptionId?: string): void;
+	confirmToolResult(turnId: string, toolCallId: string, approved: boolean): void;
+	setInputAnswer(requestId: string, questionId: string, answer: ChatInputAnswer | undefined): void;
+	completeInput(requestId: string, response: ChatInputResponseKind, answers?: Readonly<Record<string, ChatInputAnswer>>): void;
+	loadOlderTurns(): Promise<void>;
+}
+
+export interface IAgentHostChatClientReference extends IReference<IAgentHostChatClient> { }
+
 /**
  * Extended sessions provider for agent host providers (local and remote).
  * Adds remote connection properties and dynamic session configuration.
  */
 export interface IAgentHostSessionsProvider extends ISessionsProvider {
+	canAcquireChatClient(sessionId: string, chatResource: URI): boolean;
+	acquireChatClient(sessionId: string, chatResource: URI): IAgentHostChatClientReference | undefined;
 	// -- Remote Connection (optional, used by remote agent host providers) --
 	/** Connection status observable, present on remote providers. */
 	readonly connectionStatus?: IObservable<RemoteAgentHostConnectionStatus>;
