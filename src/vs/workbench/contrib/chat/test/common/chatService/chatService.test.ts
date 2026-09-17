@@ -3016,6 +3016,7 @@ suite('ChatService', () => {
 			readonly interruptActiveResponseCallback?: () => Promise<boolean>;
 			readonly onDidStartServerRequest?: Event<IChatSessionServerRequest>;
 			readonly history?: readonly IChatSessionHistoryItem[];
+			readonly provideChatSessionContent?: IChatSessionContentProvider['provideChatSessionContent'];
 		}
 
 		function setupRemoteProvider(opts: IProvidedSessionOptions): { resource: URI; provided: IChatSession } {
@@ -3038,7 +3039,7 @@ suite('ChatService', () => {
 				dispose: () => { },
 			};
 			testDisposables.add(mockSessionsService.registerChatSessionContentProvider(remoteScheme, {
-				provideChatSessionContent: () => Promise.resolve(provided),
+				provideChatSessionContent: opts.provideChatSessionContent ?? (() => Promise.resolve(provided)),
 			}));
 
 			return { resource, provided };
@@ -3603,6 +3604,117 @@ suite('ChatService', () => {
 
 			const model = ref.object as ChatModel;
 			assert.strictEqual(model.lastRequest?.response?.isComplete, true, 'Non-streaming session should complete response at load time');
+		});
+
+		test('reopening a remote session rebinds a stale in-progress model to the completed snapshot (#336638)', async () => {
+			const resource = URI.from({ scheme: remoteScheme, path: '/session-stale-rebind' });
+			const mockSessionsService = new MockChatSessionsService();
+			instantiationService.stub(IChatSessionsService, mockSessionsService);
+			testDisposables.add(chatAgentService.registerAgent(remoteScheme, { ...getAgentData(remoteScheme), isDefault: true }));
+			testDisposables.add(chatAgentService.registerAgentImplementation(remoteScheme, { async invoke() { return {}; } }));
+
+			let generation = 0;
+			testDisposables.add(mockSessionsService.registerChatSessionContentProvider(remoteScheme, {
+				provideChatSessionContent: () => {
+					generation++;
+					if (generation === 1) {
+						return Promise.resolve({
+							sessionResource: resource,
+							history: [{ id: 'turn-1', type: 'request', prompt: 'hello', participant: remoteScheme }],
+							progressObs: observableValue<IChatProgress[]>('progress', [{ kind: 'markdownContent', content: new MarkdownString('partial') }]),
+							isCompleteObs: observableValue<boolean>('isComplete', false),
+							interruptActiveResponseCallback: async () => true,
+							onWillDispose: Event.None,
+							dispose: () => { },
+						});
+					}
+					return Promise.resolve({
+						sessionResource: resource,
+						history: [
+							{ id: 'turn-1', type: 'request', prompt: 'hello', participant: remoteScheme },
+							{
+								type: 'response',
+								participant: remoteScheme,
+								parts: [
+									{ kind: 'markdownContent', content: new MarkdownString('partial') },
+									{ kind: 'markdownContent', content: new MarkdownString(' and done') },
+								],
+							},
+						],
+						progressObs: observableValue<IChatProgress[]>('progress', []),
+						isCompleteObs: observableValue<boolean>('isComplete', true),
+						interruptActiveResponseCallback: async () => true,
+						onWillDispose: Event.None,
+						dispose: () => { },
+					});
+				},
+			}));
+
+			const testService = createChatService();
+			const firstRef = await testService.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(firstRef);
+			testDisposables.add(firstRef);
+
+			const stale = {
+				isComplete: firstRef.object.lastRequest?.response?.isComplete,
+				content: firstRef.object.lastRequest?.response?.response.value.map(part => part.kind === 'markdownContent' ? part.content.value : part.kind).join(''),
+			};
+
+			const secondRef = await testService.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(secondRef);
+			testDisposables.add(secondRef);
+
+			assert.deepStrictEqual({
+				stale,
+				sameModel: secondRef.object === firstRef.object,
+				rebounds: {
+					isComplete: secondRef.object.lastRequest?.response?.isComplete,
+					content: secondRef.object.lastRequest?.response?.response.value.map(part => part.kind === 'markdownContent' ? part.content.value : part.kind).join(''),
+					requestCount: secondRef.object.getRequests().length,
+					providerCalls: generation,
+				},
+			}, {
+				stale: { isComplete: false, content: 'partial' },
+				sameModel: true,
+				rebounds: {
+					isComplete: true,
+					content: 'partial and done',
+					requestCount: 1,
+					providerCalls: 2,
+				},
+			});
+		});
+
+		test('reopening a live remote session does not rebind or duplicate history', async () => {
+			const progressObs = observableValue<IChatProgress[]>('progress', [{ kind: 'markdownContent', content: new MarkdownString('live') }]);
+			const isCompleteObs = observableValue<boolean>('isComplete', false);
+			const { resource } = setupRemoteProvider({
+				history: [{ id: 'turn-1', type: 'request', prompt: 'hello', participant: remoteScheme }],
+				progressObs,
+				isCompleteObs,
+				interruptActiveResponseCallback: async () => true,
+			});
+
+			const testService = createChatService();
+			const firstRef = await testService.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(firstRef);
+			testDisposables.add(firstRef);
+
+			const secondRef = await testService.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(secondRef);
+			testDisposables.add(secondRef);
+
+			assert.deepStrictEqual({
+				sameModel: secondRef.object === firstRef.object,
+				requestCount: secondRef.object.getRequests().length,
+				isComplete: secondRef.object.lastRequest?.response?.isComplete,
+				content: secondRef.object.lastRequest?.response?.response.value.map(part => part.kind === 'markdownContent' ? part.content.value : part.kind),
+			}, {
+				sameModel: true,
+				requestCount: 1,
+				isComplete: false,
+				content: ['live'],
+			});
 		});
 
 		test('draft input is restored after disposing and reloading a remote session', async () => {

@@ -46,7 +46,7 @@ import { chatAgentLeader, ChatRequestAgentPart, ChatRequestAgentSubcommandPart, 
 import { ChatRequestParser } from '../requestParser/chatRequestParser.js';
 import { ChatMcpServersStarting, ChatPendingRequestChangeClassification, ChatPendingRequestChangeEvent, ChatPendingRequestChangeEventName, ChatRequestQueueKind, ChatSendResult, ChatSendResultQueued, ChatSendResultSent, ChatStopCancellationNoopClassification, ChatStopCancellationNoopEvent, ChatStopCancellationNoopEventName, IChatCompleteResponse, IChatDetail, IChatFollowup, IChatModelReference, IChatProgress, IChatQuestionAnswers, IChatRequestSubmittedEvent, IChatSendRequestOptions, IChatSendRequestResponseState, IChatService, IChatSessionStartOptions, IChatUserActionEvent, IRemotePendingRequest, ResponseModelState } from './chatService.js';
 import { ChatRequestTelemetry, ChatServiceTelemetry } from './chatServiceTelemetry.js';
-import { IChatSessionsService, isAgentHostTarget, isTerminalCommandPrompt, localChatSessionType } from '../chatSessionsService.js';
+import { IChatSession, IChatSessionsService, isAgentHostTarget, isTerminalCommandPrompt, localChatSessionType } from '../chatSessionsService.js';
 import { ChatSessionStore, IChatSessionEntryMetadata } from '../model/chatSessionStore.js';
 import { IChatSlashCommandService } from '../participants/chatSlashCommands.js';
 import { IChatTransferService } from '../model/chatTransferService.js';
@@ -84,6 +84,10 @@ function hasDraftInput(model: ChatModel): boolean {
 		return true;
 	}
 	return state.attachments.length > 0;
+}
+
+interface IRemoteChatSessionBinding extends IDisposable {
+	readonly session: IChatSession;
 }
 
 class CancellableRequest implements IDisposable {
@@ -194,6 +198,14 @@ export class ChatService extends Disposable implements IChatService {
 
 	private readonly _sessionModels: ChatModelStore;
 	private readonly _pendingRequests = this._register(new DisposableResourceMap<CancellableRequest>());
+	/**
+	 * Live provider-session wiring for a remote ChatModel. Replaced when a
+	 * reconnect yields a new {@link IChatSession} so a stale in-progress model
+	 * can receive the completed snapshot (#336638).
+	 */
+	private readonly _remoteSessionBindings = this._register(new DisposableResourceMap<IRemoteChatSessionBinding>());
+	/** Serializes concurrent {@link loadRemoteSession} calls for the same resource. */
+	private readonly _remoteSessionLoads = new ResourceMap<Promise<IChatModelReference | undefined>>();
 	private readonly _queuedRequestDeferreds = new Map<string, DeferredPromise<ChatSendResult>>();
 	/** Pending requests that are synthetic streamed-turn trackers (not real in-flight requests). */
 	private readonly _syntheticPendingRequests = new WeakSet<CancellableRequest>();
@@ -720,30 +732,49 @@ export class ChatService extends Disposable implements IChatService {
 	}
 
 	private async loadRemoteSession(sessionResource: URI, location: ChatAgentLocation, token: CancellationToken, debugOwner?: string, sessionTypeSelectionReason?: SessionTypeSelectionReason): Promise<IChatModelReference | undefined> {
-		this.trace('loadRemoteSession', `start ${sessionResource.toString()}`);
-		// Check if session already exists before resolving the provider,
-		// so we can return a cached model even if the provider was unregistered.
-		{
-			const existingRef = this.acquireExistingSession(sessionResource, debugOwner);
-			if (existingRef) {
-				this.trace('loadRemoteSession', `reused existing model for ${sessionResource.toString()}`);
-				return existingRef;
-			}
+		const pendingLoad = this._remoteSessionLoads.get(sessionResource);
+		if (pendingLoad) {
+			await pendingLoad;
+			return this.acquireExistingSession(sessionResource, debugOwner);
 		}
 
+		const load = this._loadRemoteSession(sessionResource, location, token, debugOwner, sessionTypeSelectionReason);
+		this._remoteSessionLoads.set(sessionResource, load);
+		try {
+			return await load;
+		} finally {
+			if (this._remoteSessionLoads.get(sessionResource) === load) {
+				this._remoteSessionLoads.delete(sessionResource);
+			}
+		}
+	}
+
+	private async _loadRemoteSession(sessionResource: URI, location: ChatAgentLocation, token: CancellationToken, debugOwner?: string, sessionTypeSelectionReason?: SessionTypeSelectionReason): Promise<IChatModelReference | undefined> {
+		this.trace('loadRemoteSession', `start ${sessionResource.toString()}`);
+		const existingRef = this.acquireExistingSession(sessionResource, debugOwner);
+
 		if (!await raceCancellationError(this.chatSessionService.canResolveChatSession(getChatSessionType(sessionResource)), token)) {
-			return undefined;
+			// Keep a cached model visible when the provider is currently unregistered
+			// (e.g. a remote host that is still reconnecting).
+			if (existingRef) {
+				this.trace('loadRemoteSession', `reused existing model for ${sessionResource.toString()} (provider unavailable)`);
+			}
+			return existingRef;
 		}
 
 		const providedSession = await this.chatSessionService.getOrCreateChatSession(sessionResource, token);
 		this.trace('loadRemoteSession', `session content resolved for ${sessionResource.toString()} with ${providedSession.history.length} history item(s)`);
 
-		// Make sure we haven't created this in the meantime
-		{
-			const existingRef = this.acquireExistingSession(sessionResource, debugOwner);
-			if (existingRef) {
-				return existingRef;
-			}
+		const existingBinding = this._remoteSessionBindings.get(sessionResource);
+		if (existingRef && existingBinding?.session === providedSession) {
+			this.trace('loadRemoteSession', `reused existing model for ${sessionResource.toString()}`);
+			return existingRef;
+		}
+
+		if (existingRef) {
+			this.trace('loadRemoteSession', `rebinding existing model for ${sessionResource.toString()} to a new provider session`);
+			await this._attachProvidedSessionToModel(existingRef.object, providedSession, location, true);
+			return existingRef;
 		}
 		const chatSessionType = getChatSessionType(sessionResource);
 		const modelId = findLast(providedSession.history.filter(m => m.type === 'request'), req => req.modelId)?.modelId;
@@ -856,16 +887,41 @@ export class ChatService extends Disposable implements IChatService {
 			modelRef.object.inputModel.setState({ permissionLevel: storedPermissionLevel });
 		}
 
+		await this._attachProvidedSessionToModel(modelRef.object, providedSession, location, false);
+		return modelRef;
+	}
+
+	/**
+	 * Applies a contributed session's history and live progress to `model`.
+	 * When `rebind` is true the model already exists (typically kept alive
+	 * after a disconnect) and is rewired to a newly resolved provider session
+	 * so it can receive the completed snapshot (#336638).
+	 */
+	private async _attachProvidedSessionToModel(model: ChatModel, providedSession: IChatSession, location: ChatAgentLocation, rebind: boolean): Promise<void> {
+		const sessionResource = model.sessionResource;
+		const chatSessionType = getChatSessionType(sessionResource);
+
 		if (providedSession.title) {
-			modelRef.object.setCustomTitle(providedSession.title);
+			model.setCustomTitle(providedSession.title);
 		}
 
-		const model = modelRef.object;
-		const disposables = new DisposableStore();
-		disposables.add(modelRef.object.onDidDispose(() => {
-			disposables.dispose();
-			providedSession.dispose();
+		if (rebind) {
+			this._pendingRequests.deleteAndDispose(sessionResource);
+		}
+
+		const store = new DisposableStore();
+		const binding: IRemoteChatSessionBinding = {
+			session: providedSession,
+			dispose: () => store.dispose(),
+		};
+		store.add(toDisposable(() => providedSession.dispose()));
+		store.add(model.onDidDispose(() => {
+			if (this._remoteSessionBindings.get(sessionResource) === binding) {
+				this._remoteSessionBindings.deleteAndLeak(sessionResource);
+			}
+			store.dispose();
 		}));
+		this._remoteSessionBindings.set(sessionResource, binding);
 
 		const isAgentHostSession = isAgentHostTarget(chatSessionType);
 		const requestParser = isAgentHostSession ? this.instantiationService.createInstance(ChatRequestParser) : undefined;
@@ -899,6 +955,8 @@ export class ChatService extends Disposable implements IChatService {
 
 		let lastRequest: ChatRequestModel | undefined;
 		let lastResponseCompletedAt: number | undefined;
+		const existingRequests = rebind ? model.getRequests() : [];
+		let existingRequestIndex = 0;
 		/**
 		 * @param finishedNow Whether the response is finishing as it is watched rather
 		 * than being finalized from replayed history. Replayed history carries the time
@@ -919,6 +977,16 @@ export class ChatService extends Disposable implements IChatService {
 			if (message.type === 'request') {
 				if (lastRequest) {
 					completeLastResponse();
+				}
+
+				const existing = existingRequests[existingRequestIndex];
+				if (existing) {
+					existingRequestIndex++;
+					lastRequest = existing;
+					if (lastRequest.response && !lastRequest.response.isComplete) {
+						lastRequest.response.reopen();
+					}
+					continue;
 				}
 
 				const requestText = message.prompt;
@@ -961,19 +1029,23 @@ export class ChatService extends Disposable implements IChatService {
 			} else {
 				// response
 				if (lastRequest) {
-					for (const part of message.parts) {
-						model.acceptResponseProgress(lastRequest, part);
+					if (lastRequest.response?.isComplete) {
+						lastResponseCompletedAt = message.completedAt;
+					} else {
+						for (const part of message.parts) {
+							model.acceptResponseProgress(lastRequest, part);
+						}
+						if (lastRequest.response && (message.details || message.errorDetails)) {
+							lastRequest.response.setResult({
+								...(message.details ? { details: message.details } : {}),
+								...(message.errorDetails ? { errorDetails: message.errorDetails } : {}),
+							});
+						}
+						if (lastRequest.response && typeof message.elapsedMs === 'number') {
+							lastRequest.response.setElapsedMs(message.elapsedMs);
+						}
+						lastResponseCompletedAt = message.completedAt;
 					}
-					if (lastRequest.response && (message.details || message.errorDetails)) {
-						lastRequest.response.setResult({
-							...(message.details ? { details: message.details } : {}),
-							...(message.errorDetails ? { errorDetails: message.errorDetails } : {}),
-						});
-					}
-					if (lastRequest.response && typeof message.elapsedMs === 'number') {
-						lastRequest.response.setElapsedMs(message.elapsedMs);
-					}
-					lastResponseCompletedAt = message.completedAt;
 				}
 			}
 		}
@@ -985,13 +1057,18 @@ export class ChatService extends Disposable implements IChatService {
 		const hasProgressStreaming = providedSession.progressObs && providedSession.interruptActiveResponseCallback;
 		if (hasProgressStreaming) {
 			let lastProgressLength = 0;
+			if (rebind && (lastRequest?.response?.response.value.length ?? 0) > 0) {
+				// History already supplied the authoritative snapshot; don't replay the
+				// provider's current progress array into the same request.
+				lastProgressLength = providedSession.progressObs?.get().length ?? 0;
+			}
 			// Completion state as of the previous observation, or undefined before the
 			// first one. A session that is already complete when first observed is
 			// finalizing replayed history, while a session seen running and completing
 			// afterwards holds a turn that finished while it was watched.
 			let wasComplete: boolean | undefined;
 
-			const cancellationListener = disposables.add(new MutableDisposable());
+			const cancellationListener = store.add(new MutableDisposable());
 			const createCancellationListener = (token: CancellationToken) => {
 				return token.onCancellationRequested(() => {
 					providedSession.interruptActiveResponseCallback?.().then(userConfirmedInterruption => {
@@ -1022,7 +1099,7 @@ export class ChatService extends Disposable implements IChatService {
 
 			// Handle server-initiated requests (e.g. consumed queued messages).
 			if (providedSession.onDidStartServerRequest) {
-				disposables.add(providedSession.onDidStartServerRequest(({ id, prompt, variableData, modelId, modelConfiguration, timestamp, isSystemInitiated, requestSource, isHidden, isRequestHidden, systemInitiatedLabel, isTerminalRequest, resume, origin }) => {
+				store.add(providedSession.onDidStartServerRequest(({ id, prompt, variableData, modelId, modelConfiguration, timestamp, isSystemInitiated, requestSource, isHidden, isRequestHidden, systemInitiatedLabel, isTerminalRequest, resume, origin }) => {
 					if (resume) {
 						const request = model.getRequests().find(request => request.id === id);
 						if (!request?.response) {
@@ -1088,7 +1165,7 @@ export class ChatService extends Disposable implements IChatService {
 					const pending = this._pendingRequests.get(model.sessionResource);
 					return !pending || this._syntheticPendingRequests.has(pending);
 				};
-				disposables.add(model.onDidChangePendingRequests(() => {
+				store.add(model.onDidChangePendingRequests(() => {
 					if (dispatchingImmediateSteer || !canImmediatelyDispatch()) {
 						return;
 					}
@@ -1115,7 +1192,7 @@ export class ChatService extends Disposable implements IChatService {
 			}
 
 			// Single autorun that streams progress for whichever request is current.
-			disposables.add(autorun(reader => {
+			store.add(autorun(reader => {
 				const progressArray = providedSession.progressObs?.read(reader) ?? [];
 				const isComplete = providedSession.isCompleteObs?.read(reader) ?? false;
 				const justCompleted = wasComplete === false && isComplete;
@@ -1156,8 +1233,6 @@ export class ChatService extends Disposable implements IChatService {
 				completeLastResponse();
 			}
 		}
-
-		return modelRef;
 	}
 
 	async resendRequest(request: IChatRequestModel, options?: IChatSendRequestOptions, preserveRequestId = false): Promise<void> {
