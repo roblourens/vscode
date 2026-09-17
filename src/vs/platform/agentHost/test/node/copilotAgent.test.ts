@@ -13833,11 +13833,15 @@ suite('CopilotAgent', () => {
 			disposeCalls: number;
 			sendCalls: string[];
 			resumeCalls: string[];
+			turns: readonly Turn[];
+			sdkEvents: readonly SessionEvent[];
 			destroySession(): Promise<void>;
 			dispose(): void;
 			send(prompt: string): Promise<void>;
 			resume(turnId: string): Promise<void>;
 			resetTurnState(turnId: string): void;
+			getMessages(): Promise<readonly Turn[]>;
+			getSdkEvents(): Promise<readonly SessionEvent[]>;
 		}
 
 		function refreshSessionStub(additionalDirectories: readonly URI[]): IRefreshSessionStub {
@@ -13853,11 +13857,15 @@ suite('CopilotAgent', () => {
 				disposeCalls: 0,
 				sendCalls: [],
 				resumeCalls: [],
+				turns: [],
+				sdkEvents: [],
 				async destroySession() { this.destroyCalls++; },
 				dispose() { this.disposeCalls++; },
 				async send(prompt: string) { this.sendCalls.push(prompt); },
 				async resume(turnId: string) { this.resumeCalls.push(turnId); },
 				resetTurnState() { },
+				async getMessages() { return this.turns; },
+				async getSdkEvents() { return this.sdkEvents; },
 			};
 		}
 
@@ -13914,6 +13922,99 @@ suite('CopilotAgent', () => {
 				]);
 			} finally {
 				allowDisconnect.complete();
+				await disposeAgent(agent);
+			}
+		});
+
+		test('fails visibly when a config refresh reconstructs no history (#336587)', async () => {
+			const client = new TestCopilotClient([]);
+			const agent = createTestAgent(disposables, { copilotClient: client });
+			const sessionId = 'config-refresh-session';
+			const session = AgentSession.uri('copilotcli', sessionId);
+			const previousSession = refreshSessionStub([]);
+			previousSession.turns = [{ id: 'turn-1' } as unknown as Turn];
+			const emptySession = refreshSessionStub([]);
+			const internals = agent as unknown as {
+				_resumeSession: (id: string) => Promise<CopilotAgentSession>;
+			};
+
+			setDefaultSessionStub(agent, sessionId, previousSession);
+			agent.getOrCreateActiveClient(defaultChatUri(session), session, { clientId: 'client' }).tools = [
+				{ name: 'new_tool', description: 'A newly registered tool', inputSchema: { type: 'object', properties: {} } },
+			];
+			internals._resumeSession = async () => {
+				setDefaultSessionStub(agent, sessionId, emptySession);
+				return emptySession as unknown as CopilotAgentSession;
+			};
+
+			try {
+				await assert.rejects(
+					() => agent.chats.sendMessage(defaultChatUri(session), 'Was there a fix in the runtime?'),
+					/conversation history could not be restored/,
+				);
+				assert.deepStrictEqual({
+					previousDestroyCalls: previousSession.destroyCalls,
+					emptyDestroyCalls: emptySession.destroyCalls,
+					sends: emptySession.sendCalls,
+				}, {
+					previousDestroyCalls: 1,
+					emptyDestroyCalls: 1,
+					sends: [],
+				});
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+
+		test('rehydrates durable history when config refresh resume reconstructs no turns (#336587)', async () => {
+			const userHome = URI.file(await fs.mkdtemp(`${os.tmpdir()}/ah-refresh-history-`));
+			const client = new TestCopilotClient([]);
+			const agent = createTestAgent(disposables, { copilotClient: client, userHome });
+			const sessionId = 'config-refresh-session';
+			const session = AgentSession.uri('copilotcli', sessionId);
+			const priorTurn = { id: 'turn-1' } as unknown as Turn;
+			const priorEvents = [{ type: 'session.start', data: { sessionId } }] as unknown as SessionEvent[];
+			const previousSession = refreshSessionStub([]);
+			previousSession.turns = [priorTurn];
+			previousSession.sdkEvents = priorEvents;
+			const emptySession = refreshSessionStub([]);
+			const restoredSession = refreshSessionStub([]);
+			restoredSession.turns = [priorTurn];
+			let resumeCalls = 0;
+			const internals = agent as unknown as {
+				_resumeSession: (id: string) => Promise<CopilotAgentSession>;
+			};
+
+			setDefaultSessionStub(agent, sessionId, previousSession);
+			agent.getOrCreateActiveClient(defaultChatUri(session), session, { clientId: 'client' }).tools = [
+				{ name: 'new_tool', description: 'A newly registered tool', inputSchema: { type: 'object', properties: {} } },
+			];
+			internals._resumeSession = async () => {
+				resumeCalls++;
+				const next = resumeCalls === 1 ? emptySession : restoredSession;
+				setDefaultSessionStub(agent, sessionId, next);
+				return next as unknown as CopilotAgentSession;
+			};
+
+			try {
+				await agent.chats.sendMessage(defaultChatUri(session), 'Was there a fix in the runtime?');
+				const eventsPath = join(getCopilotHomePath(userHome.fsPath, process.env), 'session-state', sessionId, 'events.jsonl');
+				assert.deepStrictEqual({
+					resumeCalls,
+					previousDestroyCalls: previousSession.destroyCalls,
+					emptyDestroyCalls: emptySession.destroyCalls,
+					sends: restoredSession.sendCalls,
+					rehydratedEvents: (await fs.readFile(eventsPath, 'utf8')).trim(),
+				}, {
+					resumeCalls: 2,
+					previousDestroyCalls: 1,
+					emptyDestroyCalls: 1,
+					sends: ['Was there a fix in the runtime?'],
+					rehydratedEvents: JSON.stringify(priorEvents[0]),
+				});
+			} finally {
+				await fs.rm(join(getCopilotHomePath(userHome.fsPath, process.env), 'session-state', sessionId), { recursive: true, force: true }).catch(() => { });
+				await fs.rm(userHome.fsPath, { recursive: true, force: true });
 				await disposeAgent(agent);
 			}
 		});

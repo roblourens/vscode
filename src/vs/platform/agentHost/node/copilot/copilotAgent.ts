@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CopilotClient, RuntimeConnection, type CopilotClientOptions, type GitHubTelemetryNotification, type ManagedSettingsResolvedData, type SessionMetadata, type SessionMode as CopilotSdkMode } from '@github/copilot-sdk';
+import { CopilotClient, RuntimeConnection, type CopilotClientOptions, type GitHubTelemetryNotification, type ManagedSettingsResolvedData, type SessionEvent, type SessionMetadata, type SessionMode as CopilotSdkMode } from '@github/copilot-sdk';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import { pathToFileURL } from 'url';
@@ -78,7 +78,7 @@ import { McpServerStatus, type McpServerCustomization } from '../../common/state
 import { IAgentHostSessionTitleSignal } from '../agentHostSessionTitleSignal.js';
 import { IByokLmBridgeRegistry } from '../byokLmBridgeRegistry.js';
 import { IAgentHostWorktreeIsolation, type IAgentHostWorktreeResumeService, SessionWorkingDirectoryMissingError } from '../shared/worktreeIsolation.js';
-import { buildSessionEventLogFromTurns } from './buildSessionEvents.js';
+import { buildSessionEventLogFromTurns, serializeSessionEventsToJsonl } from './buildSessionEvents.js';
 import { CopilotAgentSession, type ICopilotWorkingDirectoryChangeTransaction } from './copilotAgentSession.js';
 import { createCopilotCliEnvironment } from './copilotCliEnvironment.js';
 import { ICopilotSessionContext, projectFromCopilotContext } from './copilotGitProject.js';
@@ -3486,10 +3486,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 					: undefined;
 			if (refreshReason) {
 				this._logService.info(`[Copilot:${current.configurationId}] Session configuration changed, refreshing session: operation=resumeTurn, sdkSessionId=${entry.sessionId}, chat=${current.chatKey}, turnId=${turnId}, reason=${refreshReason}`);
-				await this._destroyLiveSession(entry, true);
-				entry = entry.sessionId === current.configurationId
-					? await this._resumeSession(current.configurationId, current.chat)
-					: await this._ensureResolvedChatSession(current);
+				const previous = entry;
+				entry = await this._refreshSdkSessionForConfigChange(previous, () => previous.sessionId === current.configurationId
+					? this._resumeSession(current.configurationId, current.chat)
+					: this._ensureResolvedChatSession(current));
 			}
 			if (!entry) {
 				throw new Error(`[Copilot] resumeTurn for unavailable chat: ${chat.toString()}`);
@@ -4264,15 +4264,16 @@ export class CopilotAgent extends Disposable implements IAgent {
 				// is recoverable; peer chats keep their own entries and are left
 				// intact. Resume explicitly (rather than via the generic re-resolve
 				// below) so the refreshed config is re-applied deterministically.
-				await this._destroyLiveSession(entry, true);
-				if (entry.sessionId === current.configurationId) {
-					entry = await this._resumeSession(current.configurationId, current.chat, workingDirectories);
-				} else {
+				const previous = entry;
+				entry = await this._refreshSdkSessionForConfigChange(previous, () => {
+					if (previous.sessionId === current.configurationId) {
+						return this._resumeSession(current.configurationId, current.chat, workingDirectories);
+					}
 					if (workingDirectories) {
 						activeClient?.pluginController.setAdditionalDirectories(this._additionalCustomizationDirectories(workingDirectories));
 					}
-					entry = await this._ensureResolvedChatSession(current, workingDirectories);
-				}
+					return this._ensureResolvedChatSession(current, workingDirectories);
+				});
 			}
 			if (!entry) {
 				this._logService.info(`[Copilot:${current.configurationId}] No cached entry${hadCachedEntry ? ' (was evicted by configuration refresh)' : ''}, calling _resumeSession`);
@@ -5471,6 +5472,82 @@ export class CopilotAgent extends Disposable implements IAgent {
 			return;
 		}
 		this._registerUnboundSession(agentSession, activeClient);
+	}
+
+	/**
+	 * Tears down a live SDK session for a config refresh, then resumes it.
+	 *
+	 * Snapshots durable history first. If resume fails or reconstructs zero
+	 * turns from a conversation that had history, rehydrate from that snapshot
+	 * rather than continuing success-shaped with empty model context (#336587).
+	 */
+	private async _refreshSdkSessionForConfigChange(
+		previous: CopilotAgentSession,
+		resume: () => Promise<CopilotAgentSession | undefined>,
+	): Promise<CopilotAgentSession | undefined> {
+		const sessionId = previous.sessionId;
+		const priorTurns = await this._safeSessionTurnCount(previous);
+		const priorEvents = await this._safeSessionSdkEvents(previous);
+		await this._destroyLiveSession(previous, true);
+
+		const resumeOrRehydrate = async (): Promise<CopilotAgentSession | undefined> => {
+			try {
+				return await resume();
+			} catch (error) {
+				if (priorEvents.length === 0) {
+					throw error;
+				}
+				this._logService.warn(`[Copilot:${sessionId}] Resume after config refresh failed (${getErrorMessage(error)}); rehydrating from durable history`);
+				await this._writeSdkSessionEvents(sessionId, priorEvents);
+				return resume();
+			}
+		};
+
+		let entry = await resumeOrRehydrate();
+		if (priorTurns === 0) {
+			return entry;
+		}
+		if (entry && await this._safeSessionTurnCount(entry) > 0) {
+			return entry;
+		}
+
+		this._logService.warn(`[Copilot:${sessionId}] Session refresh reconstructed 0 turns from a conversation that had ${priorTurns}; restoring durable history`);
+		if (priorEvents.length > 0) {
+			if (entry) {
+				await this._destroyLiveSession(entry, true);
+			}
+			await this._writeSdkSessionEvents(sessionId, priorEvents);
+			entry = await resume();
+		}
+		if (entry && await this._safeSessionTurnCount(entry) > 0) {
+			return entry;
+		}
+		if (entry) {
+			await this._destroyLiveSession(entry, true);
+		}
+		throw new Error(localize('copilotAgent.refreshLostHistory', "The agent session was refreshed but conversation history could not be restored. Retry your request."));
+	}
+
+	private async _safeSessionTurnCount(session: CopilotAgentSession): Promise<number> {
+		try {
+			return (await session.getMessages()).length;
+		} catch {
+			return 0;
+		}
+	}
+
+	private async _safeSessionSdkEvents(session: CopilotAgentSession): Promise<readonly SessionEvent[]> {
+		try {
+			return await session.getSdkEvents();
+		} catch {
+			return [];
+		}
+	}
+
+	private async _writeSdkSessionEvents(sessionId: string, events: readonly SessionEvent[]): Promise<void> {
+		const eventsPath = this._extensionHostCliSidecarPath(sessionId, 'events.jsonl');
+		await fs.mkdir(dirname(eventsPath), { recursive: true });
+		await fs.writeFile(eventsPath, serializeSessionEventsToJsonl(events), 'utf8');
 	}
 
 	private async _destroyLiveSession(chatSession: CopilotAgentSession, preserveRouting = false): Promise<void> {

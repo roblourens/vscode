@@ -1879,6 +1879,48 @@ suite('CopilotAgentSession', () => {
 			});
 		});
 
+		test('waits for the disconnect RPC after shutdown before resolving (#336587)', async () => {
+			const disconnectGate = new DeferredPromise<void>();
+			const mockSession = new MockCopilotSession();
+			mockSession.disconnectGate = disconnectGate.p;
+			const logService = new CapturingLogService();
+			const wrapper = createWrapper(mockSession, logService);
+
+			const disconnect = wrapper.disconnect();
+			let disconnectSettled = false;
+			void disconnect.then(() => { disconnectSettled = true; });
+			mockSession.fire('session.shutdown', {
+				shutdownType: 'routine',
+				sessionStartTime: 0,
+				totalApiDurationMs: 0,
+				modelMetrics: {},
+				codeChanges: { filesModified: [], linesAdded: 0, linesRemoved: 0 },
+			});
+			await timeout(0);
+			const pendingAfterShutdown = {
+				disconnectSettled,
+				lifecycleState: wrapper.lifecycleState,
+			};
+			disconnectGate.complete();
+			await disconnect;
+
+			assert.deepStrictEqual({
+				pendingAfterShutdown,
+				completedState: wrapper.lifecycleState,
+				logs: lifecycleMessages(logService.infos),
+			}, {
+				pendingAfterShutdown: { disconnectSettled: false, lifecycleState: 'shutdown' },
+				completedState: 'shutdown',
+				logs: [
+					'attached: disconnectRpc=notStarted, shutdownReceived=false, disposed=false',
+					'disconnect RPC started: disconnectRpc=pending, shutdownReceived=false, disposed=false',
+					'shutdown received (routine): disconnectRpc=pending, shutdownReceived=true, disposed=false',
+					'disconnect RPC completed: disconnectRpc=completed, shutdownReceived=true, disposed=false',
+					'disconnect wait completed: disconnectRpc=completed, shutdownReceived=true, disposed=false',
+				],
+			});
+		});
+
 		for (const outcome of ['completed', 'failed'] as const) {
 			test(`logs early shutdown and a late disconnect RPC ${outcome} after disposal`, async () => {
 				const disconnectGate = new DeferredPromise<void>();
@@ -1904,19 +1946,16 @@ suite('CopilotAgentSession', () => {
 
 				const firstDisconnect = wrapper.disconnect();
 				const secondDisconnect = wrapper.disconnect();
-				try {
-					mockSession.fire('session.shutdown', {
-						shutdownType: 'routine',
-						sessionStartTime: 0,
-						totalApiDurationMs: 0,
-						modelMetrics: {},
-						codeChanges: { filesModified: [], linesAdded: 0, linesRemoved: 0 },
-					});
-					await Promise.all([firstDisconnect, secondDisconnect]);
-					wrapper.dispose();
-				} finally {
-					void disconnectGate.complete();
-				}
+				mockSession.fire('session.shutdown', {
+					shutdownType: 'routine',
+					sessionStartTime: 0,
+					totalApiDurationMs: 0,
+					modelMetrics: {},
+					codeChanges: { filesModified: [], linesAdded: 0, linesRemoved: 0 },
+				});
+				disconnectGate.complete();
+				await Promise.all([firstDisconnect, secondDisconnect]);
+				wrapper.dispose();
 				await rpcSettled.p;
 
 				assert.deepStrictEqual({
@@ -1931,12 +1970,12 @@ suite('CopilotAgentSession', () => {
 						'attached: disconnectRpc=notStarted, shutdownReceived=false, disposed=false',
 						'disconnect RPC started: disconnectRpc=pending, shutdownReceived=false, disposed=false',
 						'shutdown received (routine): disconnectRpc=pending, shutdownReceived=true, disposed=false',
-						'disconnect wait completed: disconnectRpc=pending, shutdownReceived=true, disposed=false',
-						'disconnect wait completed: disconnectRpc=pending, shutdownReceived=true, disposed=false',
-						'disconnect skipped after shutdown: disconnectRpc=pending, shutdownReceived=true, disposed=true',
-						...(outcome === 'completed' ? ['disconnect RPC completed: disconnectRpc=completed, shutdownReceived=true, disposed=true'] : []),
+						...(outcome === 'completed' ? ['disconnect RPC completed: disconnectRpc=completed, shutdownReceived=true, disposed=false'] : []),
+						`disconnect wait completed: disconnectRpc=${outcome === 'completed' ? 'completed' : 'failed'}, shutdownReceived=true, disposed=false`,
+						`disconnect wait completed: disconnectRpc=${outcome === 'completed' ? 'completed' : 'failed'}, shutdownReceived=true, disposed=false`,
+						`disconnect skipped after shutdown: disconnectRpc=${outcome === 'completed' ? 'completed' : 'failed'}, shutdownReceived=true, disposed=true`,
 					],
-					warnings: outcome === 'failed' ? ['disconnect RPC failed: disconnectRpc=failed, shutdownReceived=true, disposed=true'] : [],
+					warnings: outcome === 'failed' ? ['disconnect RPC failed: disconnectRpc=failed, shutdownReceived=true, disposed=false'] : [],
 					errors: outcome === 'failed' ? [[mockSession.disconnectError]] : [],
 					instanceCount: 1,
 				});
@@ -1957,7 +1996,7 @@ suite('CopilotAgentSession', () => {
 		});
 	});
 
-	test('destroySession completes when shutdown arrives before the response', async () => {
+	test('destroySession waits for the disconnect RPC even after shutdown (#336587)', async () => {
 		const disconnectStarted = new DeferredPromise<void>();
 		const disconnectGate = new DeferredPromise<void>();
 		const { session, mockSession } = await createAgentSession(disposables, {
@@ -1968,20 +2007,22 @@ suite('CopilotAgentSession', () => {
 		});
 
 		const destroy = session.destroySession();
+		let destroySettled = false;
+		void destroy.then(() => { destroySettled = true; });
 
 		await disconnectStarted.p;
-		try {
-			mockSession.fire('session.shutdown', {
-				shutdownType: 'normal',
-				totalApiDurationMs: 0,
-			} as unknown as SessionEventPayload<'session.shutdown'>['data']);
-			await destroy;
-			session.dispose();
+		mockSession.fire('session.shutdown', {
+			shutdownType: 'normal',
+			totalApiDurationMs: 0,
+		} as unknown as SessionEventPayload<'session.shutdown'>['data']);
+		await timeout(0);
+		assert.strictEqual(destroySettled, false);
 
-			assert.strictEqual(mockSession.disconnectCalls, 1);
-		} finally {
-			disconnectGate.complete();
-		}
+		disconnectGate.complete();
+		await destroy;
+		session.dispose();
+
+		assert.strictEqual(mockSession.disconnectCalls, 1);
 	});
 
 	test('reports bounded provider lifecycle state for the active turn', async () => {

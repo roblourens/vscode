@@ -80,11 +80,19 @@ export class CopilotSessionWrapper extends Disposable {
 					: 'active';
 	}
 
-	/** Disconnects once the request completes or the SDK reports session shutdown. */
+	/**
+	 * Disconnects the SDK session and waits until teardown is actually finished.
+	 *
+	 * `session.shutdown` can arrive while the disconnect RPC is still in flight.
+	 * Treating that notification as completion lets a same-id resume race the
+	 * runtime's dispose and lose conversation history (#336587 / #327125). Once
+	 * a disconnect RPC has been started, wait for it. Skip only when shutdown
+	 * already settled and no RPC is pending (dispose after a finished teardown).
+	 */
 	disconnect(): Promise<void> {
-		if (this._shutdown.isSettled) {
+		if (this._shutdown.isSettled && this._disconnectRpcState !== 'pending') {
 			this._logService.info(this._lifecycleLogMessage('disconnect skipped after shutdown'));
-			return this._shutdown.p;
+			return this._disconnectPromise ?? this._shutdown.p;
 		}
 		if (!this._disconnectPromise) {
 			this._disconnectRpcState = 'pending';
@@ -106,7 +114,7 @@ export class CopilotSessionWrapper extends Disposable {
 				});
 			this._disconnectPromise = disconnectPromise;
 		}
-		const result = Promise.race([this._disconnectPromise, this._shutdown.p]);
+		const result = this._disconnectPromise;
 		// Observe settlement without delaying the promise returned to the caller.
 		void result.then(
 			() => this._logService.info(this._lifecycleLogMessage('disconnect wait completed')),

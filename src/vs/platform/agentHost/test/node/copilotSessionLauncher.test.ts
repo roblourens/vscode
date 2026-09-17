@@ -894,15 +894,16 @@ suite('CopilotSessionLauncher resume fallback', () => {
 		}
 	});
 
-	test('falls back to createSession when the SDK reports the session was not found', async () => {
+	test('does not replace a session with an empty one when the SDK reports session not found', async () => {
+		// "Session not found" also fires when resume races an in-flight
+		// disconnect of a session that still has durable history. Creating an
+		// empty replacement with the same ID wipes that history (#336587).
 		const { launcher, plan, getCreateSessionCalls } = createResumeFailingLaunch('Request session.resume failed with message: Session not found: session-1');
 
-		const sessions = new DisposableStore();
 		try {
-			sessions.add(await launcher.launch(plan, testRuntime));
-			assert.strictEqual(getCreateSessionCalls(), 1);
+			await assert.rejects(() => launcher.launch(plan, testRuntime), /Session not found/);
+			assert.strictEqual(getCreateSessionCalls(), 0);
 		} finally {
-			sessions.dispose();
 			await launcher.disposeByokProxyHandle();
 		}
 	});

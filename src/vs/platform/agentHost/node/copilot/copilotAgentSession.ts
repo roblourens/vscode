@@ -3465,6 +3465,14 @@ export class CopilotAgentSession extends Disposable {
 		return result.turns;
 	}
 
+	/**
+	 * Raw SDK event log for this live session. Used to rehydrate a replacement
+	 * after a config-refresh resume that reconstructed no turns (#336587).
+	 */
+	async getSdkEvents(): Promise<readonly SessionEvent[]> {
+		return this._wrapper.session.getEvents();
+	}
+
 	async getSubagentMessages(parentToolCallId: string): Promise<readonly Turn[]> {
 		const result = await this._getMappedEvents();
 		const turns = result.subagentTurnsByToolCallId.get(parentToolCallId) ?? [];

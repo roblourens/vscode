@@ -318,9 +318,13 @@ function getErrorMessage(err: unknown): string {
  * Messages from a failed Copilot SDK `session.resume` that positively indicate
  * the session has no events on disk, so there is no history to lose. Includes
  * the post-"Start Over" case, where `truncateChat` leaves zero events.
+ *
+ * "Session not found" is intentionally omitted: it also fires when resume
+ * races an in-flight disconnect of a session that still has durable history,
+ * and falling back to `createSession` with the same ID wipes that history
+ * (#336587).
  */
 const RESUMABLE_HISTORY_ABSENT_PATTERNS = [
-	/\bSession not found\b/i,
 	/\bno events\b/i,
 	/\bempty session\b/i,
 ];
