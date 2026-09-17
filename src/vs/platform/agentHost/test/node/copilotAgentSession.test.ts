@@ -11621,6 +11621,29 @@ Use the attached image as context.
 			});
 		});
 
+		test('sessionStoreSql stays eager under tool search so list-sessions follow-ups can call it (#336647)', async () => {
+			const snapshot: IActiveClientSnapshot = {
+				tools: [{
+					name: 'sessionStoreSql',
+					description: 'Query past coding sessions',
+					inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+				}, {
+					name: 'fileSearch',
+					description: 'Find files',
+					inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+				}],
+				plugins: [],
+				mcpServers: {},
+			};
+			const { runtime } = await createAgentSession(disposables, { clientSnapshot: snapshot });
+			const tools = runtime.createClientSdkTools(true);
+
+			assert.deepStrictEqual(tools.map(tool => ({ name: tool.name, defer: tool.defer })), [
+				{ name: 'sessionStoreSql', defer: 'never' },
+				{ name: 'fileSearch', defer: 'auto' },
+			]);
+		});
+
 		test('semantic search becomes ready without an SDK permission callback', async () => {
 			const semanticSearchSnapshot: IActiveClientSnapshot = {
 				tools: [{

@@ -1037,6 +1037,15 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			// it, `rpc.plan.read()` returns `path: null` and the SDK
 			// never emits `exit_plan_mode.requested`.
 			infiniteSessions: { enabled: true },
+			// The CLI's cross-session store (`sql` with `database: "session_store"`,
+			// plus `session_store_sql`) advertises a `sessions` table and steers
+			// "list open/running sessions" at those builtins. Agent Host already
+			// exposes live inventory via `list_sessions`; the CLI store is not
+			// configured here, and a follow-up that asks to list sessions then
+			// comes back as an empty HTTP-200 (`errorType: query`, no tool call).
+			// Keep the CLI store off so the model actually calls the host tool
+			// (#336647).
+			enableSessionStore: false,
 			// Per-session remote export: the client-level `--remote` flag
 			// (enableRemoteSessions) enables the CLI capability, but each
 			// session must opt in via `remoteSession` to actually export

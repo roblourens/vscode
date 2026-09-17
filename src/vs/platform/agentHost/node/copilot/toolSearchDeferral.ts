@@ -11,12 +11,18 @@ export { CLIENT_TOOL_SEARCH_REFERENCE_NAME, RUNTIME_TOOL_SEARCH_TOOL_NAME } from
 /**
  * Non-deferred client tools, mirroring the Copilot extension allowlist entries
  * that are actually forwarded to Agent Host.
+ *
+ * `sessionStoreSql` is `nonDeferred` in the Copilot extension because models
+ * call it directly to list/search sessions. If Agent Host defers it behind
+ * tool search, a follow-up that asks to list sessions can come back as an
+ * empty HTTP-200 (`errorType: query`) instead of a tool call (#336647).
  */
 export const NON_DEFERRED_CLIENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
 	'runTests',
 	'rename',
 	'usages',
 	SEMANTIC_SEARCH_TOOL_NAME,
+	'sessionStoreSql',
 ]);
 
 /** Mirrors the Copilot extension's string-form `modelSupportsToolSearch`. */

@@ -73,6 +73,7 @@ suite('toolSearchDeferral', () => {
 			assert.ok(NON_DEFERRED_CLIENT_TOOL_NAMES.has('runTests'));
 			assert.ok(NON_DEFERRED_CLIENT_TOOL_NAMES.has('rename'));
 			assert.ok(NON_DEFERRED_CLIENT_TOOL_NAMES.has('usages'));
+			assert.ok(NON_DEFERRED_CLIENT_TOOL_NAMES.has('sessionStoreSql'));
 			assert.strictEqual(NON_DEFERRED_CLIENT_TOOL_NAMES.has(CLIENT_TOOL_SEARCH_REFERENCE_NAME), false);
 		});
 	});
