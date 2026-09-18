@@ -106,6 +106,26 @@ suite('CodexLaunchConfig', () => {
 		});
 	});
 
+	test('keeps the bundled Codex runtime readable when the workspace profile denies :root', () => {
+		const runtimePath = '/home/user/.vscode-server/data/agent-host/sdk-cache/codex/0.153.0/linux-x64/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex';
+		const runtimeGrant = `${JSON.stringify(runtimePath)} = "read"`;
+		const linuxProfile = codexPermissionProfileOverrides('linux', [runtimePath])[1];
+		const macProfile = codexPermissionProfileOverrides('darwin', [runtimePath])[1];
+		const windowsProfiles = codexPermissionProfileOverrides('win32', [runtimePath]);
+		assert.deepStrictEqual({
+			linux: linuxProfile,
+			mac: macProfile,
+			windows: windowsProfiles[1],
+		}, {
+			linux: `permissions.vscode-workspace={ extends = ":workspace", filesystem = { ":root" = "deny", ":minimal" = "read", ":tmpdir" = "write", ":slash_tmp" = "read", ${runtimeGrant} }, network = { enabled = false } }`,
+			mac: `permissions.vscode-workspace={ extends = ":workspace", filesystem = { ":root" = "deny", ":minimal" = "read", ":tmpdir" = "write", ":slash_tmp" = "deny", ${runtimeGrant} }, network = { enabled = false } }`,
+			windows: 'permissions.vscode-workspace={ extends = ":workspace", network = { enabled = false } }',
+		});
+		const config = buildCodexLaunchConfig({}, { baseUrl: 'http://127.0.0.1:1234', nonce: 'nonce' }, [], undefined, [runtimePath]);
+		const expectedOverrides = codexPermissionProfileOverrides(process.platform, [runtimePath]);
+		assert.deepStrictEqual(expectedOverrides.map(override => config.args.includes(override)), expectedOverrides.map(() => true));
+	});
+
 	test('resume explicitly binds each session model and provider', () => {
 		assert.deepStrictEqual(buildCodexResumeParams({ modelProvider: 'openai', modelId: 'native-model' }, 'thread-a', {}, undefined, {}, undefined, true), {
 			threadId: 'thread-a',

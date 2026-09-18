@@ -2501,7 +2501,7 @@ export class CodexAgent extends Disposable implements IAgent {
 			}
 			const extraArgs = parseBinaryArgs(process.env[AgentHostCodexAgentBinaryArgsEnvVar]);
 			const telemetry = await this._otelService.getNativeSdkTelemetryConfig();
-			const launchConfig = buildCodexLaunchConfig(process.env, proxyHandle, extraArgs, telemetry);
+			const launchConfig = buildCodexLaunchConfig(process.env, proxyHandle, extraArgs, telemetry, [binaryPath]);
 			const env = launchConfig.env;
 			sandboxTempDirectory = await fs.promises.mkdtemp(join(os.tmpdir(), 'vscode-agent-codex-sandbox-'));
 			env.TMPDIR = sandboxTempDirectory;

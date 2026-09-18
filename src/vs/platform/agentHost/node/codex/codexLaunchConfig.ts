@@ -13,9 +13,13 @@ const CODEX_VSCODE_WORKSPACE_PERMISSION_PROFILE = 'vscode-workspace';
 const CODEX_VSCODE_WORKSPACE_NETWORK_PERMISSION_PROFILE = 'vscode-workspace-network';
 const CODEX_VSCODE_WORKSPACE_READ_ONLY_PERMISSION_PROFILE = 'vscode-workspace-read-only';
 
-export function codexPermissionProfileOverrides(platform: NodeJS.Platform = process.platform): string[] {
+export function codexPermissionProfileOverrides(
+	platform: NodeJS.Platform = process.platform,
+	readableRuntimePaths: readonly string[] = [],
+): string[] {
 	// Codex materializes its Linux sandbox helper below /tmp before entering bwrap.
 	// Keep it executable from inside the sandbox without granting shared temp write access.
+	// Also keep the bundled Codex executable readable when :root is denied (openai/codex#29049).
 	const slashTmpAccess = platform === 'linux' ? 'read' : 'deny';
 	const fileSystemOverride = platform === 'win32'
 		? ''
@@ -24,6 +28,7 @@ export function codexPermissionProfileOverrides(platform: NodeJS.Platform = proc
 			`":minimal" = "read"`,
 			`":tmpdir" = "write"`,
 			`":slash_tmp" = "${slashTmpAccess}"`,
+			...readableRuntimePaths.map(runtimePath => `${JSON.stringify(runtimePath)} = "read"`),
 		].join(', ')} }`;
 	const readOnlyProfile = platform === 'win32'
 		? `permissions.${CODEX_VSCODE_WORKSPACE_READ_ONLY_PERMISSION_PROFILE}={ extends = ":read-only" }`
@@ -93,6 +98,7 @@ export function buildCodexLaunchConfig(
 	proxy: ICodexLaunchProxy,
 	extraArgs: readonly string[],
 	telemetry?: IAgentHostNativeOTelConfig,
+	readableRuntimePaths: readonly string[] = [],
 ): ICodexLaunchConfig {
 	const env: NodeJS.ProcessEnv = { ...inheritedEnv, [AiAgentEnvVar]: AiAgentEnvValue };
 	if (telemetry) {
@@ -116,7 +122,7 @@ export function buildCodexLaunchConfig(
 		// ChatGPT subscription threads opt in with a per-thread override.
 		`features.image_generation=false`,
 	];
-	const permissionOverrides = codexPermissionProfileOverrides();
+	const permissionOverrides = codexPermissionProfileOverrides(process.platform, readableRuntimePaths);
 	const telemetryOverrides = codexTelemetryOverrides(telemetry);
 	return {
 		env,
