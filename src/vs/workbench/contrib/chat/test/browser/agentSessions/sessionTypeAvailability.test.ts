@@ -103,17 +103,21 @@ suite('getSessionTypeAvailability', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('Copilot Agent Host remains setup-selectable when signed-out operation is enabled', () => {
+	test('Copilot and Codex remain setup-selectable when signed-out operation is enabled', () => {
 		const pickerAvailability = (type: string, allowSignedOutWhenUsable: boolean) => getSessionTypePickerAvailability(type, SessionTypeAvailability.SignInRequired, allowSignedOutWhenUsable, false);
 		assert.deepStrictEqual({
 			localCopilot: pickerAvailability(SessionType.AgentHostCopilot, true),
+			localCodex: pickerAvailability(SessionType.AgentHostCodex, true),
 			localClaude: pickerAvailability(SessionType.AgentHostClaude, true),
 			localDisabled: pickerAvailability(SessionType.AgentHostCopilot, false),
+			codexDisabled: pickerAvailability(SessionType.AgentHostCodex, false),
 			legacyCopilot: pickerAvailability(SessionType.CopilotCLI, true),
 		}, {
 			localCopilot: SessionTypeAvailability.Available,
+			localCodex: SessionTypeAvailability.Available,
 			localClaude: SessionTypeAvailability.SignInRequired,
 			localDisabled: SessionTypeAvailability.SignInRequired,
+			codexDisabled: SessionTypeAvailability.SignInRequired,
 			legacyCopilot: SessionTypeAvailability.SignInRequired,
 		});
 	});

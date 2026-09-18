@@ -125,6 +125,12 @@ suite('Sessions ConfigurationService', () => {
 		assert.strictEqual(testObject.getValue('sessionsConfigurationService.testSetting'), 'userValue');
 	}));
 
+	test('application-scoped user settings override defaults even with an empty application model', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
+		await fileService.writeFile(userDataProfileService.currentProfile.settingsResource, VSBuffer.fromString('{ "sessionsConfigurationService.applicationSetting": "userValue" }'));
+		await testObject.reloadConfiguration();
+		assert.strictEqual(testObject.getValue('sessionsConfigurationService.applicationSetting'), 'userValue');
+	}));
+
 	test('workspace settings from workspace configuration file override defaults', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
 		await fileService.writeFile(workspaceConfigResource, VSBuffer.fromString(JSON.stringify({ folders: [], settings: { 'sessionsConfigurationService.testSetting': 'workspaceValue' } })));
 		await testObject.reloadConfiguration();

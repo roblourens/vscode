@@ -29,6 +29,13 @@ export enum SessionTypeAvailability {
  * selectable in the two cases where the raw answer would grey out something the
  * user can still act on.
  *
+ * The first is Copilot and Codex while signed-out operation is on: Copilot can
+ * still be set up from inside a session, and Codex's ChatGPT sign-in lives on
+ * the account menu — greying either out hides the only route to it. Codex also
+ * reports Copilot sign-in as required until protected resources resolve, which
+ * would otherwise lock the harness behind GitHub even after the documented
+ * Codex-without-GitHub settings are enabled.
+ *
  * `hasSetupBanner` is the second: a harness whose SDK setup banner is on offer
  * has no models *yet*, and the banner saying how to fix that renders inside a
  * session of that very type. Not a static allow-list of session types — a
@@ -39,7 +46,7 @@ export function getSessionTypePickerAvailability(type: string, availability: Ses
 	if (!allowSignedOutWhenUsable) {
 		return availability;
 	}
-	if (type === SessionType.AgentHostCopilot && availability === SessionTypeAvailability.SignInRequired) {
+	if ((type === SessionType.AgentHostCopilot || type === SessionType.AgentHostCodex) && availability === SessionTypeAvailability.SignInRequired) {
 		return SessionTypeAvailability.Available;
 	}
 	if (hasSetupBanner && availability === SessionTypeAvailability.NoModels) {

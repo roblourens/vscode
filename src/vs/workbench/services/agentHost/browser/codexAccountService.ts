@@ -73,10 +73,12 @@ export function createCodexAccountMenuActions(service: ICodexAccountService, vis
 	if (account.status === 'downloading') {
 		return [new Action('codex.downloadingAgent', localize('downloadingCodexAgent', "Downloading Codex Agent…"), undefined, false)];
 	}
-	if (account.status === 'unknown' || account.status === 'signedOut' || account.status === 'error') {
-		return [new Action('codex.signInToChatGPT', localize('signInToChatGPT', "Sign in to ChatGPT"), undefined, true, () => service.signIn())];
-	}
-	return [];
+	// Offer ChatGPT sign-in for every non-signed-in state, including
+	// `unavailable` (Copilot/API-key/other auth already satisfies Codex, so
+	// `requiresOpenaiAuth` is false). Hiding that entry was how the Agents
+	// window lost "Sign in to ChatGPT" after the documented Codex-without-GitHub
+	// settings were enabled.
+	return [new Action('codex.signInToChatGPT', localize('signInToChatGPT', "Sign in to ChatGPT"), undefined, true, () => service.signIn())];
 }
 
 export function openCodexAuthUrl(openerService: Pick<IOpenerService, 'open'>, authUrl: string): Promise<boolean> {

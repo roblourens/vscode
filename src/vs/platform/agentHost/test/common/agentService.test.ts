@@ -7,11 +7,14 @@ import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { IConfigurationService } from '../../../configuration/common/configuration.js';
+import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../configuration/common/configurationRegistry.js';
+import { TestConfigurationService } from '../../../configuration/test/common/testConfigurationService.js';
+import { Registry } from '../../../registry/common/platform.js';
 import { AgentSession, GITHUB_COPILOT_PROTECTED_RESOURCE, GITHUB_REPO_PROTECTED_RESOURCE, protectedResourcesRequireGitHubCopilotSignIn } from '../../common/agent.js';
+import '../common/agentHostStarter.config.contribution.js';
 import { AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, AgentHostOTelEnvVars, buildAgentHostOTelEnv, CodexPreferAgentHostEditorSettingId, isAgentEnabled, readAgentHostOTelPolicySettings, sanitizeAgentHostOTelPolicySettings, shouldSurfaceLocalAgentHostProvider } from '../../common/agentService.js';
 import type { ProtectedResourceMetadata } from '../../common/state/protocol/state.js';
 import { buildChatUri, buildDefaultChatUri, resolveChatUri } from '../../common/state/sessionState.js';
-import { TestConfigurationService } from '../../../configuration/test/common/testConfigurationService.js';
 
 suite('AgentSession namespace', () => {
 
@@ -75,6 +78,11 @@ suite('isAgentEnabled', () => {
 suite('shouldSurfaceLocalAgentHostProvider', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('chat.agentHost.codexAgent.enabled is application-scoped so the Agents window sees it', () => {
+		const schema = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).getConfigurationProperties()[AgentHostCodexAgentEnabledSettingId];
+		assert.strictEqual(schema?.scope, ConfigurationScope.APPLICATION);
+	});
 
 	test('surfaces enabled providers and uses window-specific Codex settings', () => {
 		const configurationService = new TestConfigurationService({

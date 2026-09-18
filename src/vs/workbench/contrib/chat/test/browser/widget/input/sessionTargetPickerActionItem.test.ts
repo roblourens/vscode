@@ -119,9 +119,13 @@ suite('SessionTypePickerActionItem', () => {
 		assert.deepStrictEqual({
 			enabled: getCopilotAvailability(true),
 			disabled: getCopilotAvailability(false),
+			codexEnabled: getSignedOutAvailability({ type: SessionType.AgentHostCodex, allowSignedOutWhenUsable: true, requiresCopilotSignIn: true }),
+			codexDisabled: getSignedOutAvailability({ type: SessionType.AgentHostCodex, allowSignedOutWhenUsable: false, requiresCopilotSignIn: true }),
 		}, {
 			enabled: SessionTypeAvailability.Available,
 			disabled: SessionTypeAvailability.SignInRequired,
+			codexEnabled: SessionTypeAvailability.Available,
+			codexDisabled: SessionTypeAvailability.SignInRequired,
 		});
 	});
 

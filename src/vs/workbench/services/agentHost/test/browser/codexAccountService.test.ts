@@ -51,7 +51,16 @@ suite('CodexAccountService', () => {
 			submenu: ['Sign Out'],
 			signOutCalls: 1,
 		});
-		assert.deepStrictEqual(createCodexAccountMenuActions(service('unavailable')), []);
+	});
+
+	test('offers ChatGPT sign-in when Codex is using another auth path', async () => {
+		const accountService = service('unavailable');
+		const actions = createCodexAccountMenuActions(accountService);
+		assert.ok(actions[0] instanceof Action);
+		disposables.add(actions[0] as Action);
+		assert.strictEqual(actions[0].label, 'Sign in to ChatGPT');
+		await actions[0].run();
+		assert.strictEqual(accountService.signInCalls, 1);
 	});
 
 	test('does not duplicate the ChatGPT label when email is unavailable', () => {

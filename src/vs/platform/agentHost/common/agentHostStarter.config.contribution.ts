@@ -293,6 +293,13 @@ configurationRegistry.registerConfiguration({
 			type: 'boolean',
 			description: nls.localize('chat.agentHost.codexAgent.enabled', "When enabled, the agent host registers the Codex provider (subject to the Codex SDK being reachable). Enabling takes effect without restarting the agent host."),
 			default: product.quality !== 'stable',
+			// Application-scoped so the Agents window (default-profile settings, empty
+			// application model) and host sync (`getGlobalConfigurationValue`) both see
+			// the same user value. WINDOW left this as a profile- or workspace-local
+			// flag, so enabling it in a custom profile or workspace never reached the
+			// dedicated Agents window — ChatGPT sign-in and the Codex harness both
+			// vanished. Matches `chat.agentHost.allowSignedOutWhenUsable`.
+			scope: ConfigurationScope.APPLICATION,
 			tags: ['experimental', 'advanced'],
 			// Allow the default to be overridden by an experiment. Uses `startup`
 			// to match the sibling agent-host provider settings.
