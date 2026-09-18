@@ -42,4 +42,10 @@ export class NullSSHRemoteAgentHostService implements ISSHRemoteAgentHostService
 	async reconnect(_sshConfigHost: string, _name: string): Promise<ISSHAgentHostConnection> {
 		throw new Error('SSH connections are not supported in the browser.');
 	}
+
+	async startBrowserProxy(_address: string): Promise<never> {
+		throw new Error('SSH browser proxy is not supported in the browser.');
+	}
+
+	async stopBrowserProxy(_address: string): Promise<void> { }
 }

@@ -247,6 +247,9 @@ export function getExternalTunnelNetworkPolicyError(
  * directly. This rewrites a remote localhost URL to the local address of an
  * already-forwarded port so the browser can reach it.
  *
+ * Pass {@link sessionId} so Agents-window SSH sessions that have a per-session
+ * proxy skip the Ports-view rewrite (there is no window `remoteAuthority`).
+ *
  * Returns the original URL and `rewritten: false` when not applicable (remote
  * proxying is enabled, the URL is not a localhost URL, or the remote port has
  * not been forwarded).
@@ -255,10 +258,11 @@ export function rewriteRemoteLocalhostUrl(
 	url: string,
 	browserViewService: IBrowserViewWorkbenchService,
 	remoteExplorerService: IRemoteExplorerService,
+	sessionId?: string,
 ): { url: string; rewritten: boolean } {
 	// When proxying is enabled (or we are not in a remote workspace) the browser
 	// can reach the remote host directly, so no rewriting is needed.
-	if (browserViewService.willUseRemoteProxy()) {
+	if (browserViewService.willUseRemoteProxy(sessionId)) {
 		return { url, rewritten: false };
 	}
 

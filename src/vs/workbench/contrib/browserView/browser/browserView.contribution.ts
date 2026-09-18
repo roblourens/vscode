@@ -16,11 +16,13 @@ import { BrowserEditorInput, IBrowserEditorInputData } from '../common/browserEd
 class WebBrowserViewWorkbenchService implements IBrowserViewWorkbenchService {
 	declare readonly _serviceBrand: undefined;
 
-	willUseRemoteProxy(): boolean {
+	willUseRemoteProxy(_sessionId?: string): boolean {
 		return false;
 	}
 
 	setRemoteProxyInfo(_info: ITunnelProxyInfo | undefined): void { }
+
+	async setSessionRemoteProxyInfo(_sessionId: string, _info: ITunnelProxyInfo | undefined): Promise<void> { }
 
 	readonly onDidChangeBrowserViews = Event.None;
 	readonly onDidChangeSharingAvailable = Event.None;

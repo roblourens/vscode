@@ -169,6 +169,13 @@ export interface IBrowserViewWindowConfiguration {
 	 */
 	readonly proxyInfo?: ITunnelProxyInfo;
 	/**
+	 * Per-session tunnel-proxy credentials for Agents-window remote Agent Host
+	 * sessions, which have no window `remoteAuthority`. Keyed by the owning
+	 * chat session resource string. Applied instead of {@link proxyInfo} when
+	 * a view belongs to that session.
+	 */
+	readonly sessionProxyInfo?: { readonly [sessionId: string]: ITunnelProxyInfo };
+	/**
 	 * The window's contribution to the `file://` allowlist used by integrated
 	 * browser sessions. Main unions every window's contribution into a
 	 * process-wide allowlist; entries are dropped when the window is destroyed.
@@ -471,6 +478,26 @@ export function getAgentBrowserViewCreationDefaults(sessionId: string, storageAf
 			? { scope: BrowserViewStorageScope.Agent } as const
 			: { scope: BrowserViewStorageScope.Agent, affinity: storageAffinity } as const
 	};
+}
+
+/**
+ * Resolve the tunnel proxy a browser view should use.
+ *
+ * Agent-owned views in the Agents window prefer a per-session proxy (SSH AHP
+ * has no window `remoteAuthority`). Everyone else uses the window-wide
+ * vscode-remote proxy, if any.
+ */
+export function resolveBrowserViewProxyInfo(
+	owner: IBrowserViewOwner,
+	config: IBrowserViewWindowConfiguration | undefined,
+): ITunnelProxyInfo | undefined {
+	if (owner.type === 'agent') {
+		const sessionProxy = config?.sessionProxyInfo?.[owner.sessionId];
+		if (sessionProxy) {
+			return sessionProxy;
+		}
+	}
+	return config?.proxyInfo;
 }
 
 export const ipcBrowserViewChannelName = 'browserView';

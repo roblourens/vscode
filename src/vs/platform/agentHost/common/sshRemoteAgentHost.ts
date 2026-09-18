@@ -7,6 +7,7 @@ import { Event } from '../../../base/common/event.js';
 import { IDisposable } from '../../../base/common/lifecycle.js';
 import { URI } from '../../../base/common/uri.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
+import type { ITunnelProxyInfo } from '../../tunnel/common/tunnelProxy.js';
 import type { AgentHostEndpointAddress, AgentHostServerType } from './agentHostEndpointRegistry.js';
 import type { RemoteAgentHostLocationPreference } from './remoteAgentHostLocationPreference.js';
 import type { IRelayMessage } from './relayTransport.js';
@@ -213,7 +214,18 @@ export interface ISSHRemoteAgentHostService {
 	 * ever opens and no `editor` endpoint is ever silently chosen.
 	 */
 	reconnect(sshConfigHost: string, name: string, userInitiated?: boolean): Promise<ISSHAgentHostConnection>;
+
+	/**
+	 * Start (or reuse) a loopback HTTPS proxy that forwards integrated-browser
+	 * TCP through this SSH connection's `direct-tcpip` channels. Used by the
+	 * Agents window, which has no vscode-remote `remoteAuthority`.
+	 */
+	startBrowserProxy(address: string): Promise<ITunnelProxyInfo>;
+
+	/** Tear down the browser proxy started by {@link startBrowserProxy}, if any. */
+	stopBrowserProxy(address: string): Promise<void>;
 }
+
 /**
  * Serializable result from a successful SSH connect operation.
  * Returned over IPC from the main process.
@@ -600,4 +612,14 @@ export interface ISSHRemoteAgentHostMainService {
 	 * {@link computeSSHConnectionKey stable key} before calling reconnect.
 	 */
 	reconnect(sshConfigHost: string, name: string, remoteAgentHostCommand?: string, agentForward?: boolean, userInitiated?: boolean, preferredAgentLocation?: RemoteAgentHostLocationPreference): Promise<ISSHConnectResult>;
+
+	/**
+	 * Start (or reuse) a loopback HTTPS proxy that forwards integrated-browser
+	 * TCP through this SSH connection. `address` is the connection key
+	 * (`ssh:<alias>` or `user@host:port`).
+	 */
+	startBrowserProxy(address: string): Promise<ITunnelProxyInfo>;
+
+	/** Tear down the browser proxy started by {@link startBrowserProxy}, if any. */
+	stopBrowserProxy(address: string): Promise<void>;
 }

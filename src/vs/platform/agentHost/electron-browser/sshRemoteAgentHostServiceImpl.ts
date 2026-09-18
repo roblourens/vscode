@@ -19,6 +19,7 @@ import { toAction } from '../../../base/common/actions.js';
 import { IProductService } from '../../product/common/productService.js';
 import { IStorageService, StorageScope } from '../../storage/common/storage.js';
 import { ISharedProcessService } from '../../ipc/electron-browser/services.js';
+import { ITunnelProxyInfo } from '../../tunnel/common/tunnelProxy.js';
 import { ProxyChannel } from '../../../base/parts/ipc/common/ipc.js';
 import { IRemoteAgentHostService, RemoteAgentHostConnectionStatus, RemoteAgentHostEntryType, RemoteAgentHostsEnabledSettingId, RemoteAgentHostsSettingId, SSH_REMOTE_AGENT_HOSTS_STORAGE_KEY, getEntryAddress, isLegacySshRawEntry, isRawRemoteAgentHostEntry, parseLegacyRawEntry, readRemoteAgentHostSettings, readSSHRemoteAgentHostEntries, removeSSHRemoteAgentHostEntry, storeSSHRemoteAgentHostEntries, upsertRemoteAgentHostEntry, type IRemoteAgentHostConnectOptions, type IRemoteAgentHostConnectionFactory, type IRemoteAgentHostCreatedConnection, type IRemoteAgentHostEntry } from '../common/remoteAgentHostService.js';
 import { createDecorator, IInstantiationService } from '../../instantiation/common/instantiation.js';
@@ -573,6 +574,14 @@ export class SSHRemoteAgentHostService extends Disposable implements ISSHRemoteA
 		this._remoteAgentHostService.reconnect(address, userInitiated ?? true);
 		await this._remoteAgentHostService.waitForConnection(address);
 		return this._getConnectionHandle(address);
+	}
+
+	startBrowserProxy(address: string): Promise<ITunnelProxyInfo> {
+		return this._mainService.startBrowserProxy(address);
+	}
+
+	stopBrowserProxy(address: string): Promise<void> {
+		return this._mainService.stopBrowserProxy(address);
 	}
 
 	private _getConnectionHandle(address: string): SSHAgentHostConnectionHandle {

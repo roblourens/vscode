@@ -12,7 +12,10 @@ import { AgentNetworkDomainSettingId } from '../../../../../../platform/networkF
 import { IEditorService } from '../../../../../services/editor/common/editorService.js';
 import { IBrowserViewWorkbenchService } from '../../../common/browserView.js';
 import { BrowserEditorInput } from '../../../common/browserEditorInput.js';
-import { errorResult, getBrowserPagesContext, formatBrowserEditorList, invokeFunctionResultToToolResult } from '../../../electron-browser/tools/browserToolHelpers.js';
+import { errorResult, getBrowserPagesContext, formatBrowserEditorList, invokeFunctionResultToToolResult, rewriteRemoteLocalhostUrl } from '../../../electron-browser/tools/browserToolHelpers.js';
+import { IRemoteExplorerService } from '../../../../../services/remote/common/remoteExplorerService.js';
+import { Tunnel, TunnelModel } from '../../../../../services/remote/common/tunnelModel.js';
+import { URI } from '../../../../../../base/common/uri.js';
 
 suite('browserToolHelpers - failure reporting', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -112,5 +115,37 @@ suite('BrowserToolHelpers', () => {
 			formatBrowserEditorList(editorService, editors, { agentNetworkFilterService: networkFilterService }),
 			urls.map((_, index) => `- [page-${index}] Blocked by network domain policy (not visible)`).join('\n')
 		);
+	});
+});
+
+suite('rewriteRemoteLocalhostUrl', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	function createRemoteExplorerService(localUri: string): IRemoteExplorerService {
+		return upcastPartial<IRemoteExplorerService>({
+			tunnelModel: upcastPartial<TunnelModel>({
+				forwarded: new Map([
+					['localhost:3000', upcastPartial<Tunnel>({ localUri: URI.parse(localUri) })],
+				]),
+				detected: new Map(),
+			}),
+		});
+	}
+
+	test('skips port rewrite when the session has a remote proxy', () => {
+		const browserViewService = upcastPartial<IBrowserViewWorkbenchService>({
+			willUseRemoteProxy: (sessionId?: string) => sessionId === 'chat:remote',
+		});
+		const explorer = createRemoteExplorerService('http://127.0.0.1:4000');
+
+		assert.deepStrictEqual({
+			proxiedSession: rewriteRemoteLocalhostUrl('http://localhost:3000/app', browserViewService, explorer, 'chat:remote'),
+			localSession: rewriteRemoteLocalhostUrl('http://localhost:3000/app', browserViewService, explorer, 'chat:local'),
+			noSession: rewriteRemoteLocalhostUrl('http://localhost:3000/app', browserViewService, explorer),
+		}, {
+			proxiedSession: { url: 'http://localhost:3000/app', rewritten: false },
+			localSession: { url: 'http://127.0.0.1:4000/app', rewritten: true },
+			noSession: { url: 'http://127.0.0.1:4000/app', rewritten: true },
+		});
 	});
 });

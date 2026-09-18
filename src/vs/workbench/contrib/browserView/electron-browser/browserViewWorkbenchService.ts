@@ -81,6 +81,9 @@ export class BrowserViewWorkbenchService extends Disposable implements IBrowserV
 	/** Latest tunnel-proxy credentials pushed from the local extension host. */
 	private _remoteProxyInfo: ITunnelProxyInfo | undefined;
 
+	/** Per-session tunnel-proxy credentials for Agents-window SSH sessions. */
+	private readonly _sessionRemoteProxyInfo = new Map<string, ITunnelProxyInfo>();
+
 	/**
 	 * In-flight creation of the dedicated browser window group, used to coalesce
 	 * concurrent requests so we don't spawn multiple auxiliary windows. The group
@@ -202,19 +205,28 @@ export class BrowserViewWorkbenchService extends Disposable implements IBrowserV
 		}));
 	}
 
-	willUseRemoteProxy(): boolean {
-		if (!this.environmentService.remoteAuthority) {
-			return false;
-		}
+	willUseRemoteProxy(sessionId?: string): boolean {
 		if (!this.configurationService.getValue<boolean>(BrowserRemoteProxyEnabledSettingId)) {
 			return false;
 		}
-		return true;
+		if (this.environmentService.remoteAuthority) {
+			return true;
+		}
+		return !!sessionId && this._sessionRemoteProxyInfo.has(sessionId);
 	}
 
 	setRemoteProxyInfo(info: ITunnelProxyInfo | undefined): void {
 		this._remoteProxyInfo = info;
 		this._updateWindowConfiguration();
+	}
+
+	async setSessionRemoteProxyInfo(sessionId: string, info: ITunnelProxyInfo | undefined): Promise<void> {
+		if (info) {
+			this._sessionRemoteProxyInfo.set(sessionId, info);
+		} else {
+			this._sessionRemoteProxyInfo.delete(sessionId);
+		}
+		await this._updateWindowConfiguration();
 	}
 
 	getKnownBrowserViews(): Map<string, BrowserEditorInput> {
@@ -542,13 +554,16 @@ export class BrowserViewWorkbenchService extends Disposable implements IBrowserV
 		return undefined;
 	}
 
-	private _updateWindowConfiguration(): void {
-		void this._browserViewService.updateWindowConfiguration(this._mainWindowId, {
+	private _updateWindowConfiguration(): Promise<void> {
+		return this._browserViewService.updateWindowConfiguration(this._mainWindowId, {
 			theme: this._getTheme(),
 			keybindings: this._getKeybindings(),
 			aiFeaturesDisabled: !this.contextKeyService.contextMatchesRules(ChatContextKeys.enabled),
 			maxHistoryEntries: this.configurationService.getValue<number>(BrowserMaxHistoryEntriesSettingId),
 			proxyInfo: this._remoteProxyInfo,
+			sessionProxyInfo: this._sessionRemoteProxyInfo.size > 0
+				? Object.fromEntries(this._sessionRemoteProxyInfo)
+				: undefined,
 			trustedFileRoots: this._getTrustedFileRoots(),
 			trustAllFiles: !this.workspaceTrustEnablementService.isWorkspaceTrustEnabled(),
 		});

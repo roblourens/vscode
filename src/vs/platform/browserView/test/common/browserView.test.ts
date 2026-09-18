@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { BrowserViewStorageScope, getAgentBrowserViewCreationDefaults, isBrowserViewAssociatedResourceNavigation, isBrowserViewStorageScopeShareableWithAgent, isInMemoryStorageScope, matchesBrowserViewAudience } from '../../common/browserView.js';
+import { BrowserViewStorageScope, getAgentBrowserViewCreationDefaults, isBrowserViewAssociatedResourceNavigation, isBrowserViewStorageScopeShareableWithAgent, isInMemoryStorageScope, matchesBrowserViewAudience, resolveBrowserViewProxyInfo, type IBrowserViewWindowConfiguration } from '../../common/browserView.js';
 
 suite('BrowserView', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -108,5 +108,19 @@ suite('BrowserView', () => {
 				agent: true,
 			},
 		});
+	});
+
+	test('resolves per-session proxy info for agent-owned views', () => {
+		const windowProxy = { url: 'https://127.0.0.1:1', host: '127.0.0.1', port: 1, credentials: { username: 'w', password: 'w' }, certFingerprint: 'sha256/w' };
+		const sessionProxy = { url: 'https://127.0.0.1:2', host: '127.0.0.1', port: 2, credentials: { username: 's', password: 's' }, certFingerprint: 'sha256/s' };
+		const config = {
+			sessionProxyInfo: { 'chat:remote': sessionProxy },
+			proxyInfo: windowProxy,
+		} as IBrowserViewWindowConfiguration;
+
+		assert.strictEqual(resolveBrowserViewProxyInfo({ type: 'agent', sessionId: 'chat:remote' }, config), sessionProxy);
+		assert.strictEqual(resolveBrowserViewProxyInfo({ type: 'agent', sessionId: 'chat:local' }, config), windowProxy);
+		assert.strictEqual(resolveBrowserViewProxyInfo({ type: 'user' }, config), windowProxy);
+		assert.strictEqual(resolveBrowserViewProxyInfo({ type: 'agent', sessionId: 'chat:remote' }, undefined), undefined);
 	});
 });

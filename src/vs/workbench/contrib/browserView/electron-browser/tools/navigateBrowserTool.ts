@@ -15,6 +15,7 @@ import { BrowserChatToolReferenceName } from '../../../../../platform/browserVie
 import { IBrowserViewWorkbenchService } from '../../common/browserView.js';
 import { IRemoteExplorerService } from '../../../../services/remote/common/remoteExplorerService.js';
 import { OpenPageToolId } from './openBrowserTool.js';
+import { IAgentHostBrowserProxyService } from '../agentHostBrowserProxyService.js';
 
 export const NavigateBrowserToolData: IToolData = {
 	id: 'navigate_page',
@@ -57,6 +58,7 @@ export class NavigateBrowserTool implements IToolImpl {
 		@IAgentNetworkFilterService private readonly agentNetworkFilterService: IAgentNetworkFilterService,
 		@IBrowserViewWorkbenchService private readonly browserViewService: IBrowserViewWorkbenchService,
 		@IRemoteExplorerService private readonly remoteExplorerService: IRemoteExplorerService,
+		@IAgentHostBrowserProxyService private readonly agentHostBrowserProxyService: IAgentHostBrowserProxyService,
 	) { }
 
 	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation | undefined> {
@@ -118,6 +120,8 @@ export class NavigateBrowserTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		const params = invocation.parameters as INavigateBrowserToolParams;
 		const sessionId = getSessionId(invocation);
+		const sessionResource = invocation.context?.sessionResource;
+		await this.agentHostBrowserProxyService.ensureProxyForSession(sessionResource);
 
 		if (!params.pageId) {
 			return errorResult(`No page ID provided. Use '${OpenPageToolId}' first.`);
@@ -144,7 +148,7 @@ export class NavigateBrowserTool implements IToolImpl {
 				// In a remote workspace without the remote proxy, the integrated
 				// browser runs locally and cannot reach the remote's localhost directly.
 				// Rewrite to the forwarded local address (if any) so the page can be reached.
-				const rewrite = rewriteRemoteLocalhostUrl(params.url!, this.browserViewService, this.remoteExplorerService);
+				const rewrite = rewriteRemoteLocalhostUrl(params.url!, this.browserViewService, this.remoteExplorerService, sessionResource?.toString());
 				const tunnelPolicyError = getExternalTunnelNetworkPolicyError(rewrite, this.agentNetworkFilterService);
 				if (tunnelPolicyError) {
 					return errorResult(tunnelPolicyError);

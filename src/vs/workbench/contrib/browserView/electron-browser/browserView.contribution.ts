@@ -19,6 +19,7 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { IBrowserViewCDPService, IBrowserViewWorkbenchService } from '../common/browserView.js';
 import { BrowserViewWorkbenchService } from './browserViewWorkbenchService.js';
 import { BrowserViewCDPService } from './browserViewCDPService.js';
+import { AgentHostBrowserProxyService, IAgentHostBrowserProxyService } from './agentHostBrowserProxyService.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { logBrowserOpen } from '../../../../platform/browserView/common/browserViewTelemetry.js';
 
@@ -151,3 +152,4 @@ registerWorkbenchContribution2(BrowserEditorResolverContribution.ID, BrowserEdit
 
 registerSingleton(IBrowserViewWorkbenchService, BrowserViewWorkbenchService, InstantiationType.Delayed);
 registerSingleton(IBrowserViewCDPService, BrowserViewCDPService, InstantiationType.Delayed);
+registerSingleton(IAgentHostBrowserProxyService, AgentHostBrowserProxyService, InstantiationType.Delayed);

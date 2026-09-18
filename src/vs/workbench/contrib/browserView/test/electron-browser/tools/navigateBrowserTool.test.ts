@@ -17,6 +17,13 @@ import { IBrowserViewWorkbenchService } from '../../../common/browserView.js';
 import { NavigateBrowserTool } from '../../../electron-browser/tools/navigateBrowserTool.js';
 import { IToolInvocation, ToolProgress } from '../../../../chat/common/tools/languageModelToolsService.js';
 import { URI } from '../../../../../../base/common/uri.js';
+import { IAgentHostBrowserProxyService } from '../../../electron-browser/agentHostBrowserProxyService.js';
+
+function nullAgentHostBrowserProxy(): IAgentHostBrowserProxyService {
+	return upcastPartial<IAgentHostBrowserProxyService>({
+		ensureProxyForSession: async () => false,
+	});
+}
 
 function createRemoteExplorerService(localUri: string): IRemoteExplorerService {
 	return upcastPartial<IRemoteExplorerService>({
@@ -43,6 +50,7 @@ suite('NavigateBrowserTool', () => {
 			networkFilterService,
 			upcastPartial<IBrowserViewWorkbenchService>({}),
 			upcastPartial<IRemoteExplorerService>({}),
+			nullAgentHostBrowserProxy(),
 		);
 		const urls = [
 			'http://a@b@127.0.0.1:3000/private',
@@ -89,6 +97,7 @@ suite('NavigateBrowserTool', () => {
 			networkFilterService,
 			browserViewService,
 			upcastPartial<IRemoteExplorerService>({}),
+			nullAgentHostBrowserProxy(),
 		);
 		const urls = [
 			String.raw`http:\\\\evil.example/x`,
@@ -149,6 +158,7 @@ suite('NavigateBrowserTool', () => {
 			networkFilterService,
 			browserViewService,
 			createRemoteExplorerService('https://blocked-tunnel.example'),
+			nullAgentHostBrowserProxy(),
 		);
 		const parameters = { pageId: 'test-page', type: 'url', url: 'http://localhost:3000/private' };
 
@@ -193,6 +203,7 @@ suite('NavigateBrowserTool', () => {
 			networkFilterService,
 			browserViewService,
 			createRemoteExplorerService('http://127.0.0.1:4000'),
+			nullAgentHostBrowserProxy(),
 		);
 		const parameters = { pageId: 'test-page', type: 'url', url: 'http://localhost:3000/private' };
 
@@ -231,6 +242,7 @@ suite('NavigateBrowserTool', () => {
 				willUseRemoteProxy: () => true,
 			}),
 			upcastPartial<IRemoteExplorerService>({}),
+			nullAgentHostBrowserProxy(),
 		);
 		const parameters = { pageId: 'test-page', type: 'url', url: 'https://example.com/private' };
 

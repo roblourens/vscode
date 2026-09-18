@@ -28,6 +28,7 @@ import { createBrowserPageLink, errorResult, findExistingPagesByHost, getBrowser
 import { IRemoteExplorerService } from '../../../../services/remote/common/remoteExplorerService.js';
 import { getAgentBrowserViewCreationDefaults } from '../../../../../platform/browserView/common/browserView.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
+import { IAgentHostBrowserProxyService } from '../agentHostBrowserProxyService.js';
 
 export const OpenPageToolId = 'open_browser_page';
 const OPEN_PAGE_READY_TIMEOUT_MS = 5000;
@@ -78,6 +79,7 @@ export class OpenBrowserTool implements IToolImpl {
 		@IConfigurationService private readonly configService: IConfigurationService,
 		@ILogService private readonly logService: ILogService,
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
+		@IAgentHostBrowserProxyService private readonly agentHostBrowserProxyService: IAgentHostBrowserProxyService,
 	) { }
 
 	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation | undefined> {
@@ -116,7 +118,9 @@ export class OpenBrowserTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, token: CancellationToken): Promise<IToolResult> {
 		const params = invocation.parameters as IOpenBrowserToolParams;
 		const sessionId = getSessionId(invocation);
-		const activeSessionId = invocation.context?.sessionResource.toString();
+		const sessionResource = invocation.context?.sessionResource;
+		const activeSessionId = sessionResource?.toString();
+		await this.agentHostBrowserProxyService.ensureProxyForSession(sessionResource);
 
 		// If no URL is specified, prompt the user for a page to share.
 		if (!params.url) {
@@ -137,7 +141,7 @@ export class OpenBrowserTool implements IToolImpl {
 		// runs locally and cannot reach the remote's localhost directly. Rewrite to
 		// the forwarded local address (if any) so the page can be reached.
 		const logicalUrl = params.url;
-		const rewrite = rewriteRemoteLocalhostUrl(logicalUrl, this.browserViewService, this.remoteExplorerService);
+		const rewrite = rewriteRemoteLocalhostUrl(logicalUrl, this.browserViewService, this.remoteExplorerService, activeSessionId);
 		const rewriteNotice = rewrite.rewritten ? remoteUrlRewriteNotice(logicalUrl, rewrite.url) : undefined;
 		params.url = rewrite.url;
 

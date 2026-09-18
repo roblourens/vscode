@@ -260,8 +260,14 @@ export interface IBrowserViewWorkbenchCreateOptions {
 export interface IBrowserViewWorkbenchService {
 	readonly _serviceBrand: undefined;
 
-	/** Returns true if the remote proxy is enabled; i.e. we are in a remote workspace and the setting is enabled. */
-	willUseRemoteProxy(): boolean;
+	/**
+	 * Returns true if the remote proxy is enabled for this window or, when
+	 * {@link sessionId} is given, for that Agents-window chat session.
+	 *
+	 * vscode-remote editor windows use a window-wide proxy. The Agents
+	 * window has no `remoteAuthority` and instead proxies per SSH session.
+	 */
+	willUseRemoteProxy(sessionId?: string): boolean;
 
 	/**
 	 * Set the tunnel-proxy credentials resolved by the window's local node
@@ -270,6 +276,13 @@ export interface IBrowserViewWorkbenchService {
 	 * process so this window's remote browser views (re)apply the proxy.
 	 */
 	setRemoteProxyInfo(info: ITunnelProxyInfo | undefined): void;
+
+	/**
+	 * Set (or clear) the tunnel-proxy credentials for one Agents-window chat
+	 * session. Awaited so the main process has applied them before a browser
+	 * view for that session is created and navigates.
+	 */
+	setSessionRemoteProxyInfo(sessionId: string, info: ITunnelProxyInfo | undefined): Promise<void>;
 
 	/**
 	 * Fires when the set of known browser views changes, or a model is created for an existing input.

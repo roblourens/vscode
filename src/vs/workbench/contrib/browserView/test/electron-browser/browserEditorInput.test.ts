@@ -34,11 +34,13 @@ class TestBrowserViewWorkbenchService implements IBrowserViewWorkbenchService {
 	input: BrowserEditorInput | undefined;
 	lastCreate: { id: string; url: string | undefined; associatedResource: string | undefined } | undefined;
 
-	willUseRemoteProxy(): boolean {
+	willUseRemoteProxy(_sessionId?: string): boolean {
 		return false;
 	}
 
 	setRemoteProxyInfo(_info: ITunnelProxyInfo | undefined): void { }
+
+	async setSessionRemoteProxyInfo(_sessionId: string, _info: ITunnelProxyInfo | undefined): Promise<void> { }
 
 	getKnownBrowserViews(): Map<string, BrowserEditorInput> {
 		return this.known;

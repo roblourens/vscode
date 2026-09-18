@@ -18,6 +18,8 @@ import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
 import { ITelemetryService, TelemetryConfiguration } from '../../telemetry/common/telemetry.js';
+import { ITunnelProxyInfo } from '../../tunnel/common/tunnelProxy.js';
+import { createSshBrowserTunnelProxy } from './sshBrowserTunnelProxy.js';
 import {
 	ISSHRemoteAgentHostMainService,
 	SSHAuthMethod,
@@ -704,6 +706,17 @@ class SSHConnection extends Disposable {
 	}
 }
 
+class SshBrowserProxyHandle extends Disposable {
+	constructor(
+		proxy: { dispose(): void },
+		readonly info: ITunnelProxyInfo,
+		readonly sshClient: SSHClient,
+	) {
+		super();
+		this._register(toDisposable(() => proxy.dispose()));
+	}
+}
+
 export class SSHRemoteAgentHostMainService extends Disposable implements ISSHRemoteAgentHostMainService {
 	declare readonly _serviceBrand: undefined;
 
@@ -772,6 +785,7 @@ export class SSHRemoteAgentHostMainService extends Disposable implements ISSHRem
 	private _hostKeyRequestCounter = 0;
 
 	private readonly _connections = this._register(new DisposableMap<string, SSHConnection>());
+	private readonly _browserProxies = this._register(new DisposableMap<string, SshBrowserProxyHandle>());
 
 	private _nativeRequire: NodeJS.Require | undefined;
 	private readonly _proxies = this._register(new DisposableMap<SSHClient, SSHProxyCommand>());
@@ -1183,10 +1197,53 @@ export class SSHRemoteAgentHostMainService extends Disposable implements ISSHRem
 	async disconnect(host: string): Promise<void> {
 		for (const [key, conn] of this._connections) {
 			if (key === host || conn.connectionId === host) {
+				this._browserProxies.deleteAndDispose(conn.connectionId);
+				this._browserProxies.deleteAndDispose(key);
 				conn.dispose();
 				return;
 			}
 		}
+	}
+
+	async startBrowserProxy(address: string): Promise<ITunnelProxyInfo> {
+		const conn = this._findConnection(address);
+		if (!conn) {
+			this._browserProxies.deleteAndDispose(address);
+			throw new Error(`${LOG_PREFIX} No SSH connection '${address}' for browser proxy`);
+		}
+
+		const existing = this._browserProxies.get(conn.connectionId) ?? this._browserProxies.get(address);
+		if (existing && existing.sshClient === conn.sshClient) {
+			return existing.info;
+		}
+		this._browserProxies.deleteAndDispose(conn.connectionId);
+		this._browserProxies.deleteAndDispose(address);
+
+		this._logService.info(`${LOG_PREFIX} Starting browser tunnel proxy for ${conn.connectionId}`);
+		const { proxy, info } = await createSshBrowserTunnelProxy(conn.sshClient, this._logService);
+		this._browserProxies.set(conn.connectionId, new SshBrowserProxyHandle(proxy, info, conn.sshClient));
+		return info;
+	}
+
+	async stopBrowserProxy(address: string): Promise<void> {
+		const conn = this._findConnection(address);
+		this._browserProxies.deleteAndDispose(address);
+		if (conn) {
+			this._browserProxies.deleteAndDispose(conn.connectionId);
+		}
+	}
+
+	private _findConnection(address: string): SSHConnection | undefined {
+		const byKey = this._connections.get(address);
+		if (byKey) {
+			return byKey;
+		}
+		for (const conn of this._connections.values()) {
+			if (conn.connectionId === address || conn.address === address) {
+				return conn;
+			}
+		}
+		return undefined;
 	}
 
 	async relaySend(connectionId: string, message: string): Promise<void> {

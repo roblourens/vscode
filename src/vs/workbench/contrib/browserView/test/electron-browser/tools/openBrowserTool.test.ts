@@ -34,6 +34,13 @@ function createRemoteExplorerService(localUri: string): IRemoteExplorerService {
 	});
 }
 import { IWorkbenchEnvironmentService } from '../../../../../services/environment/common/environmentService.js';
+import { IAgentHostBrowserProxyService } from '../../../electron-browser/agentHostBrowserProxyService.js';
+
+function nullAgentHostBrowserProxy(): IAgentHostBrowserProxyService {
+	return upcastPartial<IAgentHostBrowserProxyService>({
+		ensureProxyForSession: async () => false,
+	});
+}
 
 suite('OpenBrowserTool', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
@@ -54,6 +61,7 @@ suite('OpenBrowserTool', () => {
 			configService,
 			upcastPartial<ILogService>({}),
 			upcastPartial<IWorkbenchEnvironmentService>({ isSessionsWindow: false }),
+			nullAgentHostBrowserProxy(),
 		);
 
 		const urls = [
@@ -85,6 +93,7 @@ suite('OpenBrowserTool', () => {
 		let createOptions: IBrowserViewWorkbenchCreateOptions | undefined;
 		let editorOpenOptions: IBrowserViewEditorOpenOptions | undefined;
 		let summaryArguments: readonly [string, string, string, number] | undefined;
+		const proxiedSessions: string[] = [];
 		const input = upcastPartial<BrowserEditorInput>({ id: 'page-id' });
 		const tool = new OpenBrowserTool(
 			upcastPartial<IPlaywrightService>({
@@ -110,6 +119,12 @@ suite('OpenBrowserTool', () => {
 			new TestConfigurationService(),
 			upcastPartial<ILogService>({}),
 			upcastPartial<IWorkbenchEnvironmentService>({ isSessionsWindow: true }),
+			upcastPartial<IAgentHostBrowserProxyService>({
+				ensureProxyForSession: async sessionResource => {
+					proxiedSessions.push(sessionResource?.toString() ?? '<none>');
+					return false;
+				},
+			}),
 		);
 
 		await tool.invoke(
@@ -122,7 +137,7 @@ suite('OpenBrowserTool', () => {
 			CancellationToken.None
 		);
 
-		assert.deepStrictEqual({ createOptions, editorOpenOptions, summaryArguments }, {
+		assert.deepStrictEqual({ createOptions, editorOpenOptions, summaryArguments, proxiedSessions }, {
 			createOptions: {
 				owner: { type: 'agent', sessionId: 'chat:session' },
 				initialAudiences: [{ type: 'agent' }],
@@ -134,7 +149,8 @@ suite('OpenBrowserTool', () => {
 				openSource: 'cdpCreated'
 			},
 			editorOpenOptions: { preserveFocus: true },
-			summaryArguments: ['chat:session', 'page-id', 'https://example.com', 5000]
+			summaryArguments: ['chat:session', 'page-id', 'https://example.com', 5000],
+			proxiedSessions: ['chat:session'],
 		});
 	});
 
@@ -163,6 +179,7 @@ suite('OpenBrowserTool', () => {
 			configService,
 			upcastPartial<ILogService>({}),
 			upcastPartial<IWorkbenchEnvironmentService>({ isSessionsWindow: true }),
+			nullAgentHostBrowserProxy(),
 		);
 		const parameters = { url: 'http://localhost:3000/private', forceNew: true };
 
@@ -214,6 +231,7 @@ suite('OpenBrowserTool', () => {
 			new TestConfigurationService(),
 			upcastPartial<ILogService>({}),
 			upcastPartial<IWorkbenchEnvironmentService>({ isSessionsWindow: true }),
+			nullAgentHostBrowserProxy(),
 		);
 		const parameters = { url: 'https://example.com/private' };
 
