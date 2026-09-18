@@ -6,18 +6,20 @@
 import { Raw } from '@vscode/prompt-tsx';
 import { describe, expect, test } from 'vitest';
 import type * as vscode from 'vscode';
+import { URI } from 'vscode-uri';
 import { IChatHookService, type IPreToolUseHookResult } from '../../../../../platform/chat/common/chatHookService';
 import { ConfigKey, IConfigurationService } from '../../../../../platform/configuration/common/configurationService';
 import { IEndpointProvider } from '../../../../../platform/endpoint/common/endpointProvider';
 import type { IChatEndpoint } from '../../../../../platform/networking/common/networking';
+import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry';
+import { SpyingTelemetryService } from '../../../../../platform/telemetry/node/spyingTelemetryService';
+import { SpyChatResponseStream } from '../../../../../util/common/test/mockChatResponseStream';
 import { DeferredPromise } from '../../../../../util/vs/base/common/async';
 import { CancellationToken } from '../../../../../util/vs/base/common/cancellation';
 import { Event } from '../../../../../util/vs/base/common/event';
 import { constObservable } from '../../../../../util/vs/base/common/observable';
 import { IInstantiationService } from '../../../../../util/vs/platform/instantiation/common/instantiation';
-import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry';
-import { SpyingTelemetryService } from '../../../../../platform/telemetry/node/spyingTelemetryService';
-import { LanguageModelDataPart, LanguageModelTextPart, LanguageModelToolResult } from '../../../../../vscodeTypes';
+import { ChatResponseWarningPart, LanguageModelDataPart, LanguageModelTextPart, LanguageModelToolResult } from '../../../../../vscodeTypes';
 import { ChatVariablesCollection } from '../../../../prompt/common/chatVariablesCollection';
 import type { Conversation } from '../../../../prompt/common/conversation';
 import type { IBuildPromptContext, IToolCallRound } from '../../../../prompt/common/intents';
@@ -26,7 +28,6 @@ import { ToolName } from '../../../../tools/common/toolNames';
 import { IToolsService, type IToolValidationResult } from '../../../../tools/common/toolsService';
 import { renderPromptElement } from '../../base/promptRenderer';
 import { ChatToolCalls } from '../toolCalling';
-import { URI } from 'vscode-uri';
 
 class CapturingChatHookService implements IChatHookService {
 	declare readonly _serviceBrand: undefined;
@@ -87,6 +88,7 @@ class CapturingToolsService implements IToolsService {
 	} | undefined;
 
 	public lastToolResult: vscode.LanguageModelToolResult2 | undefined;
+	public readonly invocations: Array<{ name: string; id?: string; input: unknown }> = [];
 
 	constructor(tool: vscode.LanguageModelToolInformation) {
 		this.tools = [tool];
@@ -107,6 +109,7 @@ class CapturingToolsService implements IToolsService {
 		token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelToolResult2> {
 		this.lastInvocation = { name, options, endpointModel: endpoint?.model, token };
+		this.invocations.push({ name, id: options.chatStreamToolCallId, input: options.input });
 		const result = new LanguageModelToolResult([new LanguageModelTextPart('tool-ok')]);
 		this.lastToolResult = result;
 		return result;
@@ -752,5 +755,109 @@ describe('ChatToolCalls (toolCalling.tsx)', () => {
 				tokenCount: expect.any(Number),
 			},
 		});
+	});
+
+	test('refuses the third consecutive identical tool call and surfaces a warning', async () => {
+		const toolName = 'find_tools';
+		const args = JSON.stringify({ query: 'search' });
+		const toolInfo: vscode.LanguageModelToolInformation = {
+			name: toolName,
+			description: 'discover tools',
+			source: undefined,
+			inputSchema: undefined,
+			tags: [],
+		};
+
+		const testingServiceCollection = createExtensionUnitTestingServices();
+		const toolsService = new CapturingToolsService(toolInfo);
+		testingServiceCollection.define(IToolsService, toolsService);
+
+		const accessor = testingServiceCollection.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const endpointProvider = accessor.get(IEndpointProvider);
+		const endpoint = await endpointProvider.getChatEndpoint('copilot-utility');
+		const stream = new SpyChatResponseStream();
+
+		const rounds: IToolCallRound[] = [0, 1, 2].map(i => ({
+			id: `round-${i}`,
+			response: 'calling tool',
+			toolInputRetry: 0,
+			toolCalls: [{ name: toolName, arguments: args, id: `call-${i}` }],
+		}));
+
+		const promptContext: IBuildPromptContext = {
+			query: 'test',
+			history: [],
+			chatVariables: new ChatVariablesCollection(),
+			conversation: { sessionId: 'session-loop' } as unknown as Conversation,
+			request: {} as vscode.ChatRequest,
+			stream,
+			tools: {
+				toolReferences: [],
+				toolInvocationToken: {} as vscode.ChatParticipantToolToken,
+				availableTools: [toolInfo],
+			},
+		};
+
+		const { messages } = await renderPromptElement(instantiationService, endpoint, ChatToolCalls, {
+			promptContext,
+			toolCallRounds: rounds,
+			toolCallResults: undefined,
+		});
+
+		expect(toolsService.invocations).toHaveLength(2);
+		expect(JSON.stringify(messages)).toContain('was not executed because it was already called');
+		const warnings = stream.items.filter((part): part is ChatResponseWarningPart => part instanceof ChatResponseWarningPart);
+		expect(warnings.length).toBeGreaterThan(0);
+		expect(warnings[0].value.value).toContain('find_tools');
+	});
+
+	test('executes identical calls that are not consecutive', async () => {
+		const toolName = 'find_tools';
+		const args = JSON.stringify({ query: 'search' });
+		const otherArgs = JSON.stringify({ query: 'other' });
+		const toolInfo: vscode.LanguageModelToolInformation = {
+			name: toolName,
+			description: 'discover tools',
+			source: undefined,
+			inputSchema: undefined,
+			tags: [],
+		};
+
+		const testingServiceCollection = createExtensionUnitTestingServices();
+		const toolsService = new CapturingToolsService(toolInfo);
+		testingServiceCollection.define(IToolsService, toolsService);
+
+		const accessor = testingServiceCollection.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const endpointProvider = accessor.get(IEndpointProvider);
+		const endpoint = await endpointProvider.getChatEndpoint('copilot-utility');
+
+		const rounds: IToolCallRound[] = [
+			{ id: 'r0', response: '', toolInputRetry: 0, toolCalls: [{ name: toolName, arguments: args, id: 'c0' }] },
+			{ id: 'r1', response: '', toolInputRetry: 0, toolCalls: [{ name: toolName, arguments: otherArgs, id: 'c1' }] },
+			{ id: 'r2', response: '', toolInputRetry: 0, toolCalls: [{ name: toolName, arguments: args, id: 'c2' }] },
+		];
+
+		const promptContext: IBuildPromptContext = {
+			query: 'test',
+			history: [],
+			chatVariables: new ChatVariablesCollection(),
+			conversation: { sessionId: 'session-ok' } as unknown as Conversation,
+			request: {} as vscode.ChatRequest,
+			tools: {
+				toolReferences: [],
+				toolInvocationToken: {} as vscode.ChatParticipantToolToken,
+				availableTools: [toolInfo],
+			},
+		};
+
+		await renderPromptElement(instantiationService, endpoint, ChatToolCalls, {
+			promptContext,
+			toolCallRounds: rounds,
+			toolCallResults: undefined,
+		});
+
+		expect(toolsService.invocations).toHaveLength(3);
 	});
 });

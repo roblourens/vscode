@@ -54,6 +54,7 @@ import { PseudoStopStartResponseProcessor } from '../../prompt/node/pseudoStartS
 import { ResponseProcessorContext } from '../../prompt/node/responseProcessorContext';
 import { SummarizedConversationHistoryMetadata } from '../../prompts/node/agent/summarizedConversationHistory';
 import { ToolFailureEncountered, ToolResultMetadata } from '../../prompts/node/panel/toolCalling';
+import { isIdenticalToolCallLoop } from '../../tools/common/identicalToolCall';
 import { getToolName, ToolName } from '../../tools/common/toolNames';
 import { IToolsService, ToolCallCancelledError } from '../../tools/common/toolsService';
 import { ReadFileParams } from '../../tools/node/readFileTool';
@@ -1445,8 +1446,11 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 			if (lastResult && i++ >= this.options.toolCallLimit) {
 				// In Autopilot mode, silently increase the limit and continue
 				// without showing the confirmation dialog, up to a hard cap.
+				// Do not extend (or prompt to extend) when the spent budget was
+				// an identical-tool-call loop — that would reset the circuit
+				// breaker and keep executing the same call.
 				const permLevel = this.options.request.permissionLevel;
-				if (permLevel === 'autopilot' && this.options.toolCallLimit < 200) {
+				if (permLevel === 'autopilot' && this.options.toolCallLimit < 200 && !isIdenticalToolCallLoop(this.toolCallRounds)) {
 					this.options.toolCallLimit = Math.min(Math.round(this.options.toolCallLimit * 3 / 2), 200);
 					this.showAutopilotProgress(outputStream, l10n.t('Autopilot: extending tool call limit\u2026'), l10n.t('Autopilot extended tool call limit'));
 				} else {
@@ -1690,6 +1694,19 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 	}
 
 	private hitToolCallLimit(stream: ChatResponseStream | undefined, lastResult: IToolCallSingleResult) {
+		if (isIdenticalToolCallLoop(this.toolCallRounds)) {
+			this._logService.warn('[ToolCallingLoop] Stopping: identical tool-call loop exhausted the request budget');
+			stream?.warning(l10n.t('Copilot stopped because it repeatedly called the same tool with the same arguments. Send a new message to continue.'));
+			lastResult.chatResult = {
+				...lastResult.chatResult,
+				metadata: {
+					...lastResult.chatResult?.metadata,
+					identicalToolCallLoop: true,
+				} satisfies Partial<IResultMetadata>,
+			};
+			return lastResult;
+		}
+
 		if (stream && this.options.onHitToolCallLimit === ToolCallLimitBehavior.Confirm) {
 			const messageString = new MarkdownString(l10n.t({
 				message: 'Copilot has been working on this problem for a while. It can continue to iterate, or you can send a new message to refine your prompt. [Configure max requests]({0}).',

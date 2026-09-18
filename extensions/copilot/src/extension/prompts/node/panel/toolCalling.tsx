@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { RequestMetadata, RequestType } from '@vscode/copilot-api';
+import * as l10n from '@vscode/l10n';
 import { AssistantMessage, BasePromptElementProps, Chunk, IfEmpty, Image, JSONTree, PromptElement, PromptElementProps, PromptMetadata, PromptPiece, PromptSizing, TokenLimit, ToolCall, ToolMessage, useKeepWith, UserMessage } from '@vscode/prompt-tsx';
 import type { ChatParticipantToolToken, LanguageModelToolInvocationOptions, LanguageModelToolResult2, LanguageModelToolTokenizationOptions } from 'vscode';
 import { IAuthenticationService } from '../../../../platform/authentication/common/authentication';
@@ -36,6 +37,7 @@ import { LanguageModelDataPart, LanguageModelDataPart2, LanguageModelPartAudienc
 import { isImageDataPart } from '../../../conversation/common/languageModelChatMessageHelpers';
 import { IResultMetadata } from '../../../prompt/common/conversation';
 import { getSubAgentInvocationId, IBuildPromptContext, IToolCall, IToolCallRound } from '../../../prompt/common/intents';
+import { identicalToolCallRefusalMessage, shouldRefuseIdenticalToolCall } from '../../../tools/common/identicalToolCall';
 import { toJsonSchema } from '../../../tools/common/toJsonSchema';
 import { ToolName } from '../../../tools/common/toolNames';
 import { CopilotToolMode } from '../../../tools/common/toolsRegistry';
@@ -159,6 +161,7 @@ export class ChatToolCalls extends PromptElement<ChatToolCallsProps, void> {
 		// Each tool 'reserves' 1/(N*4) of the available space just so that newer tool calls don't completely elimate
 		// older tool calls.
 		const reserve1N = (1 / (total * 4)) / fixedNameToolCalls.length;
+		const precedingFromPriorRounds = (this.props.toolCallRounds ?? []).slice(0, index).flatMap(r => r.toolCalls);
 		// todo@connor4312: historical tool calls don't need to reserve and can all be flexed together
 		for (const [i, toolCall] of fixedNameToolCalls.entries()) {
 			const KeepWith = assistantToolCalls[i].keepWith;
@@ -181,6 +184,7 @@ export class ChatToolCalls extends PromptElement<ChatToolCallsProps, void> {
 						stripImages: !!this.props.isHistorical,
 						sharedImageBudget,
 						token: token ?? CancellationToken.None,
+						precedingToolCalls: [...precedingFromPriorRounds, ...fixedNameToolCalls.slice(0, i)],
 					})}
 				</KeepWith>,
 			);
@@ -225,6 +229,8 @@ interface ToolResultOpts {
 	readonly stripImages?: boolean;
 	readonly sharedImageBudget?: SharedImageBudget;
 	readonly token: CancellationToken;
+	/** Prior tool calls in this turn, used to refuse consecutive identical invocations. */
+	readonly precedingToolCalls: readonly IToolCall[];
 }
 
 const toolErrorSuffix = '\nPlease check your input and try again.';
@@ -279,6 +285,12 @@ function buildToolResultElement(accessor: ServicesAccessor, props: ToolResultOpt
 			}
 
 			let outcome: ToolInvocationOutcome = toolResult === undefined ? ToolInvocationOutcome.Success : ToolInvocationOutcome.InvalidInput;
+			if (toolResult === undefined && shouldRefuseIdenticalToolCall(props.precedingToolCalls, props.toolCall)) {
+				outcome = ToolInvocationOutcome.Repeated;
+				toolResult = textToolResult(identicalToolCallRefusalMessage(props.toolCall.name));
+				logService.warn(`[ToolCalling] Refused identical consecutive ${props.toolCall.name} call ${props.toolCall.id}`);
+				promptContext.stream?.warning(l10n.t('Copilot blocked a repeated {0} call with the same arguments.', props.toolCall.name));
+			}
 			if (toolResult === undefined) {
 				try {
 					if (promptContext.tools && !promptContext.tools.availableTools.find(t => t.name === props.toolCall.name)) {
@@ -412,7 +424,7 @@ async function sendToolCallTelemetry(props: ToolResultOpts, promptContext: IBuil
 			"owner": "donjayamanne",
 			"comment": "Details about invocation of tools",
 			"validateOutcome": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "The outcome of the tool input validation. valid, invalid and unknown" },
-			"invokeOutcome": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "The outcome of the tool Invokcation. invalidInput, disabledByUser, success, error, cancelled" },
+			"invokeOutcome": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "The outcome of the tool Invokcation. invalidInput, disabledByUser, success, error, cancelled, repeated" },
 			"toolName": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "The name of the tool being invoked." },
 			"model": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "The model that invoked the tool" }
 		}
@@ -560,6 +572,7 @@ enum ToolInvocationOutcome {
 	Success = 'success',
 	Error = 'error',
 	Cancelled = 'cancelled',
+	Repeated = 'repeated',
 }
 
 export async function imageDataPartToTSX(part: LanguageModelDataPart, githubToken?: string, urlOrRequestMetadata?: string | RequestMetadata, logService?: ILogService, imageService?: IImageService) {

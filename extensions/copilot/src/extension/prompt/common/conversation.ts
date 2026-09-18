@@ -386,6 +386,12 @@ export interface IResultMetadata {
 	toolCallResults?: Record<string, LanguageModelToolResult>;
 	maxToolCallsExceeded?: boolean;
 	/**
+	 * True when the request budget was spent on consecutive identical tool
+	 * calls. Distinct from {@link maxToolCallsExceeded}: this must not offer
+	 * a "Continue to iterate?" budget reset.
+	 */
+	identicalToolCallLoop?: boolean;
+	/**
 	 * @deprecated Use `summaries` instead. Kept for backward compatibility with
 	 * persisted messages that were saved before `summaries` was introduced.
 	 * `normalizeSummariesOnRounds` falls back to this field when `summaries` is absent.
