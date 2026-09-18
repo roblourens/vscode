@@ -39,6 +39,7 @@ import type { ChatInputRequestWithPlanReview, IAgentHostPlanReviewAction } from 
 import { ChatInputRequestPurpose, withChatInputRequestPurpose } from '../../common/meta/agentChatInputRequestMeta.js';
 import { AgentSystemNotificationKind, toAgentSystemNotificationMeta } from '../../common/meta/agentSystemNotificationMeta.js';
 import { gitHubMcpServerUrl } from '../../common/githubEndpoints.js';
+import { allowsManagedBypass, managedBypassState, MANAGED_PERMISSION_RESOLUTION_TIMEOUT_MS, projectCopilotPermissionPolicy } from '../sessionManagedPermissions.js';
 import { getSessionSandboxOverrides } from '../sessionSandbox.js';
 import { AgentHostSandboxConfigKey, sandboxConfigSchema } from '../../common/sandboxConfigSchema.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostGlobalAutoApproveEnabledConfigKey, AgentHostAutoReplyAnswer, AgentHostAutoReplyEnabledConfigKey, AgentHostDisableRepoInfoTelemetryConfigKey, platformRootSchema, platformSessionSchema } from '../../common/agentHostSchema.js';
@@ -1081,6 +1082,8 @@ export class CopilotAgentSession extends Disposable {
 	private _lastAppliedMode: CopilotSdkMode | undefined;
 	private _lastAppliedPermissionMode: PermissionMode | undefined;
 	private _experimentalModeEnabled = false;
+	private _runtimeRejectedBypass = false;
+	private readonly _managedSettingsResolved = new DeferredPromise<void>();
 	private readonly _permissionModeSequencer = new Sequencer();
 	private readonly _sandboxConfigSequencer = new Sequencer();
 	private readonly _mcpEnablementSequencer = new Sequencer();
@@ -2491,6 +2494,7 @@ export class CopilotAgentSession extends Disposable {
 		this._subscribeForMemoInvalidation();
 		this._subscribeForInstructionsCollectedTelemetry();
 		this._subscribeToPermissionConfigChanges();
+		this._completeManagedSettingsBarrierIfResolved();
 		await this._syncShellInitScript();
 		this._promptCacheState = this._promptCache.read(this.resourceUri);
 		if (this._launchPlan.kind === 'resume') {
@@ -4277,8 +4281,41 @@ export class CopilotAgentSession extends Disposable {
 		return this._configurationService.getEffectiveValue(this._ownerSessionUri.toString(), platformSessionSchema, SessionConfigKey.AutoApprove) === 'autoApprove';
 	}
 
+	private _getManagedPermissionPolicy() {
+		return this._configurationService.getSessionManagedPermissionPolicy(this._ownerSessionUri.toString());
+	}
+
+	private _allowsManagedBypass(): boolean {
+		return allowsManagedBypass(this._getManagedPermissionPolicy()) && !this._runtimeRejectedBypass;
+	}
+
+	private _completeManagedSettingsBarrierIfResolved(): void {
+		if (this._getManagedPermissionPolicy()?.resolved && !this._managedSettingsResolved.isSettled) {
+			this._managedSettingsResolved.complete();
+		}
+	}
+
+	private _applyManagedPermissionPolicy(policy: ReturnType<typeof projectCopilotPermissionPolicy>): void {
+		this._runtimeRejectedBypass = false;
+		this._configurationService.setSessionManagedPermissionPolicy(this._ownerSessionUri.toString(), policy);
+		this._completeManagedSettingsBarrierIfResolved();
+	}
+
+	private async _awaitManagedBypassIfNeeded(): Promise<void> {
+		if (!this._isBypassApprovals() || this._allowsManagedBypass() || this._getManagedPermissionPolicy()?.resolved) {
+			return;
+		}
+		this._logService.info(`[Copilot:${this.sessionId}] Waiting for managed settings before requesting allow-all`);
+		await raceTimeout(this._managedSettingsResolved.p, MANAGED_PERMISSION_RESOLUTION_TIMEOUT_MS, () => {
+			this._logService.error(`[Copilot:${this.sessionId}] Copilot runtime did not report its resolved managed settings before turn start; not requesting allow-all`);
+		});
+	}
+
 	private _getSdkPermissionMode(): PermissionMode {
 		if (this._isBypassApprovals()) {
+			if (!this._allowsManagedBypass()) {
+				return 'manual';
+			}
 			return 'allow-all';
 		}
 		return this._getConfiguredApprovalLevel() === 'assisted'
@@ -4369,9 +4406,12 @@ export class CopilotAgentSession extends Disposable {
 
 	syncPermissionMode(source: 'config-change' | 'turn-start'): Promise<void> {
 		return this._permissionModeSequencer.queue(async () => {
+			if (source === 'turn-start') {
+				await this._awaitManagedBypassIfNeeded();
+			}
 			const mode = this._getSdkPermissionMode();
 			const configuredLevel = this._getConfiguredApprovalLevel();
-			this._logService.info(`[Copilot:${this.sessionId}] Syncing permission mode: source=${source}, agentMode=${this._getConfiguredAgentMode()}, configuredLevel=${configuredLevel}, sdkMode=${mode}, previousSdkMode=${this._lastAppliedPermissionMode ?? 'unknown'}, globalAutoApprove=${this._configurationService.getRootValue(platformRootSchema, AgentHostGlobalAutoApproveEnabledConfigKey) === true}`);
+			this._logService.info(`[Copilot:${this.sessionId}] Syncing permission mode: source=${source}, agentMode=${this._getConfiguredAgentMode()}, configuredLevel=${configuredLevel}, sdkMode=${mode}, previousSdkMode=${this._lastAppliedPermissionMode ?? 'unknown'}, globalAutoApprove=${this._configurationService.getRootValue(platformRootSchema, AgentHostGlobalAutoApproveEnabledConfigKey) === true}, managedBypass=${managedBypassState(this._getManagedPermissionPolicy())}`);
 			const experimentalModeEnabled = mode === 'assisted' || this._isHydraFusionEnabled();
 			if (this._experimentalModeEnabled !== experimentalModeEnabled) {
 				const experimentalResult = await this._wrapper.session.rpc.options.update({ isExperimentalMode: experimentalModeEnabled });
@@ -4386,6 +4426,18 @@ export class CopilotAgentSession extends Disposable {
 			}
 			const result = await this._wrapper.session.rpc.permissions.setMode({ mode });
 			if (!result.success || (result.mode !== undefined && result.mode !== mode)) {
+				if (mode === 'allow-all') {
+					this._runtimeRejectedBypass = true;
+					this._logService.warn(`[Copilot:${this.sessionId}] Copilot SDK rejected permission mode 'allow-all'; clamping to a non-bypass mode`);
+					const fallback = this._getSdkPermissionMode();
+					if (fallback !== 'allow-all') {
+						const retry = await this._wrapper.session.rpc.permissions.setMode({ mode: fallback });
+						if (retry.success && (retry.mode === undefined || retry.mode === fallback)) {
+							this._lastAppliedPermissionMode = fallback;
+							return;
+						}
+					}
+				}
 				throw new Error(`Copilot SDK rejected permission mode '${mode}'`);
 			}
 			this._lastAppliedPermissionMode = mode;
@@ -6824,10 +6876,27 @@ export class CopilotAgentSession extends Disposable {
 
 		this._register(wrapper.onManagedSettingsResolved(e => {
 			this._logService.info(`[Copilot:${sessionId}] Managed settings resolved: source=${e.data.source}, managedKeys=${e.data.managedKeys.join(',') || '(none)'}, bypassPermissionsDisabled=${e.data.bypassPermissionsDisabled}, failClosed=${e.data.failClosed}`);
+			this._applyManagedPermissionPolicy(projectCopilotPermissionPolicy(e.data));
+			if (this.hasActiveTurn) {
+				void this._syncPermissionModeAfterConfigChange();
+			}
 		}));
 
 		this._register(wrapper.onManagedSettingsEnforced(e => {
 			this._logService.warn(`[Copilot:${sessionId}] Managed settings enforced: action=${e.data.action}, setting=${e.data.setting}, escalation=${e.data.escalation ?? '(none)'}, failClosed=${e.data.failClosed}, message=${e.data.message}`);
+			if (e.data.action === 'bypass_permissions_blocked' && e.data.setting !== 'sandbox.enabled') {
+				this._runtimeRejectedBypass = true;
+				const current = this._getManagedPermissionPolicy();
+				this._configurationService.setSessionManagedPermissionPolicy(this._ownerSessionUri.toString(), {
+					resolved: true,
+					failClosed: e.data.failClosed === true || current?.failClosed === true,
+					bypassPermissionsDisabled: true,
+				});
+				this._completeManagedSettingsBarrierIfResolved();
+				if (this.hasActiveTurn) {
+					void this._syncPermissionModeAfterConfigChange();
+				}
+			}
 		}));
 
 		this._register(wrapper.onSessionHandoff(e => {

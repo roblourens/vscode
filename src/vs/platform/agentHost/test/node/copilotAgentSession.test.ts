@@ -18,6 +18,7 @@ import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { join, sep } from '../../../../base/common/path.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { runWithFakedTimers } from '../../../../base/test/common/timeTravelScheduler.js';
 import { INativeEnvironmentService } from '../../../environment/common/environment.js';
 import { FileSystemProviderCapabilities, IFileService, type IWriteFileOptions } from '../../../files/common/files.js';
 import { InstantiationService } from '../../../instantiation/common/instantiationService.js';
@@ -68,6 +69,7 @@ import { IAgentHostTerminalManager } from '../../node/agentHostTerminalManager.j
 import { TestAgentHostTerminalManager } from './testAgentHostTerminalManager.js';
 import { buildCopilotSystemNotification } from '../../node/copilot/copilotSystemNotification.js';
 import { IAgentConfigurationService } from '../../node/agentConfigurationService.js';
+import { allowsManagedBypass, MANAGED_PERMISSION_RESOLUTION_TIMEOUT_MS, type ISessionManagedPermissionPolicy } from '../../node/sessionManagedPermissions.js';
 import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostAutoReplyEnabledConfigKey, AgentHostDisableRepoInfoTelemetryConfigKey, AgentHostGlobalAutoApproveEnabledConfigKey } from '../../common/agentHostSchema.js';
 import { CopilotCliConfigKey } from '../../common/copilotCliConfig.js';
@@ -113,6 +115,7 @@ class MockCopilotSession {
 	readonly modeSetCalls: Array<{ mode: 'interactive' | 'plan' | 'autopilot' }> = [];
 	readonly permissionModeSetCalls: PermissionMode[] = [];
 	permissionModeSetSuccess = true;
+	readonly permissionModeRejectModes = new Set<PermissionMode>();
 	readonly gitHubCredentialUpdates: Array<{ credentials?: { type: 'token'; host: string; token: string } }> = [];
 	gitHubCredentialUpdateResult = { success: true, copilotUserResolved: true };
 	gitHubCredentialUpdateError: Error | undefined;
@@ -369,7 +372,8 @@ class MockCopilotSession {
 				const mode = params.mode ?? 'manual';
 				this.operationLog.push('permissions.setMode');
 				this.permissionModeSetCalls.push(mode);
-				return { success: this.permissionModeSetSuccess, enabled: mode === 'allow-all', mode };
+				const success = this.permissionModeSetSuccess && !this.permissionModeRejectModes.has(mode);
+				return { success, enabled: mode === 'allow-all', mode };
 			},
 		},
 		eventLog: {
@@ -853,6 +857,8 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	initializeEnablementSession?: (session: string) => Promise<void>;
 	beforeLaunch?: () => void;
 	realpath?: (path: string) => Promise<string>;
+	/** When false, the helper does not emit a permissive managed-settings snapshot after initialize. */
+	emitManagedSettingsResolved?: boolean;
 }): Promise<{
 	session: CopilotAgentSession;
 	runtime: TestCopilotSessionRuntime;
@@ -1009,6 +1015,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	const sessionConfigUpdates: Array<{ session: string; patch: Record<string, unknown> }> = [];
 	const configValues = options?.configValues ?? {};
 	const rootValues = options?.rootValues ?? {};
+	const managedPermissionPolicies = new Map<string, ISessionManagedPermissionPolicy>();
 	const rootConfigEmitter = disposables.add(new Emitter<void>());
 	const sessionConfigEmitter = disposables.add(new Emitter<{ session: string; config: Record<string, unknown>; origin: { clientId: string; clientSeq: number } | undefined }>());
 	const customizationEnablementEmitter = disposables.add(new Emitter<{ sessions: readonly string[] }>());
@@ -1030,6 +1037,15 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 		getSessionConfigValues: (session: string) => session === sessionUri.toString() ? configValues : undefined,
 		getSessionSandboxPolicy: () => undefined,
 		setSessionSandboxPolicy: () => { },
+		getSessionManagedPermissionPolicy: session => managedPermissionPolicies.get(session),
+		setSessionManagedPermissionPolicy: (session, policy) => {
+			managedPermissionPolicies.set(session, policy);
+			const current = configValues[SessionConfigKey.AutoApprove];
+			if (!allowsManagedBypass(policy) && (current === 'autoApprove' || current === 'autopilot')) {
+				configValues[SessionConfigKey.AutoApprove] = 'default';
+				sessionConfigUpdates.push({ session, patch: { [SessionConfigKey.AutoApprove]: 'default' } });
+			}
+		},
 		updateSessionConfig: (session, patch) => { sessionConfigUpdates.push({ session, patch }); },
 		getRootValue: ((_schema: unknown, key: string) => rootValues[key]) as IAgentConfigurationService['getRootValue'],
 		updateRootConfig: () => { /* no-op */ },
@@ -1149,6 +1165,16 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	));
 
 	await session.initializeSession();
+	if (options?.emitManagedSettingsResolved !== false) {
+		mockSession.fire('session.managed_settings_resolved', {
+			source: 'none',
+			serverManaged: false,
+			deviceManaged: false,
+			failClosed: false,
+			bypassPermissionsDisabled: false,
+			managedKeys: [],
+		} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+	}
 	if (!launchedRuntime) {
 		throw new Error('Expected session runtime');
 	}
@@ -2069,7 +2095,7 @@ suite('CopilotAgentSession', () => {
 
 	test('logs managed settings resolution and enforcement', async () => {
 		const logService = new CapturingLogService();
-		const { mockSession } = await createAgentSession(disposables, { logService });
+		const { mockSession } = await createAgentSession(disposables, { logService, emitManagedSettingsResolved: false });
 
 		mockSession.fire('session.managed_settings_resolved', {
 			source: 'server',
@@ -6066,8 +6092,8 @@ suite('CopilotAgentSession', () => {
 			}, {
 				modes: ['allow-all', 'manual'],
 				logs: [
-					'[Copilot:test-session-1] Syncing permission mode: source=turn-start, agentMode=interactive, configuredLevel=autoApprove, sdkMode=allow-all, previousSdkMode=unknown, globalAutoApprove=false',
-					'[Copilot:test-session-1] Syncing permission mode: source=config-change, agentMode=interactive, configuredLevel=default, sdkMode=manual, previousSdkMode=allow-all, globalAutoApprove=false',
+					'[Copilot:test-session-1] Syncing permission mode: source=turn-start, agentMode=interactive, configuredLevel=autoApprove, sdkMode=allow-all, previousSdkMode=unknown, globalAutoApprove=false, managedBypass=allowed',
+					'[Copilot:test-session-1] Syncing permission mode: source=config-change, agentMode=interactive, configuredLevel=default, sdkMode=manual, previousSdkMode=allow-all, globalAutoApprove=false, managedBypass=allowed',
 				],
 			});
 		});
@@ -6393,6 +6419,151 @@ suite('CopilotAgentSession', () => {
 			await assert.rejects(() => session.send('hello', undefined, 'turn-1'), /rejected permission mode 'assisted'/);
 
 			assert.deepStrictEqual(mockSession.sendRequests, []);
+		});
+
+		test('does not request allow-all until managed settings resolve and permit bypass', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+				emitManagedSettingsResolved: false,
+			});
+
+			const sendPromise = session.send('hello', undefined, 'turn-1');
+			await timeout(0);
+			assert.deepStrictEqual(mockSession.permissionModeSetCalls, []);
+			mockSession.fire('session.managed_settings_resolved', {
+				source: 'none',
+				serverManaged: false,
+				deviceManaged: false,
+				failClosed: false,
+				bypassPermissionsDisabled: false,
+				managedKeys: [],
+			} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+			await sendPromise;
+
+			assert.deepStrictEqual(mockSession.permissionModeSetCalls, ['allow-all']);
+			assert.strictEqual(mockSession.sendRequests.length, 1);
+		});
+
+		test('clamps allow-all to manual when managed settings disable bypass', async () => {
+			const { session, mockSession, sessionConfigUpdates } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+				emitManagedSettingsResolved: false,
+			});
+			mockSession.fire('session.managed_settings_resolved', {
+				source: 'server',
+				serverManaged: true,
+				deviceManaged: false,
+				failClosed: false,
+				bypassPermissionsDisabled: true,
+				managedKeys: ['permissions'],
+			} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+
+			await session.send('hello', undefined, 'turn-1');
+
+			assert.deepStrictEqual({
+				permissionModes: mockSession.permissionModeSetCalls,
+				sends: mockSession.sendRequests.length,
+				clampedAutoApprove: sessionConfigUpdates.some(update => update.patch[SessionConfigKey.AutoApprove] === 'default'),
+			}, {
+				permissionModes: ['manual'],
+				sends: 1,
+				clampedAutoApprove: true,
+			});
+		});
+
+		test('clamps allow-all when managed settings resolve fail-closed', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+				emitManagedSettingsResolved: false,
+			});
+			mockSession.fire('session.managed_settings_resolved', {
+				source: 'none',
+				serverManaged: false,
+				deviceManaged: false,
+				failClosed: true,
+				bypassPermissionsDisabled: true,
+				managedKeys: [],
+			} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+
+			await session.send('hello', undefined, 'turn-1');
+
+			assert.deepStrictEqual(mockSession.permissionModeSetCalls, ['manual']);
+			assert.strictEqual(mockSession.sendRequests.length, 1);
+		});
+
+		test('keeps assisted approval when managed settings only disable bypass', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'assisted' },
+				emitManagedSettingsResolved: false,
+			});
+			mockSession.fire('session.managed_settings_resolved', {
+				source: 'server',
+				serverManaged: true,
+				deviceManaged: false,
+				failClosed: false,
+				bypassPermissionsDisabled: true,
+				managedKeys: ['permissions'],
+			} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+
+			await session.send('hello', undefined, 'turn-1');
+
+			assert.deepStrictEqual(mockSession.permissionModeSetCalls, ['assisted']);
+		});
+
+		test('clamps global bypass when managed settings disable bypass', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				rootValues: { [AgentHostGlobalAutoApproveEnabledConfigKey]: true },
+				emitManagedSettingsResolved: false,
+			});
+			mockSession.fire('session.managed_settings_resolved', {
+				source: 'server',
+				serverManaged: true,
+				deviceManaged: false,
+				failClosed: false,
+				bypassPermissionsDisabled: true,
+				managedKeys: ['permissions'],
+			} as SessionEventPayload<'session.managed_settings_resolved'>['data']);
+
+			await session.send('hello', undefined, 'turn-1');
+
+			assert.deepStrictEqual(mockSession.permissionModeSetCalls, ['manual']);
+		});
+
+		test('retries a non-bypass mode when the SDK rejects allow-all', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+			});
+			mockSession.permissionModeRejectModes.add('allow-all');
+
+			await session.send('hello', undefined, 'turn-1');
+
+			assert.deepStrictEqual({
+				permissionModes: mockSession.permissionModeSetCalls,
+				sends: mockSession.sendRequests.length,
+			}, {
+				permissionModes: ['allow-all', 'manual'],
+				sends: 1,
+			});
+		});
+
+		test('does not request allow-all when managed settings never resolve', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+				emitManagedSettingsResolved: false,
+			});
+
+			await runWithFakedTimers({ useFakeTimers: true }, async () => {
+				const sendPromise = session.send('hello', undefined, 'turn-1');
+				await timeout(MANAGED_PERMISSION_RESOLUTION_TIMEOUT_MS);
+				await sendPromise;
+				assert.deepStrictEqual({
+					permissionModes: mockSession.permissionModeSetCalls,
+					sends: mockSession.sendRequests.length,
+				}, {
+					permissionModes: ['manual'],
+					sends: 1,
+				});
+			});
 		});
 
 		test('defers an idle session approval change until the next turn', async () => {

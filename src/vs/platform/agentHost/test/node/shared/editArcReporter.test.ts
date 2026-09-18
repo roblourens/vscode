@@ -487,6 +487,8 @@ function createConfigurationService(enabled: boolean, disposables: DisposableSto
 		getSessionConfigValues: () => undefined,
 		getSessionSandboxPolicy: () => undefined,
 		setSessionSandboxPolicy: () => { },
+		getSessionManagedPermissionPolicy: () => undefined,
+		setSessionManagedPermissionPolicy: () => { },
 		getRootValue: (schema, key) => schema.validate(key, enabled) ? enabled : undefined,
 		updateRootConfig: () => { },
 		persistRootConfig: () => { },

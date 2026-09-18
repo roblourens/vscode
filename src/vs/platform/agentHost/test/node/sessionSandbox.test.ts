@@ -15,6 +15,7 @@ import { ActionType } from '../../common/state/sessionActions.js';
 import { AgentConfigurationService } from '../../node/agentConfigurationService.js';
 import { AgentHostStateManager } from '../../node/agentHostStateManager.js';
 import { projectCopilotSandboxPolicy } from '../../node/copilot/copilotSandboxPolicy.js';
+import { allowsManagedBypass, projectCopilotPermissionPolicy } from '../../node/sessionManagedPermissions.js';
 import { buildSandboxConfigForSdk } from '../../node/copilot/sandboxConfigForSdk.js';
 import { getSessionSandboxOverrides } from '../../node/sessionSandbox.js';
 import { SessionPermissionManager } from '../../node/sessionPermissions.js';
@@ -233,5 +234,29 @@ suite('Session sandbox configuration', () => {
 			state: { status: ToolCallStatus.PendingConfirmation, toolCallId: 'tool', toolName: 'bash', displayName: 'Bash', invocationMessage: 'run', confirmationTitle: 'Outside sandbox?' },
 		}, owner, 'turn');
 		assert.deepStrictEqual(ready.options?.map(option => option.id), ['allow-once', 'skip']);
+	});
+});
+
+suite('Session managed permission policy', () => {
+	test('projects bypass restrictions and fail-closed snapshots', () => {
+		const snapshot = {
+			source: 'server' as const, serverManaged: true, deviceManaged: false,
+			failClosed: false, bypassPermissionsDisabled: false, managedKeys: ['permissions'],
+		};
+		assert.deepStrictEqual({
+			permitted: projectCopilotPermissionPolicy(snapshot),
+			disabled: projectCopilotPermissionPolicy({ ...snapshot, bypassPermissionsDisabled: true }),
+			failClosed: projectCopilotPermissionPolicy({ ...snapshot, failClosed: true }),
+			unresolvedAllowsBypass: allowsManagedBypass(undefined),
+			permittedAllowsBypass: allowsManagedBypass(projectCopilotPermissionPolicy(snapshot)),
+			disabledAllowsBypass: allowsManagedBypass(projectCopilotPermissionPolicy({ ...snapshot, bypassPermissionsDisabled: true })),
+		}, {
+			permitted: { resolved: true, failClosed: false, bypassPermissionsDisabled: false },
+			disabled: { resolved: true, failClosed: false, bypassPermissionsDisabled: true },
+			failClosed: { resolved: true, failClosed: true, bypassPermissionsDisabled: true },
+			unresolvedAllowsBypass: false,
+			permittedAllowsBypass: true,
+			disabledAllowsBypass: false,
+		});
 	});
 });

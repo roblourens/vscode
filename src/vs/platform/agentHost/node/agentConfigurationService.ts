@@ -23,6 +23,7 @@ import { ActionType, type ActionOrigin } from '../common/state/sessionActions.js
 import { isAhpChatChannel, parseSubagentSessionUri, ROOT_STATE_URI, type URI as ProtocolURI } from '../common/state/sessionState.js';
 import { AgentHostStateManager } from './agentHostStateManager.js';
 import { SessionConfigKey } from '../common/sessionConfigKeys.js';
+import { allowsManagedBypass, type ISessionManagedPermissionPolicy } from './sessionManagedPermissions.js';
 import type { ISessionSandboxPolicy } from './sessionSandbox.js';
 
 export const IAgentConfigurationService = createDecorator<IAgentConfigurationService>('agentConfigurationService');
@@ -116,6 +117,10 @@ export interface IAgentConfigurationService {
 	getSessionSandboxPolicy(session: ProtocolURI): ISessionSandboxPolicy | undefined;
 	setSessionSandboxPolicy(session: ProtocolURI, policy: ISessionSandboxPolicy): void;
 
+	/** Runtime-owned bypass boundary; never accepted from client configuration. */
+	getSessionManagedPermissionPolicy(session: ProtocolURI): ISessionManagedPermissionPolicy | undefined;
+	setSessionManagedPermissionPolicy(session: ProtocolURI, policy: ISessionManagedPermissionPolicy): void;
+
 	/**
 	 * Returns the merged config values currently stored on `session`.
 	 *
@@ -163,6 +168,7 @@ export class AgentConfigurationService extends Disposable implements IAgentConfi
 	private _rootConfigWrite = Promise.resolve();
 	private readonly _rootTransientValueKeys = new Set<string>();
 	private readonly _sessionSandboxPolicies = new Map<ProtocolURI, ISessionSandboxPolicy>();
+	private readonly _sessionManagedPermissionPolicies = new Map<ProtocolURI, ISessionManagedPermissionPolicy>();
 
 	private readonly _onDidRootConfigChange = this._register(new Emitter<void>());
 	readonly onDidRootConfigChange: Event<void> = this._onDidRootConfigChange.event;
@@ -194,7 +200,10 @@ export class AgentConfigurationService extends Disposable implements IAgentConfi
 		for (const registration of providerConfigurations) {
 			this.registerProviderConfiguration(registration);
 		}
-		this._register(this._stateManager.onDidRemoveSession(session => this._sessionSandboxPolicies.delete(session)));
+		this._register(this._stateManager.onDidRemoveSession(session => {
+			this._sessionSandboxPolicies.delete(session);
+			this._sessionManagedPermissionPolicies.delete(session);
+		}));
 
 		this._register(this._stateManager.onDidEmitEnvelope(envelope => {
 			if (envelope.action.type === ActionType.RootConfigChanged) {
@@ -256,6 +265,20 @@ export class AgentConfigurationService extends Disposable implements IAgentConfi
 			this.updateSessionConfig(session, { [SessionConfigKey.SandboxEnabled]: 'default' });
 		}
 		this._onDidSessionConfigChange.fire({ session, config: { [SessionConfigKey.SandboxEnabled]: this.getSessionConfigValues(session)?.[SessionConfigKey.SandboxEnabled] }, origin: undefined });
+	}
+
+	getSessionManagedPermissionPolicy(session: ProtocolURI): ISessionManagedPermissionPolicy | undefined {
+		const owner = resolveAgentHostSession(URI.parse(session)).toString();
+		return this._sessionManagedPermissionPolicies.get(owner);
+	}
+
+	setSessionManagedPermissionPolicy(session: ProtocolURI, policy: ISessionManagedPermissionPolicy): void {
+		const owner = resolveAgentHostSession(URI.parse(session)).toString();
+		this._sessionManagedPermissionPolicies.set(owner, policy);
+		const current = this.getSessionConfigValues(owner)?.[SessionConfigKey.AutoApprove];
+		if (!allowsManagedBypass(policy) && (current === 'autoApprove' || current === 'autopilot')) {
+			this.updateSessionConfig(owner, { [SessionConfigKey.AutoApprove]: 'default' });
+		}
 	}
 
 	getSessionConfigValues(session: ProtocolURI): Record<string, unknown> | undefined {

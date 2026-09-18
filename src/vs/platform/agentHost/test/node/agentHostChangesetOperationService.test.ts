@@ -146,6 +146,8 @@ class TestConfigurationService implements IAgentConfigurationService {
 	updateSessionConfig(): void { }
 	getSessionSandboxPolicy(): undefined { return undefined; }
 	setSessionSandboxPolicy(): void { }
+	getSessionManagedPermissionPolicy(): undefined { return undefined; }
+	setSessionManagedPermissionPolicy(): void { }
 
 	getSessionConfigValues(): Record<string, unknown> | undefined {
 		return undefined;

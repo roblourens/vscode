@@ -372,4 +372,44 @@ suite('AgentConfigurationService', () => {
 
 		assert.deepStrictEqual(getAgentCustomizationSettingsEntries(manager.rootState).map(entry => entry.provider), ['valid']);
 	});
+
+	test('clamps Allow All when managed settings disable bypass', () => {
+		const session = URI.from({ scheme: 'copilot', path: '/permissions' }).toString();
+		manager.createSession(makeSummary(session));
+		manager.setSessionConfig(session, {
+			schema: schema.toProtocol(),
+			values: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+		});
+
+		service.setSessionManagedPermissionPolicy(session, {
+			resolved: true,
+			failClosed: false,
+			bypassPermissionsDisabled: true,
+		});
+
+		assert.deepStrictEqual({
+			policy: service.getSessionManagedPermissionPolicy(session),
+			autoApprove: service.getSessionConfigValues(session)?.[SessionConfigKey.AutoApprove],
+		}, {
+			policy: { resolved: true, failClosed: false, bypassPermissionsDisabled: true },
+			autoApprove: 'default',
+		});
+	});
+
+	test('does not clamp assisted approval when managed settings disable bypass', () => {
+		const session = URI.from({ scheme: 'copilot', path: '/assisted' }).toString();
+		manager.createSession(makeSummary(session));
+		manager.setSessionConfig(session, {
+			schema: schema.toProtocol(),
+			values: { [SessionConfigKey.AutoApprove]: 'assisted' },
+		});
+
+		service.setSessionManagedPermissionPolicy(session, {
+			resolved: true,
+			failClosed: false,
+			bypassPermissionsDisabled: true,
+		});
+
+		assert.strictEqual(service.getSessionConfigValues(session)?.[SessionConfigKey.AutoApprove], 'assisted');
+	});
 });

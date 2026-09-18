@@ -21,6 +21,7 @@ import { reasoningEffortLevels, type ReasoningEffortLevel } from '../../common/r
 import { getSessionSandboxOverrides } from '../sessionSandbox.js';
 import { AgentHostSandboxConfigKey, sandboxConfigSchema } from '../../common/sandboxConfigSchema.js';
 import { projectCopilotSandboxPolicy } from './copilotSandboxPolicy.js';
+import { projectCopilotPermissionPolicy } from '../sessionManagedPermissions.js';
 import { autoModeTiers, isAutoModeTier, normalizeAutoModeTier, type AutoModeTier } from '../../common/autoModeTiers.js';
 import { SEMANTIC_SEARCH_TOOL_NAME } from '../../common/semanticSearchConstants.js';
 import type { ModelSelection, ToolDefinition } from '../../common/state/protocol/state.js';
@@ -983,6 +984,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 				const owner = runtime.configurationResource.toString();
 				if (event.type === 'session.managed_settings_resolved' && !event.agentId) {
 					this._configurationService.setSessionSandboxPolicy(owner, projectCopilotSandboxPolicy(event.data));
+					this._configurationService.setSessionManagedPermissionPolicy(owner, projectCopilotPermissionPolicy(event.data));
 					onManagedSettingsResolved();
 				} else if (event.type === 'session.managed_settings_enforced' && event.data.setting === 'sandbox.enabled') {
 					this._configurationService.setSessionSandboxPolicy(owner, { enabled: true, allowBypass: false });

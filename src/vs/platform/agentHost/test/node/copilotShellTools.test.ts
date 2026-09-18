@@ -143,6 +143,8 @@ suite('CopilotShellTools', () => {
 				policies.set(session, policy);
 				sessionEmitter.fire({ session, config: {}, origin: undefined });
 			},
+			getSessionManagedPermissionPolicy: () => undefined,
+			setSessionManagedPermissionPolicy: () => { },
 			updateSessionConfig: (session, config) => {
 				sessionValues.set(session, { ...sessionValues.get(session), ...config });
 				sessionEmitter.fire({ session, config, origin: undefined });

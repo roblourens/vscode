@@ -115,6 +115,8 @@ function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettin
 		getSessionConfigValues: () => undefined,
 		getSessionSandboxPolicy: () => undefined,
 		setSessionSandboxPolicy: () => { },
+		getSessionManagedPermissionPolicy: () => undefined,
+		setSessionManagedPermissionPolicy: () => { },
 	} as Partial<IAgentConfigurationService> as IAgentConfigurationService;
 	return new CopilotSessionLauncher(
 		configurationService,
@@ -137,12 +139,12 @@ function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettin
 suite('CopilotSessionLauncher sandbox policy', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function setup(kind: 'create' | 'resume', reportPolicy = true, enforced = false) {
+	function setup(kind: 'create' | 'resume', reportPolicy = true, enforced = false, bypassDisabled = false) {
 		const manager = store.add(new AgentHostStateManager(new NullLogService()));
 		const configuration = store.add(new AgentConfigurationService(manager, new NullLogService()));
 		const owner = 'copilot:/sess-1';
 		manager.createSession({ resource: owner, provider: 'copilot', title: 'sandbox', status: SessionStatus.Idle, createdAt: '2026-01-01T00:00:00Z', modifiedAt: '2026-01-01T00:00:00Z' });
-		manager.setSessionConfig(owner, { schema: platformSessionSchema.toProtocol(), values: { sandboxEnabled: 'off' } });
+		manager.setSessionConfig(owner, { schema: platformSessionSchema.toProtocol(), values: { sandboxEnabled: 'off', autoApprove: 'autoApprove' } });
 		configuration.updateRootConfig({ sandbox: { enabled: 'on', 'enabled.windows': 'on' } });
 		let disconnected = false;
 		let captured: ResumeSessionConfig | undefined;
@@ -159,7 +161,7 @@ suite('CopilotSessionLauncher sandbox policy', () => {
 				config?.onEvent?.({
 					id: 'resolved', parentId: null, timestamp: '2026-01-01T00:00:00Z',
 					type: 'session.managed_settings_resolved', ephemeral: true,
-					data: { source: 'server', serverManaged: true, deviceManaged: false, failClosed: false, bypassPermissionsDisabled: false, managedKeys: enforced ? ['sandbox'] : [], settings: enforced ? { sandbox: { enabled: true, allowBypass: false } } : {} },
+					data: { source: 'server', serverManaged: true, deviceManaged: false, failClosed: false, bypassPermissionsDisabled: bypassDisabled, managedKeys: enforced ? ['sandbox'] : bypassDisabled ? ['permissions'] : [], settings: enforced ? { sandbox: { enabled: true, allowBypass: false } } : {} },
 				});
 			}
 			return raw;
@@ -250,6 +252,32 @@ suite('CopilotSessionLauncher sandbox policy', () => {
 		});
 		assert.strictEqual(fixture.configuration.getSessionConfigValues(fixture.owner)?.sandboxEnabled, 'default');
 	});
+
+	for (const kind of ['create', 'resume'] as const) {
+		test(`${kind} clamps Allow All when managed settings disable bypass`, async () => {
+			const fixture = setup(kind, true, false, true);
+			store.add(await fixture.launcher.launch(fixture.plan, testRuntime));
+			assert.deepStrictEqual({
+				policy: fixture.configuration.getSessionManagedPermissionPolicy(fixture.owner),
+				autoApprove: fixture.configuration.getSessionConfigValues(fixture.owner)?.autoApprove,
+			}, {
+				policy: { resolved: true, failClosed: false, bypassPermissionsDisabled: true },
+				autoApprove: 'default',
+			});
+		});
+
+		test(`${kind} keeps Allow All when managed settings permit bypass`, async () => {
+			const fixture = setup(kind);
+			store.add(await fixture.launcher.launch(fixture.plan, testRuntime));
+			assert.deepStrictEqual({
+				policy: fixture.configuration.getSessionManagedPermissionPolicy(fixture.owner),
+				autoApprove: fixture.configuration.getSessionConfigValues(fixture.owner)?.autoApprove,
+			}, {
+				policy: { resolved: true, failClosed: false, bypassPermissionsDisabled: false },
+				autoApprove: 'autoApprove',
+			});
+		});
+	}
 });
 
 /**
