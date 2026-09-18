@@ -9,19 +9,35 @@ import type { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../log/common/log.js';
+import { fromAgentHostUri, toAgentHostUri } from '../../common/agentHostUri.js';
 import { buildSessionChangesetUri, buildUncommittedChangesetUri } from '../../common/changesetUri.js';
 import { ChangesetOperationTargetKind, type InvokeChangesetOperationParams } from '../../common/state/protocol/channels-changeset/commands.js';
 import { AHP_SESSION_NOT_FOUND, JsonRpcErrorCodes, ProtocolError } from '../../common/state/sessionProtocol.js';
 import { SessionStatus, type ISessionFileDiff } from '../../common/state/sessionState.js';
-import { AgentHostDiscardChangesOperationHandler } from '../../node/agentHostDiscardChangesOperationHandler.js';
+import { mock } from '../../../../base/test/common/mock.js';
+import { IFileService } from '../../../files/common/files.js';
 import type { IAgentHostGitService, IBranch, IDefaultBranch } from '../../common/agentHostGitService.js';
+import { AgentHostDiscardChangesOperationHandler } from '../../node/agentHostDiscardChangesOperationHandler.js';
 import { AgentHostStateManager } from '../../node/agentHostStateManager.js';
+
+class TestFileService extends mock<IFileService>() {
+	readonly deleted: string[] = [];
+	deleteError: Error | undefined;
+
+	override async del(uri: URI): Promise<void> {
+		if (this.deleteError) {
+			throw this.deleteError;
+		}
+		this.deleted.push(uri.toString());
+	}
+}
 
 class TestGitService implements IAgentHostGitService {
 	declare readonly _serviceBrand: undefined;
 
-	readonly restoreCalls: { workingDirectory: string; paths: readonly string[]; options?: { readonly staged?: boolean; readonly ref?: string } }[] = [];
+	readonly restoreCalls: { workingDirectory: string; paths: readonly string[]; options?: { readonly staged?: boolean; readonly worktree?: boolean; readonly ref?: string } }[] = [];
 	restoreError: Error | undefined;
+	untrackedPaths: string[] = [];
 
 	async getCurrentBranch(): Promise<string | undefined> { return undefined; }
 	async getDefaultBranch(): Promise<IDefaultBranch | undefined> { return undefined; }
@@ -41,7 +57,7 @@ class TestGitService implements IAgentHostGitService {
 	async createStash(): Promise<void> { }
 	async commitAll(): Promise<void> { }
 	async mergeBranch(): Promise<string> { return ''; }
-	async restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly ref?: string }): Promise<void> {
+	async restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly worktree?: boolean; readonly ref?: string }): Promise<void> {
 		this.restoreCalls.push({ workingDirectory: workingDirectory.toString(), paths, options });
 		if (this.restoreError) {
 			throw this.restoreError;
@@ -63,13 +79,14 @@ class TestGitService implements IAgentHostGitService {
 	async diffTreePaths(): Promise<string[] | undefined> { return undefined; }
 	async computeFileDiffsBetweenRefs(): Promise<readonly ISessionFileDiff[] | undefined> { return undefined; }
 	async getFetchRemoteUrls(): Promise<undefined> { return undefined; }
-	async getUntrackedPaths(): Promise<[]> { return []; }
+	async getUntrackedPaths(): Promise<string[]> { return this.untrackedPaths; }
 	async getBranchDiffSafetyInfo(): Promise<undefined> { return undefined; }
 	async getDiffPatchBetweenRefs(): Promise<undefined> { return undefined; }
 }
 
-function setup(disposables: Pick<DisposableStore, 'add'>, opts?: { readonly withWorkingDirectory?: boolean; readonly registerSession?: boolean }): { handler: AgentHostDiscardChangesOperationHandler; gitService: TestGitService; session: URI } {
+function setup(disposables: Pick<DisposableStore, 'add'>, opts?: { readonly withWorkingDirectory?: boolean; readonly registerSession?: boolean }): { handler: AgentHostDiscardChangesOperationHandler; gitService: TestGitService; fileService: TestFileService; session: URI } {
 	const gitService = new TestGitService();
+	const fileService = new TestFileService();
 	const stateManager = disposables.add(new AgentHostStateManager(new NullLogService()));
 	const session = URI.parse('agent:/session');
 	if (opts?.registerSession !== false) {
@@ -86,9 +103,10 @@ function setup(disposables: Pick<DisposableStore, 'add'>, opts?: { readonly with
 	const handler = new AgentHostDiscardChangesOperationHandler(
 		sessionKey => stateManager.getSessionState(sessionKey),
 		gitService,
+		fileService,
 		new NullLogService(),
 	);
-	return { handler, gitService, session };
+	return { handler, gitService, fileService, session };
 }
 
 function makeResourceTarget(resource: URI): InvokeChangesetOperationParams['target'] {
@@ -114,7 +132,59 @@ suite('AgentHostDiscardChangesOperationHandler', () => {
 			restoreCalls: gitService.restoreCalls,
 			message: result.message,
 		}, {
-			restoreCalls: [{ workingDirectory: URI.file('/repo').toString(), paths: [target.fsPath], options: undefined }],
+			restoreCalls: [{
+				workingDirectory: URI.file('/repo').toString(),
+				paths: ['src/file.ts'],
+				options: { staged: true, worktree: true, ref: 'HEAD' },
+			}],
+			message: { markdown: 'Discarded changes to `file.ts`.' },
+		});
+	});
+
+	test('unwraps agent-host URIs before restoring a relative git path', async () => {
+		const { handler, gitService, session } = setup(disposables);
+		const target = toAgentHostUri(URI.file('/repo/src/file.ts'), 'remote-host');
+
+		const result = await handler.invoke({
+			channel: buildUncommittedChangesetUri(session.toString()),
+			operationId: AgentHostDiscardChangesOperationHandler.OPERATION_DISCARD_CHANGES,
+			target: makeResourceTarget(target),
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			unwrapped: fromAgentHostUri(target).toString(),
+			restoreCalls: gitService.restoreCalls,
+			message: result.message,
+		}, {
+			unwrapped: URI.file('/repo/src/file.ts').toString(),
+			restoreCalls: [{
+				workingDirectory: URI.file('/repo').toString(),
+				paths: ['src/file.ts'],
+				options: { staged: true, worktree: true, ref: 'HEAD' },
+			}],
+			message: { markdown: 'Discarded changes to `file.ts`.' },
+		});
+	});
+
+	test('deletes an untracked file when git restore reports a pathspec miss', async () => {
+		const { handler, gitService, fileService, session } = setup(disposables);
+		gitService.restoreError = new Error(`error: pathspec 'src/file.ts' did not match any file(s) known to git`);
+		gitService.untrackedPaths = ['src/file.ts'];
+		const target = URI.file('/repo/src/file.ts');
+
+		const result = await handler.invoke({
+			channel: buildUncommittedChangesetUri(session.toString()),
+			operationId: AgentHostDiscardChangesOperationHandler.OPERATION_DISCARD_CHANGES,
+			target: makeResourceTarget(target),
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			restoreCalls: gitService.restoreCalls.length,
+			deleted: fileService.deleted,
+			message: result.message,
+		}, {
+			restoreCalls: 1,
+			deleted: [target.toString()],
 			message: { markdown: 'Discarded changes to `file.ts`.' },
 		});
 	});

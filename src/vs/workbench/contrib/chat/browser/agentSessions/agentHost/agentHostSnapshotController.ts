@@ -9,11 +9,13 @@ import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../../base/common/network.js';
 import { constObservable, derived, derivedOpts, IObservable, IReader, observableValue, transaction } from '../../../../../../base/common/observable.js';
+import { basename, isEqual } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
 import { ITextModel } from '../../../../../../editor/common/model.js';
-import { toAgentHostContentUri, toAgentHostUri } from '../../../../../../platform/agentHost/common/agentHostUri.js';
+import { localize } from '../../../../../../nls.js';
+import { fromAgentHostUri, toAgentHostContentUri, toAgentHostUri } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 import { FileEditKind, ToolCallStatus, type ToolCallState } from '../../../../../../platform/agentHost/common/state/sessionState.js';
-import { IFileService } from '../../../../../../platform/files/common/files.js';
+import { FileOperationResult, IFileService, toFileOperationResult } from '../../../../../../platform/files/common/files.js';
 import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IChatProgress, IChatWorkspaceEdit } from '../../../common/chatService/chatService.js';
 import { ChatEditingSessionState, IChatEditingSession, IEditSessionDiffStats, IEditSessionEntryDiff, IModifiedFileEntry, IStreamingEdits } from '../../../common/editing/chatEditingService.js';
@@ -311,7 +313,35 @@ export class AgentHostSnapshotController extends Disposable implements IChatEdit
 	getEntry(_uri: URI): IModifiedFileEntry | undefined { return undefined; }
 	readEntry(_uri: URI, _reader: IReader): IModifiedFileEntry | undefined { return undefined; }
 	async accept(..._uris: URI[]): Promise<void> { /* no-op */ }
-	async reject(..._uris: URI[]): Promise<void> { /* no-op */ }
+
+	/**
+	 * Reverts agent file edits. With no URIs, restores every file touched by
+	 * the current checkpoint history. With URIs, restores those files to the
+	 * content they had before this session edited them.
+	 *
+	 * Throws when there is nothing to revert so Keep/Undo and the Changes
+	 * view "Undo File Changes" action cannot silently no-op.
+	 */
+	async reject(...uris: URI[]): Promise<void> {
+		return this._undoRedoSequencer.queue(async () => {
+			const currentIdx = this._currentCheckpointIndex.get();
+			if (currentIdx < 0 || !this._hasFileEditsUpTo(currentIdx)) {
+				throw new Error(localize('agentHost.undoFileChanges.nothingToUndo', "There are no agent file changes to undo."));
+			}
+
+			if (uris.length === 0) {
+				await this._navigateToCheckpointIndex(-1);
+				return;
+			}
+
+			const editsToRestore = this._firstEditsForResources(uris, currentIdx);
+			if (editsToRestore.length === 0) {
+				throw new Error(localize('agentHost.undoFileChanges.filesNotChanged', "The selected files were not changed by this agent session and cannot be reverted."));
+			}
+
+			await this._writeEdits(editsToRestore, 'before');
+		});
+	}
 	getEntryDiffBetweenStops(_uri: URI, _requestId: string | undefined, _stopId: string | undefined): IObservable<IEditSessionEntryDiff | undefined> | undefined { return undefined; }
 	getEntryDiffBetweenRequests(_uri: URI, _startRequestId: string, _stopRequestId: string): IObservable<IEditSessionEntryDiff | undefined> { return constObservable(undefined); }
 	getDiffsForFilesInSession(): IObservable<readonly IEditSessionEntryDiff[]> { return constObservable([]); }
@@ -348,72 +378,124 @@ export class AgentHostSnapshotController extends Disposable implements IChatEdit
 
 	// ---- Private helpers ----------------------------------------------------
 
-	private async _writeCheckpointContent(checkpoint: IAgentHostCheckpoint, direction: 'before' | 'after'): Promise<void> {
-		const ops = checkpoint.edits.map(async edit => {
-			try {
-				if (direction === 'before') {
-					// Undoing this edit
-					switch (edit.kind) {
-						case FileEditKind.Create:
-							await this._fileService.del(edit.resource);
-							break;
-						case FileEditKind.Delete:
-							if (edit.beforeContentUri) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
-								await this._fileService.writeFile(edit.resource, content.value);
-							}
-							break;
-						case FileEditKind.Rename:
-							if (edit.originalResource) {
-								await this._fileService.move(edit.resource, edit.originalResource, true);
-							}
-							if (edit.beforeContentUri && edit.originalResource) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
-								await this._fileService.writeFile(edit.originalResource, content.value);
-							}
-							break;
-						case FileEditKind.Edit:
-							if (edit.beforeContentUri) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
-								await this._fileService.writeFile(edit.resource, content.value);
-							}
-							break;
-					}
-				} else {
-					// Redoing this edit
-					switch (edit.kind) {
-						case FileEditKind.Create:
-							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
-								await this._fileService.writeFile(edit.resource, content.value);
-							}
-							break;
-						case FileEditKind.Delete:
-							await this._fileService.del(edit.resource);
-							break;
-						case FileEditKind.Rename:
-							if (edit.originalResource) {
-								await this._fileService.move(edit.originalResource, edit.resource, true);
-							}
-							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
-								await this._fileService.writeFile(edit.resource, content.value);
-							}
-							break;
-						case FileEditKind.Edit:
-							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
-								await this._fileService.writeFile(edit.resource, content.value);
-							}
-							break;
+	private _hasFileEditsUpTo(index: number): boolean {
+		for (let i = 0; i <= index; i++) {
+			if (this._checkpoints[i].edits.length > 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private _firstEditsForResources(uris: readonly URI[], currentIdx: number): IToolCallFileEdit[] {
+		const remaining = [...uris];
+		const found: IToolCallFileEdit[] = [];
+		for (let i = 0; i <= currentIdx && remaining.length > 0; i++) {
+			for (const edit of this._checkpoints[i].edits) {
+				const matchIdx = remaining.findIndex(uri => editMatchesResource(edit.resource, uri));
+				if (matchIdx >= 0) {
+					found.push(edit);
+					remaining.splice(matchIdx, 1);
+					if (remaining.length === 0) {
+						return found;
 					}
 				}
-			} catch (err) {
-				this._logService.warn(`[AgentHostSnapshotController] Failed to ${direction === 'before' ? 'undo' : 'redo'} ${edit.kind} for ${edit.resource.toString()}`, err);
 			}
-		});
-		await Promise.all(ops);
+		}
+		return found;
 	}
+
+	private async _writeCheckpointContent(checkpoint: IAgentHostCheckpoint, direction: 'before' | 'after'): Promise<void> {
+		await this._writeEdits(checkpoint.edits, direction);
+	}
+
+	private async _writeEdits(edits: readonly IToolCallFileEdit[], direction: 'before' | 'after'): Promise<void> {
+		const errors: Error[] = [];
+		await Promise.all(edits.map(async edit => {
+			try {
+				await this._writeEdit(edit, direction);
+			} catch (err) {
+				const wrapped = err instanceof Error ? err : new Error(String(err));
+				this._logService.warn(`[AgentHostSnapshotController] Failed to ${direction === 'before' ? 'undo' : 'redo'} ${edit.kind} for ${edit.resource.toString()}`, wrapped);
+				errors.push(wrapped);
+			}
+		}));
+		if (errors.length === 1) {
+			throw errors[0];
+		}
+		if (errors.length > 1) {
+			throw new Error(localize('agentHost.undoFileChanges.partialFailure', "Could not revert {0} files: {1}", errors.length, errors.map(e => e.message).join('; ')));
+		}
+	}
+
+	private async _writeEdit(edit: IToolCallFileEdit, direction: 'before' | 'after'): Promise<void> {
+		if (direction === 'before') {
+			switch (edit.kind) {
+				case FileEditKind.Create:
+					await this._deleteIfExists(edit.resource);
+					return;
+				case FileEditKind.Delete:
+					await this._restoreContent(edit.resource, edit.beforeContentUri);
+					return;
+				case FileEditKind.Rename:
+					if (edit.originalResource) {
+						await this._fileService.move(edit.resource, edit.originalResource, true);
+					}
+					if (edit.originalResource) {
+						await this._restoreContent(edit.originalResource, edit.beforeContentUri);
+					}
+					return;
+				case FileEditKind.Edit:
+					await this._restoreContent(edit.resource, edit.beforeContentUri);
+					return;
+			}
+		}
+
+		switch (edit.kind) {
+			case FileEditKind.Create:
+				await this._restoreContent(edit.resource, edit.afterContentUri);
+				return;
+			case FileEditKind.Delete:
+				await this._deleteIfExists(edit.resource);
+				return;
+			case FileEditKind.Rename:
+				if (edit.originalResource) {
+					await this._fileService.move(edit.originalResource, edit.resource, true);
+				}
+				await this._restoreContent(edit.resource, edit.afterContentUri);
+				return;
+			case FileEditKind.Edit:
+				await this._restoreContent(edit.resource, edit.afterContentUri);
+		}
+	}
+
+	private async _deleteIfExists(resource: URI): Promise<void> {
+		try {
+			await this._fileService.del(resource);
+		} catch (err) {
+			if (err instanceof Error && toFileOperationResult(err) === FileOperationResult.FILE_NOT_FOUND) {
+				return;
+			}
+			throw err;
+		}
+	}
+
+	private async _restoreContent(resource: URI, contentUri: URI | undefined): Promise<void> {
+		if (!contentUri) {
+			throw new Error(localize('agentHost.undoFileChanges.missingSnapshot', "Cannot revert '{0}' because no original snapshot is available.", basename(resource)));
+		}
+		const content = await this._fileService.readFile(contentUri);
+		await this._fileService.writeFile(resource, content.value);
+	}
+}
+
+function editMatchesResource(editResource: URI, uri: URI): boolean {
+	if (isEqual(editResource, uri)) {
+		return true;
+	}
+	const unwrappedEdit = fromAgentHostUri(editResource);
+	const unwrappedUri = fromAgentHostUri(uri);
+	return isEqual(unwrappedEdit, unwrappedUri) || unwrappedEdit.path === unwrappedUri.path;
 }
 
 /**

@@ -291,12 +291,15 @@ export async function discardAllEditsWithConfirmation(accessor: ServicesAccessor
 
 	// Ask for confirmation if there are any edits
 	const entries = currentEditingSession.entries.get().filter(e => e.state.get() === ModifiedFileEntryState.Modified);
-	if (entries.length > 0) {
+	const hasAgentHostEdits = entries.length === 0 && currentEditingSession.canUndo.get();
+	if (entries.length > 0 || hasAgentHostEdits) {
 		const confirmation = await dialogService.confirm({
 			title: localize('chat.editing.discardAll.confirmation.title', "Undo all edits?"),
 			message: entries.length === 1
 				? localize('chat.editing.discardAll.confirmation.oneFile', "This will undo changes made in {0}. Do you want to proceed?", basename(entries[0].modifiedURI))
-				: localize('chat.editing.discardAll.confirmation.manyFiles', "This will undo changes made in {0} files. Do you want to proceed?", entries.length),
+				: entries.length > 1
+					? localize('chat.editing.discardAll.confirmation.manyFiles', "This will undo changes made in {0} files. Do you want to proceed?", entries.length)
+					: localize('chat.editing.discardAll.confirmation.agentSession', "This will revert file changes made by the agent. Do you want to proceed?"),
 			primaryButton: localize('chat.editing.discardAll.confirmation.primaryButton', "Yes"),
 			type: 'info'
 		});

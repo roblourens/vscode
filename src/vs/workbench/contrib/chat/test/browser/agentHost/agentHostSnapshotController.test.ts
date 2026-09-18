@@ -11,10 +11,11 @@ import { mock } from '../../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
 import { ToolCallConfirmationReason, ToolCallStatus, ToolResultContentType } from '../../../../../../platform/agentHost/common/state/protocol/state.js';
 import type { ToolCallCompletedState } from '../../../../../../platform/agentHost/common/state/sessionState.js';
-import { IFileContent, IFileService } from '../../../../../../platform/files/common/files.js';
+import { FileOperationError, FileOperationResult, IFileContent, IFileService } from '../../../../../../platform/files/common/files.js';
 import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IChatResponseModel } from '../../../common/model/chatModel.js';
 import { AgentHostSnapshotController } from '../../../browser/agentSessions/agentHost/agentHostSnapshotController.js';
+import { toAgentHostUri } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 
 function makeToolCall(opts: {
 	toolCallId: string;
@@ -391,5 +392,202 @@ suite('AgentHostSnapshotController', () => {
 		const fakeResponseModel = {} as IChatResponseModel;
 		assert.throws(() => controller.startStreamingEdits(URI.file('/x'), fakeResponseModel, undefined));
 		assert.throws(() => controller.applyWorkspaceEdit({ kind: 'workspaceEdit', edits: [] }, fakeResponseModel, 'stop'));
+	});
+
+	test('reject with no URIs restores every file touched by the session', async () => {
+		const beforeA = URI.file('/snap/before-a').toString();
+		const afterA = URI.file('/snap/after-a').toString();
+		const beforeB = URI.file('/snap/before-b').toString();
+		const afterB = URI.file('/snap/after-b').toString();
+		const fileA = URI.file('/a.ts').toString();
+		const fileB = URI.file('/b.ts').toString();
+		const contentMap = new Map([
+			[beforeA, 'a0'], [afterA, 'a1'], [fileA, 'a1'],
+			[beforeB, 'b0'], [afterB, 'b1'], [fileB, 'b1'],
+		]);
+		const controller = createController(store, contentMap);
+		controller.addToolCallEdits('req-1', makeToolCall({ toolCallId: 'tc-1', filePath: '/a.ts', beforeURI: beforeA, afterURI: afterA }));
+		controller.addToolCallEdits('req-2', makeToolCall({ toolCallId: 'tc-2', filePath: '/b.ts', beforeURI: beforeB, afterURI: afterB }));
+
+		await controller.reject();
+
+		assert.strictEqual(contentMap.get(fileA), 'a0');
+		assert.strictEqual(contentMap.get(fileB), 'b0');
+		assert.strictEqual(controller.canUndo.get(), false);
+	});
+
+	test('reject with a URI restores that file to its first before-content', async () => {
+		const beforeA = URI.file('/snap/before-a').toString();
+		const afterA = URI.file('/snap/after-a').toString();
+		const beforeB = URI.file('/snap/before-b').toString();
+		const afterB = URI.file('/snap/after-b').toString();
+		const fileA = URI.file('/a.ts').toString();
+		const fileB = URI.file('/b.ts').toString();
+		const contentMap = new Map([
+			[beforeA, 'a0'], [afterA, 'a1'], [fileA, 'a1'],
+			[beforeB, 'b0'], [afterB, 'b1'], [fileB, 'b1'],
+		]);
+		const controller = createController(store, contentMap);
+		controller.addToolCallEdits('req-1', makeToolCall({ toolCallId: 'tc-1', filePath: '/a.ts', beforeURI: beforeA, afterURI: afterA }));
+		controller.addToolCallEdits('req-2', makeToolCall({ toolCallId: 'tc-2', filePath: '/b.ts', beforeURI: beforeB, afterURI: afterB }));
+
+		await controller.reject(URI.file('/a.ts'));
+
+		assert.strictEqual(contentMap.get(fileA), 'a0');
+		assert.strictEqual(contentMap.get(fileB), 'b1');
+		assert.strictEqual(controller.canUndo.get(), true);
+	});
+
+	test('reject matches agent-host wrapped URIs to the edited file', async () => {
+		const before = URI.file('/snap/before-1').toString();
+		const after = URI.file('/snap/after-1').toString();
+		const file = URI.file('/file.ts').toString();
+		const contentMap = new Map([
+			[before, 'original'],
+			[after, 'modified'],
+			[file, 'modified'],
+		]);
+		const controller = createController(store, contentMap);
+		controller.addToolCallEdits('req-1', makeToolCall({
+			toolCallId: 'tc-1', filePath: '/file.ts', beforeURI: before, afterURI: after,
+		}));
+
+		await controller.reject(toAgentHostUri(URI.file('/file.ts'), 'remote-host'));
+
+		assert.strictEqual(contentMap.get(file), 'original');
+	});
+
+	test('reject throws when there are no agent file changes to undo', async () => {
+		const controller = createController(store, new Map());
+		await assert.rejects(
+			() => controller.reject(),
+			/There are no agent file changes to undo/,
+		);
+	});
+
+	test('reject throws when the selected file was not changed by this session', async () => {
+		const before = URI.file('/snap/before-1').toString();
+		const after = URI.file('/snap/after-1').toString();
+		const file = URI.file('/file.ts').toString();
+		const controller = createController(store, new Map([
+			[before, 'original'], [after, 'modified'], [file, 'modified'],
+		]));
+		controller.addToolCallEdits('req-1', makeToolCall({
+			toolCallId: 'tc-1', filePath: '/file.ts', beforeURI: before, afterURI: after,
+		}));
+
+		await assert.rejects(
+			() => controller.reject(URI.file('/other.ts')),
+			/were not changed by this agent session/,
+		);
+	});
+
+	test('reject throws when the original snapshot is missing', async () => {
+		const file = URI.file('/file.ts').toString();
+		const controller = createController(store, new Map([[file, 'modified']]));
+		controller.addToolCallEdits('req-1', {
+			status: ToolCallStatus.Completed,
+			toolCallId: 'tc-1',
+			toolName: 'codeEdit',
+			displayName: 'Edit File',
+			invocationMessage: 'Editing file',
+			toolInput: JSON.stringify({ path: '/file.ts' }),
+			success: true,
+			pastTenseMessage: 'Edited file',
+			confirmed: ToolCallConfirmationReason.NotNeeded,
+			content: [{
+				type: ToolResultContentType.FileEdit,
+				before: {
+					uri: file,
+					content: { uri: '' },
+				},
+				after: {
+					uri: file,
+					content: { uri: URI.file('/snap/after').toString() },
+				},
+				diff: { added: 1, removed: 0 },
+			}],
+		});
+
+		await assert.rejects(
+			() => controller.reject(URI.file('/file.ts')),
+			/no original snapshot is available/,
+		);
+	});
+
+	test('reject of a created file deletes it, treating FILE_NOT_FOUND as success', async () => {
+		const after = URI.file('/snap/after-1').toString();
+		const file = URI.file('/created.ts').toString();
+		const contentMap = new Map([[after, 'new'], [file, 'new']]);
+		const controller = createController(store, contentMap);
+		controller.addToolCallEdits('req-1', {
+			status: ToolCallStatus.Completed,
+			toolCallId: 'tc-1',
+			toolName: 'codeEdit',
+			displayName: 'Create File',
+			invocationMessage: 'Creating file',
+			toolInput: JSON.stringify({ path: '/created.ts' }),
+			success: true,
+			pastTenseMessage: 'Created file',
+			confirmed: ToolCallConfirmationReason.NotNeeded,
+			content: [{
+				type: ToolResultContentType.FileEdit,
+				after: {
+					uri: file,
+					content: { uri: after },
+				},
+				diff: { added: 1, removed: 0 },
+			}],
+		});
+
+		await controller.reject(URI.file('/created.ts'));
+		assert.strictEqual(contentMap.has(file), false);
+
+		const missingDeletes: string[] = [];
+		const fileService = new class extends mock<IFileService>() {
+			override async readFile(uri: URI) {
+				const data = contentMap.get(uri.toString());
+				if (data === undefined) {
+					throw new Error(`Content not found: ${uri.toString()}`);
+				}
+				return { value: VSBuffer.fromString(data) } as IFileContent;
+			}
+			override async writeFile(uri: URI, content: VSBuffer): Promise<any> {
+				contentMap.set(uri.toString(), content.toString());
+				return {};
+			}
+			override async del(uri: URI) {
+				missingDeletes.push(uri.toString());
+				throw new FileOperationError('Unable to delete nonexistent file', FileOperationResult.FILE_NOT_FOUND);
+			}
+			override async move(): Promise<any> { return {}; }
+		};
+		const missingController = store.add(new AgentHostSnapshotController(
+			URI.from({ scheme: 'agent-host-copilot', path: '/test-session' }),
+			'local',
+			new NullLogService(),
+			fileService,
+		));
+		missingController.addToolCallEdits('req-1', {
+			status: ToolCallStatus.Completed,
+			toolCallId: 'tc-missing',
+			toolName: 'codeEdit',
+			displayName: 'Create File',
+			invocationMessage: 'Creating file',
+			toolInput: JSON.stringify({ path: '/created.ts' }),
+			success: true,
+			pastTenseMessage: 'Created file',
+			confirmed: ToolCallConfirmationReason.NotNeeded,
+			content: [{
+				type: ToolResultContentType.FileEdit,
+				after: {
+					uri: file,
+					content: { uri: after },
+				},
+				diff: { added: 1, removed: 0 },
+			}],
+		});
+		await missingController.reject(URI.file('/created.ts'));
+		assert.deepStrictEqual(missingDeletes, [file]);
 	});
 });

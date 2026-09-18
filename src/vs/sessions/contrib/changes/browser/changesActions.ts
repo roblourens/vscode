@@ -12,7 +12,7 @@ import { autorun, observableValue, transaction } from '../../../../base/common/o
 import { isEqual } from '../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
-import { localize2 } from '../../../../nls.js';
+import { localize, localize2 } from '../../../../nls.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { MenuEntryActionViewItem } from '../../../../platform/actions/browser/menuEntryActionViewItem.js';
 import { Action2, MenuId, MenuItemAction, registerAction2 } from '../../../../platform/actions/common/actions.js';
@@ -20,6 +20,7 @@ import { ContextKeyExpr, IContextKeyService } from '../../../../platform/context
 import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { bindContextKey } from '../../../../platform/observable/common/platformObservableUtils.js';
 import { ActiveEditorContext } from '../../../../workbench/common/contextkeys.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../workbench/common/contributions.js';
@@ -379,18 +380,23 @@ class ChangesetOperationsActionControllerContribution extends Disposable impleme
 					}
 
 					async run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> {
-						// The Changes view provides the resource as the third argument (uses a
-						// custom action runner) while the multi-file diff editor provides the
-						// resource as the first argument.
-						const resource = args.length === 3 ? args[2] : args[0];
-						if (!resource || !(resource instanceof URI)) {
+						const resources = getChangesetOperationResourceTargets(args);
+						if (resources.length === 0) {
+							accessor.get(INotificationService).error(localize('changeset.operation.noFile', "Select a changed file before undoing file changes."));
 							return;
 						}
 
-						await changeset?.invokeOperation(operation.id, {
-							kind: 'resource',
-							resource,
-						});
+						if (!changeset) {
+							accessor.get(INotificationService).error(localize('changeset.operation.noChangeset', "Unable to undo file changes because the session changeset is no longer available."));
+							return;
+						}
+
+						for (const resource of resources) {
+							await changeset.invokeOperation(operation.id, {
+								kind: 'resource',
+								resource,
+							});
+						}
 					}
 				}));
 			}
@@ -487,3 +493,20 @@ registerWorkbenchContribution2(ChangesMultiDiffSourceResolverContribution.ID, Ch
 registerWorkbenchContribution2(ChangesetOperationsActionControllerContribution.ID, ChangesetOperationsActionControllerContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(NewSessionUncommittedChangesetOperationsActionContribution.ID, NewSessionUncommittedChangesetOperationsActionContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(SessionChangesStatsCacheContribution.ID, SessionChangesStatsCacheContribution, WorkbenchPhase.AfterRestored);
+
+/**
+ * Resolves file URIs for a changeset resource operation.
+ *
+ * The Changes view action runner forwards `(sessionResource, discardRef, ...fileUris)`.
+ * The multi-file diff editor forwards the file URI as the first argument.
+ */
+export function getChangesetOperationResourceTargets(args: readonly unknown[]): URI[] {
+	if (args.length >= 2 && URI.isUri(args[0]) && typeof args[1] === 'string') {
+		return args.slice(2).filter((arg): arg is URI => URI.isUri(arg));
+	}
+	if (URI.isUri(args[0])) {
+		return [args[0]];
+	}
+	return [];
+}
+

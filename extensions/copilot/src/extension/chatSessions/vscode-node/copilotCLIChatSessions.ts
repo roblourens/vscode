@@ -1748,7 +1748,8 @@ export function registerCLIChatCommands(
 	}));
 
 	disposableStore.add(vscode.commands.registerCommand('github.copilot.sessions.discardChanges', async (sessionResource: vscode.Uri, ref: string, ...resources: vscode.Uri[]) => {
-		if (!isUri(sessionResource) || !ref || resources.length === 0 || resources.some(r => !isUri(r))) {
+		if (!isUri(sessionResource) || resources.length === 0 || resources.some(r => !isUri(r))) {
+			vscode.window.showErrorMessage(l10n.t('Unable to undo file changes. Select a changed file and try again.'));
 			return;
 		}
 
@@ -1759,6 +1760,7 @@ export function registerCLIChatCommands(
 		const repositoryUri = worktreeProperties ? Uri.file(worktreeProperties.worktreePath) : workspaceFolder;
 		const repository = repositoryUri ? await gitService.getRepository(repositoryUri) : undefined;
 		if (!repository) {
+			vscode.window.showErrorMessage(l10n.t('Unable to undo file changes because the session repository could not be found.'));
 			return;
 		}
 
@@ -1772,7 +1774,12 @@ export function registerCLIChatCommands(
 			return;
 		}
 
-		await gitService.restore(repository.rootUri, resources.map(r => r.fsPath), { ref });
+		try {
+			await gitService.restore(repository.rootUri, resources.map(r => r.fsPath), { ref: ref || 'HEAD' });
+		} catch (err) {
+			vscode.window.showErrorMessage(l10n.t('Unable to undo file changes: {0}', err instanceof Error ? err.message : String(err)));
+			return;
+		}
 
 		// Refresh the last checkpoint to reflect the now-restored worktree state
 		await copilotCLIWorktreeCheckpointService.updateLastCheckpoint(sessionId);

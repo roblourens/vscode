@@ -28,7 +28,7 @@ import { Menus } from '../../../../browser/menus.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
 import { IActiveSession } from '../../../../services/sessions/common/sessionsManagement.js';
 import { ISessionChangeset, ISessionChangesetOperation, ISessionFolder, ISessionGitRepository, ISessionWorkspace, SessionChangesetOperationScope, SessionChangesetOperationStatus, SessionStatus, UNCOMMITTED_CHANGES_CHANGESET_ID } from '../../../../services/sessions/common/session.js';
-import { NewSessionUncommittedChangesetOperationsActionContribution } from '../../browser/changesActions.js';
+import { getChangesetOperationResourceTargets, NewSessionUncommittedChangesetOperationsActionContribution } from '../../browser/changesActions.js';
 import { SessionChangesEditor } from '../../browser/sessionChangesEditor.js';
 
 suite('Changes Actions', () => {
@@ -248,5 +248,26 @@ suite('Changes Actions', () => {
 			menuActions: 0,
 			commitCommandRegistered: false,
 		});
+	});
+
+	test('getChangesetOperationResourceTargets reads Changes view and multi-diff args', () => {
+		const session = URI.parse('agent:/session');
+		const fileA = URI.file('/repo/a.ts');
+		const fileB = URI.file('/repo/b.ts');
+
+		assert.deepStrictEqual(
+			getChangesetOperationResourceTargets([session, 'discard-ref', fileA, fileB]).map(uri => uri.toString()),
+			[fileA.toString(), fileB.toString()],
+		);
+		assert.deepStrictEqual(
+			getChangesetOperationResourceTargets([fileA]).map(uri => uri.toString()),
+			[fileA.toString()],
+		);
+		assert.deepStrictEqual(getChangesetOperationResourceTargets([session, 'discard-ref']), []);
+		assert.deepStrictEqual(
+			getChangesetOperationResourceTargets([session]).map(uri => uri.toString()),
+			[session.toString()],
+		);
+		assert.deepStrictEqual(getChangesetOperationResourceTargets([]), []);
 	});
 });

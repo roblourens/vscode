@@ -289,12 +289,13 @@ export interface IAgentHostGitService {
 
 	/**
 	 * Restores files in the working tree via `git restore`. When
-	 * {@link options.staged} is true, restores the index instead of the
-	 * working tree. When {@link options.ref} is provided, the contents are
-	 * taken from that ref (`--source`). An empty {@link paths} array
-	 * restores everything (`.`).
+	 * {@link options.staged} is true, restores the index. When
+	 * {@link options.worktree} is true, also restores the working tree
+	 * (pass both to fully discard staged and unstaged edits). When
+	 * {@link options.ref} is provided, the contents are taken from that
+	 * ref (`--source`). An empty {@link paths} array restores everything (`.`).
 	 */
-	restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly ref?: string }): Promise<void>;
+	restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly worktree?: boolean; readonly ref?: string }): Promise<void>;
 
 	/**
 	 * Returns true when the named branch has an upstream tracking ref

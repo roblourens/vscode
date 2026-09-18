@@ -432,11 +432,15 @@ export class AgentHostGitService implements IAgentHostGitService {
 		}
 	}
 
-	async restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly ref?: string }): Promise<void> {
+	async restore(workingDirectory: URI, paths: readonly string[], options?: { readonly staged?: boolean; readonly worktree?: boolean; readonly ref?: string }): Promise<void> {
 		const args = ['restore'];
 
 		if (options?.staged) {
 			args.push('--staged');
+		}
+
+		if (options?.worktree) {
+			args.push('--worktree');
 		}
 
 		if (options?.ref) {
