@@ -1455,7 +1455,7 @@ suite('CodexAgent prewarm eviction', () => {
 		peer.exit();
 	});
 
-	test('scoped enablement changes republish resolved plugin children and invalidate MCP launch state', async () => {
+	test('scoped enablement changes republish resolved plugin children and reload MCP when servers change', async () => {
 		const onDidChange = new Emitter<{ readonly sessions: readonly string[] }>();
 		let enabled = true;
 		const resolve = (): CustomizationEnablementResolution => ({
@@ -1515,13 +1515,150 @@ suite('CodexAgent prewarm eviction', () => {
 			materializedMcpSig: entry.materializedMcpSig,
 			needsResume: entry.needsResume,
 			unsubscribeBeforeResume: entry.unsubscribeBeforeResume,
+			mcpServersChanged: agent['_sessionMcpServersChanged'](entry),
 		}, {
 			pluginEnablement: [{ kind: CustomizationEnablementKind.Session, enabled: false }],
 			childEnablement: [{ kind: CustomizationEnablementKind.Session, enabled: false }],
-			materializedMcpSig: undefined,
+			materializedMcpSig: 'before',
 			needsResume: true,
 			unsubscribeBeforeResume: true,
+			mcpServersChanged: true,
 		});
+	});
+
+	test('scoped enablement notifications do not reload MCP when the server set is unchanged', async () => {
+		const onDidChange = new Emitter<{ readonly sessions: readonly string[] }>();
+		const resolve = (): CustomizationEnablementResolution => ({
+			kind: 'resolved',
+			enablement: [{ kind: CustomizationEnablementKind.Session, enabled: true }],
+			enabled: true,
+			workingDirectory: { kind: 'workspaceless' as const },
+		});
+		const customizationEnablementService: IAgentHostCustomizationEnablementService = {
+			_serviceBrand: undefined,
+			onDidChange: onDidChange.event,
+			initializeSession: async () => { },
+			getWorkingDirectoryState: () => ({ kind: 'workspaceless' }),
+			resolve,
+			applyClientGlobalEnablement: resolve,
+			replaceEnablement: resolve,
+			setEnablement: resolve,
+			whenIdle: async () => { },
+		};
+		const agent = await createAgent(disposables, { customizationEnablementService });
+		const { session } = await createSession(agent, { workingDirectories: [URI.file('/repo')] });
+		const entry = agent['_sessions'].get(AgentSession.id(session))!;
+		const pluginDir = URI.file('/plugin');
+		entry.clientCustomizations.setClient('test', [{
+			synced: { customization: { type: CustomizationType.Plugin, id: 'plugin', uri: pluginDir.toString(), name: 'plugin' }, pluginDir },
+			parsed: {
+				format: PluginFormat.OpenPlugin,
+				hooks: [],
+				agents: [],
+				instructions: [],
+				skills: [],
+				mcpServers: [{
+					name: 'local',
+					uri: URI.file('/plugin/.mcp.json'),
+					configuration: { type: McpServerType.LOCAL, command: 'node' },
+					customization: { type: CustomizationType.McpServer, id: 'mcp', uri: 'file:///plugin/.mcp.json', name: 'local', state: { kind: McpServerStatus.Starting } },
+				}],
+			},
+		}]);
+		entry.firstTurnSent = true;
+		entry.needsResume = false;
+		entry.unsubscribeBeforeResume = false;
+		const launched = agent['_buildSessionMcpServers'](entry);
+		entry.materializedMcpSig = Object.keys(launched).sort().map(name => `${name}\u0000${JSON.stringify(launched[name])}`).join('\u0001');
+		const materializedMcpSig = entry.materializedMcpSig;
+
+		onDidChange.fire({ sessions: [session.toString()] });
+
+		assert.deepStrictEqual({
+			materializedMcpSig: entry.materializedMcpSig,
+			needsResume: entry.needsResume,
+			unsubscribeBeforeResume: entry.unsubscribeBeforeResume,
+			mcpServers: launched,
+		}, {
+			materializedMcpSig,
+			needsResume: false,
+			unsubscribeBeforeResume: false,
+			mcpServers: { local: { command: 'node' } },
+		});
+	});
+
+	test('follow-up turn does not resume MCP after an unchanged enablement notification', async () => {
+		const onDidChange = new Emitter<{ readonly sessions: readonly string[] }>();
+		const resolve = (): CustomizationEnablementResolution => ({
+			kind: 'resolved',
+			enablement: [{ kind: CustomizationEnablementKind.Session, enabled: true }],
+			enabled: true,
+			workingDirectory: { kind: 'workspaceless' as const },
+		});
+		const customizationEnablementService: IAgentHostCustomizationEnablementService = {
+			_serviceBrand: undefined,
+			onDidChange: onDidChange.event,
+			initializeSession: async () => { },
+			getWorkingDirectoryState: () => ({ kind: 'workspaceless' }),
+			resolve,
+			applyClientGlobalEnablement: resolve,
+			replaceEnablement: resolve,
+			setEnablement: resolve,
+			whenIdle: async () => { },
+		};
+		const agent = await createAgent(disposables, { customizationEnablementService });
+		agent['_schedulePrewarm'] = () => { };
+		agent['_refreshSkillHookCustomizations'] = async () => { };
+		agent['_refreshSkillExtraRoots'] = async () => { };
+		const peer = disposables.add(createTestPeer());
+		agent['_connection'] = {
+			kind: 'ready',
+			client: new CodexAppServerClient(peer.transport),
+			usageSource: 'github',
+			child: { kill: () => true },
+		} as never;
+
+		const repo = URI.file('/repo-mcp-stable');
+		await agent['_fileService'].writeFile(URI.joinPath(repo, '.mcp.json'), VSBuffer.fromString(JSON.stringify({
+			mcpServers: {
+				workspace: { command: 'npx', args: ['-y', 'mcp-server'] },
+			},
+		})));
+		const { session } = await createSession(agent, { workingDirectories: [repo], model: { id: COPILOT_TEST_MODEL } });
+		const chat = URI.parse(buildDefaultChatUri(session));
+		const entry = agent['_sessions'].get(AgentSession.id(session))!;
+
+		const firstSend = agent.chats.sendMessage(chat, 'first', [repo], undefined, 'turn-1');
+		const start = await readNextRequest(peer.outbound);
+		peer.push({ id: start.id, result: { thread: { id: 'thread-mcp-stable' } } });
+		const firstTurn = await readNextRequest(peer.outbound);
+		peer.push({ id: firstTurn.id, result: {} });
+		await firstSend;
+
+		onDidChange.fire({ sessions: [session.toString()] });
+		assert.deepStrictEqual({
+			needsResume: entry.needsResume,
+			unsubscribeBeforeResume: entry.unsubscribeBeforeResume,
+			mcp: start.params.config?.['mcp_servers'],
+		}, {
+			needsResume: false,
+			unsubscribeBeforeResume: false,
+			mcp: { workspace: { command: 'npx', args: ['-y', 'mcp-server'], cwd: repo.fsPath } },
+		});
+
+		const secondSend = agent.chats.sendMessage(chat, 'second', [repo], undefined, 'turn-2');
+		const secondTurn = await readNextRequest(peer.outbound);
+		peer.push({ id: secondTurn.id, result: {} });
+		await secondSend;
+
+		assert.deepStrictEqual({
+			secondTurn: { method: secondTurn.method, threadId: secondTurn.params.threadId, mcp: secondTurn.params.config?.['mcp_servers'] },
+			needsResume: entry.needsResume,
+		}, {
+			secondTurn: { method: 'turn/start', threadId: 'thread-mcp-stable', mcp: undefined },
+			needsResume: false,
+		});
+		peer.exit();
 	});
 
 	test('workspace skills retain invocation metadata when the native catalog repeats them', async () => {

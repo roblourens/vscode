@@ -745,8 +745,11 @@ interface ICodexSession {
 	/**
 	 * Signature of the `mcp_servers` (root config + client plugins) the codex
 	 * thread was started with. Codex only accepts `config.mcp_servers` at
-	 * `thread/start`, so if the set changes before the first turn the thread is
-	 * restarted to pick them up. `undefined` until materialized.
+	 * `thread/start` / `thread/resume`, so a changed set restarts those
+	 * processes. Keep this aligned with the last launched set: workspace or
+	 * customization notifications must not clear it unless the built servers
+	 * actually changed, or the next turn reloads every MCP server. `undefined`
+	 * until materialized.
 	 */
 	materializedMcpSig: string | undefined;
 	/** Signature of custom agents, instructions, and skill capability roots applied to the thread. */
@@ -970,8 +973,9 @@ function toolsSignature(tools: readonly ToolDefinition[] | undefined): string {
 
 /**
  * Stable signature of the `mcp_servers` object a thread was started with, used
- * to detect when the merged (root config + client plugin) MCP set changed so
- * the thread can be restarted before its first turn to pick up the new servers.
+ * to detect when the merged (root config + client plugin) MCP set actually
+ * changed. Signature comparison is the only reason to restart MCP processes;
+ * a cleared or stale `materializedMcpSig` is not.
  */
 function mcpServersSignature(servers: Record<string, ICodexMcpServerConfigJson>): string {
 	const names = Object.keys(servers).sort();
@@ -1326,10 +1330,7 @@ export class CodexAgent extends Disposable implements IAgent {
 				if (controller) {
 					controller.applyAll(inventoryToSdkServers(this._mcpInventory.forThread(session.threadId)));
 				}
-				session.materializedMcpSig = undefined;
-				if (session.firstTurnSent) {
-					this._markSessionForReload(session);
-				}
+				this._syncSessionMcpLaunch(session);
 			}
 			for (const configurationResource of affectedConfigurations.values()) {
 				this._publishClientCustomizationsForConfiguration(configurationResource);
@@ -2747,12 +2748,7 @@ export class CodexAgent extends Disposable implements IAgent {
 			entry?.dispose();
 			const store = new DisposableStore();
 			const discovery = store.add(new SessionMcpDiscovery(roots, this._fileService));
-			store.add(discovery.onDidChange(() => {
-				session.materializedMcpSig = undefined;
-				if (session.firstTurnSent) {
-					this._markSessionForReload(session);
-				}
-			}));
+			store.add(discovery.onDidChange(() => this._syncSessionMcpLaunch(session)));
 			entry = { rootsSignature, discovery, dispose: () => store.dispose() };
 			this._sessionMcpDiscoveries.set(session.sessionId, entry);
 		}
@@ -2762,6 +2758,27 @@ export class CodexAgent extends Disposable implements IAgent {
 	private _isMcpServerEnabledForSdk(session: ICodexSession, name: string): boolean {
 		const resolution = this._customizationEnablementService.resolve(session.configurationResource.toString(), targetForUnownedMcpServer(name));
 		return resolution.kind === 'resolved' && resolution.enabled;
+	}
+
+	private _sessionMcpServersChanged(session: ICodexSession): boolean {
+		return mcpServersSignature(this._buildSessionMcpServers(session)) !== session.materializedMcpSig;
+	}
+
+	/**
+	 * Reload MCP only when the built `mcp_servers` set actually changed.
+	 * Workspace and customization notifications can fire without an MCP config
+	 * edit; clearing {@link ICodexSession.materializedMcpSig} in those cases
+	 * makes the next turn look like a full server-set change.
+	 */
+	private _syncSessionMcpLaunch(session: ICodexSession): void {
+		if (!this._sessionMcpServersChanged(session)) {
+			return;
+		}
+		if (session.firstTurnSent) {
+			this._markSessionForReload(session);
+			return;
+		}
+		session.materializedMcpSig = undefined;
 	}
 
 	/**
@@ -5861,7 +5878,7 @@ export class CodexAgent extends Disposable implements IAgent {
 		// `dynamicTools` and the servers in `config.mcp_servers`.
 		const customizationLaunch = await this._buildCustomizationLaunch(session);
 		const toolsChanged = toolsSignature(session.clientToolSet.merged()) !== session.materializedToolsSig;
-		const mcpChanged = mcpServersSignature(this._buildSessionMcpServers(session)) !== session.materializedMcpSig;
+		const mcpChanged = this._sessionMcpServersChanged(session);
 		const customizationsChanged = customizationLaunch.signature !== session.materializedCustomizationsSig;
 		if (session.firstTurnSent && mcpChanged) {
 			this._markSessionForReload(session);
@@ -7394,8 +7411,7 @@ export class CodexAgent extends Disposable implements IAgent {
 			return;
 		}
 		const launch = await this._buildCustomizationLaunch(session);
-		const mcpSignature = mcpServersSignature(this._buildSessionMcpServers(session));
-		if (launch.signature === session.materializedCustomizationsSig && mcpSignature === session.materializedMcpSig) {
+		if (launch.signature === session.materializedCustomizationsSig && !this._sessionMcpServersChanged(session)) {
 			return;
 		}
 		if (!session.firstTurnSent) {
