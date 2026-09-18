@@ -7977,7 +7977,7 @@ Use the attached image as context.
 					kind: { type: 'agent_idle', agentId: 'agent-a', agentType: 'task' },
 				},
 			}), {
-				messageText: 'Background agent `task` is complete',
+				messageText: 'Background agent `task` finished its turn and is waiting for follow-up',
 				startsTurn: true,
 			});
 
@@ -8057,11 +8057,11 @@ Use the attached image as context.
 				type: 'system.notification',
 				data: { content: 'Agent finished', kind },
 			})), [
-				{ messageText: 'Background agent `Astra picker review` is complete', startsTurn: true },
-				{ messageText: 'Background agent `Review the picker` is complete', startsTurn: true },
-				{ messageText: 'Background agent `code-review` is complete', startsTurn: true },
-				{ messageText: 'Background agent `` Review `permissions` `` is complete', startsTurn: true },
-				{ messageText: 'Background agent is complete', startsTurn: true },
+				{ messageText: 'Background agent `Astra picker review` finished its turn and is waiting for follow-up', startsTurn: true },
+				{ messageText: 'Background agent `Review the picker` finished its turn and is waiting for follow-up', startsTurn: true },
+				{ messageText: 'Background agent `code-review` finished its turn and is waiting for follow-up', startsTurn: true },
+				{ messageText: 'Background agent `` Review `permissions` `` finished its turn and is waiting for follow-up', startsTurn: true },
+				{ messageText: 'Background agent finished its turn and is waiting for follow-up', startsTurn: true },
 				{ messageText: 'Background agent completed', startsTurn: true },
 				{ messageText: 'Background agent failed', startsTurn: true },
 			]);
@@ -8086,7 +8086,7 @@ Use the attached image as context.
 				responseTurnId: (getActions(signals).find(a => a.type === ActionType.ChatResponsePart && a.part.kind === ResponsePartKind.Markdown) as ChatResponsePartAction | undefined)?.turnId,
 				completedTurnId: (getActions(signals).find(a => a.type === ActionType.ChatTurnComplete) as ChatTurnCompleteAction | undefined)?.turnId,
 			}, {
-				message: { text: 'Background agent `Investigate the issue` is complete', origin: { kind: MessageKind.SystemNotification } },
+				message: { text: 'Background agent `Investigate the issue` finished its turn and is waiting for follow-up', origin: { kind: MessageKind.SystemNotification } },
 				responseTurnId: turnStarted.turnId,
 				completedTurnId: turnStarted.turnId,
 			});
@@ -8112,8 +8112,75 @@ Use the attached image as context.
 				turnId: 'turn-active',
 				part: {
 					kind: ResponsePartKind.SystemNotification,
-					content: 'Background agent `Renderer reviewer` is complete',
+					content: 'Background agent `Renderer reviewer` finished its turn and is waiting for follow-up',
 				},
+			});
+		});
+
+		test('idle notification stays nonterminal after write_agent resumes the same agent (#336671)', async () => {
+			const { session, mockSession, signals } = await createAgentSession(disposables);
+			session.resetTurnState('turn-parent');
+
+			mockSession.fire('subagent.started', {
+				toolCallId: 'tc-proj1-readme',
+				agentName: 'general-purpose',
+				agentDisplayName: 'proj1-readme',
+				agentDescription: 'Write the project readme',
+			}, { agentId: 'agent-proj1' });
+			const idleTask = {
+				type: 'agent' as const,
+				id: 'agent-proj1',
+				toolCallId: 'tc-proj1-readme',
+				description: 'Write the project readme',
+				status: 'idle' as const,
+				agentType: 'general-purpose',
+				prompt: 'Write the project readme',
+				startedAt: new Date(0).toISOString(),
+				idleSince: new Date(1).toISOString(),
+			};
+			mockSession.backgroundTasks = [idleTask];
+			mockSession.fire('session.background_tasks_changed', {});
+			await timeout(0);
+
+			mockSession.fire('system.notification', {
+				content: 'Agent "agent-proj1" has finished processing and is now idle.',
+				kind: { type: 'agent_idle', agentId: 'agent-proj1', agentType: 'general-purpose', displayName: 'proj1-readme' },
+			} as SessionEventPayload<'system.notification'>['data']);
+
+			mockSession.fire('tool.execution_start', {
+				toolCallId: 'tc-write',
+				toolName: 'write_agent',
+				arguments: { agent_id: 'agent-proj1', message: 'Continue with the next section.' },
+			} as SessionEventPayload<'tool.execution_start'>['data']);
+			mockSession.fire('user.message', {
+				content: 'Continue with the next section.',
+				source: 'agent-parent',
+			}, { agentId: 'agent-proj1' });
+			mockSession.backgroundTasks = [{
+				...idleTask,
+				status: 'running',
+				prompt: 'Continue with the next section.',
+				idleSince: undefined,
+				activeStartedAt: new Date(2).toISOString(),
+			}];
+			mockSession.fire('session.background_tasks_changed', {});
+			await timeout(0);
+			mockSession.fire('assistant.turn_start', { turnId: 'sdk-subagent-turn-2' }, { agentId: 'agent-proj1' });
+
+			const parentNotifications = getActions(signals)
+				.filter((action): action is ChatResponsePartAction =>
+					action.type === ActionType.ChatResponsePart && action.part.kind === ResponsePartKind.SystemNotification)
+				.map(action => action.part.content);
+			const terminalClaim = /\bis complete\b|\bcompleted\b|\bfailed\b/;
+
+			assert.deepStrictEqual({
+				notifications: parentNotifications,
+				resumed: signals.filter(signal => signal.kind === 'subagent_resumed').map(signal => signal.toolCallId),
+				claimsComplete: parentNotifications.some(content => terminalClaim.test(String(content))),
+			}, {
+				notifications: ['Background agent `proj1-readme` finished its turn and is waiting for follow-up'],
+				resumed: ['tc-proj1-readme'],
+				claimsComplete: false,
 			});
 		});
 
@@ -8184,7 +8251,7 @@ Use the attached image as context.
 				updates: [
 					{ kind: ResponsePartKind.Reasoning, scope: 'parent', content: 'Before notification' },
 					{ kind: ResponsePartKind.Reasoning, scope: 'task-running', content: 'Child reasoning' },
-					{ kind: ResponsePartKind.SystemNotification, scope: 'parent', content: 'Background agent `Completed reviewer` is complete' },
+					{ kind: ResponsePartKind.SystemNotification, scope: 'parent', content: 'Background agent `Completed reviewer` finished its turn and is waiting for follow-up' },
 					{ kind: ResponsePartKind.Reasoning, scope: 'parent', content: 'After notification' },
 					{ kind: 'delta', scope: 'parent', content: ' continued' },
 					{ kind: 'delta', scope: 'task-running', content: ' still running' },

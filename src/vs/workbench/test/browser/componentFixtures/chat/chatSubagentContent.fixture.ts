@@ -136,7 +136,7 @@ async function renderSubagent(context: ComponentFixtureContext, state: 'pending'
 		renderer.renderElement(node, 0, template);
 	}));
 	if (state === 'thinking') {
-		publisher.publish([{ kind: 'systemNotification', content: new MarkdownString('Background agent `Factorial 1` is complete') }]);
+		publisher.publish([{ kind: 'systemNotification', content: new MarkdownString('Background agent `Factorial 1` finished its turn and is waiting for follow-up') }]);
 		publisher.publish([{ kind: 'thinking', id: 'before', value: '**Processing agent notifications**\nReview the first result.' }]);
 		const tool = new ChatToolInvocation(
 			{ invocationMessage: 'Read first agent result', pastTenseMessage: 'Read first agent result' },
@@ -147,7 +147,7 @@ async function renderSubagent(context: ComponentFixtureContext, state: 'pending'
 		publisher.publish([tool]);
 		publisher.publish([{ kind: 'thinking', id: 'coordinating', value: '**Coordinating parallel tool use**\nWait for the other results.' }]);
 		for (const number of [5, 4, 3, 2]) {
-			publisher.publish([{ kind: 'systemNotification', content: new MarkdownString(`Background agent \`Factorial ${number}\` is complete`) }]);
+			publisher.publish([{ kind: 'systemNotification', content: new MarkdownString(`Background agent \`Factorial ${number}\` finished its turn and is waiting for follow-up`) }]);
 		}
 		publisher.publish([{ kind: 'thinking', id: 'after', value: '**Reading completed agents**\nReview all remaining results below their completion notices.' }]);
 		publisher.publish([new ChatToolInvocation(
@@ -234,7 +234,7 @@ function renderCompletionNotices(context: ComponentFixtureContext): void {
 	const transcript = dom.append(container, dom.$('.interactive-item-container'));
 	const renderer = instantiationService.createInstance(ChatContentMarkdownRenderer);
 	for (const content of [
-		'Background agent `Renderer reviewer` is complete',
+		'Background agent `Renderer reviewer` finished its turn and is waiting for follow-up',
 		'Background agent `History reviewer` completed',
 		'Background agent `Lifecycle reviewer` failed',
 	]) {

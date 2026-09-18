@@ -39,10 +39,12 @@ export function buildCopilotSystemNotification(event: SessionEventPayload<'syste
 			const name = kind.displayName?.trim() || kind.description?.trim() || kind.agentType.trim();
 			const formattedName = name ? appendEscapedMarkdownInlineCode(name) : undefined;
 			if (kind.type === 'agent_idle') {
+				// Nonterminal: the agent finished a turn and can still be resumed with write_agent.
+				// Reserve completed/failed wording for agent_completed (#336671, regression from #323805).
 				return {
 					messageText: formattedName
-						? localize('agentHost.copilot.systemNotification.agentIdle', "Background agent {0} is complete", formattedName)
-						: localize('agentHost.copilot.systemNotification.unnamedAgentIdle', "Background agent is complete"),
+						? localize('agentHost.copilot.systemNotification.agentIdle', "Background agent {0} finished its turn and is waiting for follow-up", formattedName)
+						: localize('agentHost.copilot.systemNotification.unnamedAgentIdle', "Background agent finished its turn and is waiting for follow-up"),
 					startsTurn: true,
 				};
 			}

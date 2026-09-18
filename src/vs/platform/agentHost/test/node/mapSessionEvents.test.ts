@@ -392,7 +392,7 @@ suite('mapSessionEvents — history replay', () => {
 			parts: [{ kind: ResponsePartKind.Error }],
 		}, {
 			id: 'notification-turn',
-			message: { text: 'Background agent `general-purpose` is complete', origin: { kind: MessageKind.SystemNotification } },
+			message: { text: 'Background agent `general-purpose` finished its turn and is waiting for follow-up', origin: { kind: MessageKind.SystemNotification } },
 			state: TurnState.Complete,
 			parts: [{ kind: ResponsePartKind.Markdown, content: 'The background agent finished.' }],
 		}]);
@@ -875,10 +875,56 @@ suite('mapSessionEvents — history replay', () => {
 			state: TurnState.Complete,
 			parts: [
 				{ kind: ResponsePartKind.Markdown, content: 'The background agent is running.' },
-				{ kind: ResponsePartKind.SystemNotification, content: 'Background agent `Renderer reviewer` is complete' },
+				{ kind: ResponsePartKind.SystemNotification, content: 'Background agent `Renderer reviewer` finished its turn and is waiting for follow-up' },
 				{ kind: ResponsePartKind.Markdown, content: 'Reading the background agent result.' },
 			],
 		}]);
+	});
+
+	test('history replay keeps idle notification nonterminal after write_agent resume (#336671)', async () => {
+		const events: ISessionEvent[] = [
+			{ type: 'user.message', id: 'user-event', data: { interactionId: 'interaction-1', content: 'Start the background agent' } },
+			{ type: 'assistant.turn_start', data: { turnId: '0', interactionId: 'interaction-1' } },
+			{ type: 'assistant.message', data: { interactionId: 'interaction-1', content: '', toolRequests: [{ toolCallId: 'tc-task', name: 'task' }] } },
+			{ type: 'tool.execution_start', data: { toolCallId: 'tc-task', toolName: 'task', arguments: { description: 'Write the project readme', agentName: 'general-purpose' } } },
+			{ type: 'subagent.started', agentId: 'agent-proj1', data: { toolCallId: 'tc-task', agentName: 'general-purpose', agentDisplayName: 'proj1-readme', agentDescription: 'Write the project readme' } },
+			{ type: 'user.message', agentId: 'agent-proj1', data: { interactionId: 'child-1', content: 'Write the project readme' } },
+			{ type: 'assistant.message', agentId: 'agent-proj1', data: { messageId: 'child-1', content: 'Drafted the first section.' } },
+			{ type: 'tool.execution_complete', data: { toolCallId: 'tc-task', success: true, result: { content: 'Agent started in background.' } } },
+			{ type: 'assistant.turn_end', data: { turnId: '0' } },
+			{
+				type: 'system.notification',
+				id: 'idle-notification',
+				data: {
+					content: '<system_notification>\nAgent idle\n</system_notification>',
+					kind: { type: 'agent_idle', agentId: 'agent-proj1', agentType: 'general-purpose', displayName: 'proj1-readme' },
+				},
+			},
+			{ type: 'assistant.turn_start', data: { turnId: '1', interactionId: 'interaction-2' } },
+			{ type: 'assistant.message', data: { interactionId: 'interaction-2', content: '', toolRequests: [{ toolCallId: 'tc-write', name: 'write_agent', arguments: { agent_id: 'agent-proj1', message: 'Continue with the next section.' } }] } },
+			{ type: 'tool.execution_start', data: { toolCallId: 'tc-write', toolName: 'write_agent', arguments: { agent_id: 'agent-proj1', message: 'Continue with the next section.' } } },
+			{ type: 'user.message', agentId: 'agent-proj1', data: { interactionId: 'child-2', content: 'Continue with the next section.' } },
+			{ type: 'assistant.turn_start', agentId: 'agent-proj1', data: { turnId: 'child-2' } },
+			{ type: 'assistant.message', agentId: 'agent-proj1', data: { messageId: 'child-2', content: 'Writing the next section.' } },
+			{ type: 'tool.execution_complete', data: { toolCallId: 'tc-write', success: true } },
+			{ type: 'assistant.turn_end', data: { turnId: '1' } },
+		];
+
+		const { turns, subagentTurnsByToolCallId } = await mapSessionEvents(session, undefined, toSessionEvents(events));
+		const parentNotifications = turns.flatMap(turn => turn.responseParts.flatMap(part =>
+			part.kind === ResponsePartKind.SystemNotification ? [part.content] : []));
+		const childTurns = subagentTurnsByToolCallId.get('tc-task') ?? [];
+		const terminalClaim = /\bis complete\b|\bcompleted\b|\bfailed\b/;
+
+		assert.deepStrictEqual({
+			parentNotifications,
+			claimsComplete: parentNotifications.some(content => terminalClaim.test(String(content))),
+			childPrompts: childTurns.map(turn => turn.message.text),
+		}, {
+			parentNotifications: ['Background agent `proj1-readme` finished its turn and is waiting for follow-up'],
+			claimsComplete: false,
+			childPrompts: ['Write the project readme', 'Continue with the next section.'],
+		});
 	});
 
 	test('restores reasoning on either side of a completion notification in order', async () => {
@@ -904,7 +950,7 @@ suite('mapSessionEvents — history replay', () => {
 				: { kind: part.kind }
 		)), [[
 			{ kind: ResponsePartKind.Reasoning, content: 'Before notification' },
-			{ kind: ResponsePartKind.SystemNotification, content: 'Background agent `Completed reviewer` is complete' },
+			{ kind: ResponsePartKind.SystemNotification, content: 'Background agent `Completed reviewer` finished its turn and is waiting for follow-up' },
 			{ kind: ResponsePartKind.Reasoning, content: 'After notification' },
 		]]);
 	});

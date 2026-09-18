@@ -92,8 +92,8 @@ const scenarios: Record<string, Scenario> = {
 	RetainedFollowUpLatestTurn: { phase: 'followUp', latestTurnOnly: true, description: 'Known visibility gap from the supplied logs: this viewport shows the latest turn, while the active worker pill belongs to an earlier response. Use Show Original Agent to find it.' },
 	ResumedIdleBackgroundAgent: { phase: 'resumedFollowUp', description: 'A different case: the older background worker completed before the follow-up. Resuming it reactivates its original pill, without adding a launch to the latest parent response.' },
 	OffscreenSubagentApprovals: { phase: 'resumedFollowUp', latestTurnOnly: true, confirmations: true, description: 'Request approvals from two retained agents while their original launch response is virtualized away. The real input carousel must expose both commands; Allow or the Accept/Skip commands act only on the selected mock agent.' },
-	BackgroundCompletionNotification: { phase: 'notified', description: 'The retained worker finishes while the latest parent is waiting. The old pill settles, and the current response receives the background-completion notice.' },
-	CompletionWakesIdleParent: { phase: 'idleNotice', description: 'A background-completion notification starts a new system-initiated turn. The old parent response remains complete; it is not reopened.' },
+	BackgroundCompletionNotification: { phase: 'notified', description: 'The retained worker finishes a turn while the latest parent is waiting. The old pill settles, and the current response receives the idle notice.' },
+	CompletionWakesIdleParent: { phase: 'idleNotice', description: 'A background-idle notification starts a new system-initiated turn. The old parent response remains complete; it is not reopened.' },
 	BackgroundFailureNotification: { phase: 'failed', description: 'A failed background task stops running and its failure notice appears in a new system-initiated turn. The original child pill is retained.' },
 	NestedBackgroundRunning: { phase: 'nested', description: 'A direct child finishes while its nested background worker continues. The containing root card must not be folded into completed steps.' },
 	ParallelBackgroundAgents: { phase: 'parallel', description: 'Two background workers are active with different tasks. A third is queued and does not reserve an earlier empty slot.' },
@@ -381,7 +381,7 @@ async function renderLifecycle(context: ComponentFixtureContext, name: string, s
 	};
 	const notice = async (child: Child) => {
 		await finish(child);
-		publish(current, [{ kind: 'systemNotification', content: new MarkdownString('Background agent `Fixture reviewer` is complete') }]);
+		publish(current, [{ kind: 'systemNotification', content: new MarkdownString('Background agent `Fixture reviewer` finished its turn and is waiting for follow-up') }]);
 		markdown(current, 'The background review finished. Reviewing the results.');
 	};
 	markdown(root, 'Delegating a read-only fixture review. The main agent can keep working independently.');
@@ -464,7 +464,7 @@ async function renderLifecycle(context: ComponentFixtureContext, name: string, s
 			if (scenario.phase === 'idleNotice' || scenario.phase === 'failed') {
 				completeParent(root);
 				await finish(first);
-				const message = scenario.phase === 'failed' ? 'Background agent `Fixture reviewer` failed' : 'Background agent `Fixture reviewer` is complete';
+				const message = scenario.phase === 'failed' ? 'Background agent `Fixture reviewer` failed' : 'Background agent `Fixture reviewer` finished its turn and is waiting for follow-up';
 				current = request(message, true);
 				publish(current, [{ kind: 'systemNotification', content: new MarkdownString(message) }]);
 				markdown(current, scenario.phase === 'failed' ? 'The delegated review failed. I will inspect the error before retrying.' : 'The delegated review finished. I will inspect its results.');

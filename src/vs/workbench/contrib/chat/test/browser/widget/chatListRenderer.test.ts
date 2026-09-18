@@ -1356,7 +1356,7 @@ suite('ChatListRenderer', () => {
 				renderer.renderElement(node, 0, template);
 				const initialThinking = template.renderedParts?.find(part => part instanceof ChatThinkingContentPart);
 				for (const name of ['First reviewer', 'Second reviewer']) {
-					model.acceptResponseProgress(request, { kind: 'systemNotification', content: new MarkdownString(`Background agent \`${name}\` is complete`) });
+					model.acceptResponseProgress(request, { kind: 'systemNotification', content: new MarkdownString(`Background agent \`${name}\` finished its turn and is waiting for follow-up`) });
 					renderer.renderElement(node, 0, template);
 				}
 				const closedAtNotice = initialThinking?.getIsActive() === false;

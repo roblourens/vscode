@@ -91,7 +91,7 @@ suite('ChatSystemNotificationContentPart', () => {
 		const renderer: IMarkdownRenderer = { render: markdown => renderMarkdown(markdown) };
 		const names = ['Renderer reviewer', 'Review `permissions`', '[Renderer](command:unused)'];
 		const rendered = names.map(name => {
-			const content = new MarkdownString(`Background agent ${appendEscapedMarkdownInlineCode(name)} is complete`);
+			const content = new MarkdownString(`Background agent ${appendEscapedMarkdownInlineCode(name)} finished its turn and is waiting for follow-up`);
 			const part = disposables.add(instantiationService.createInstance(ChatSystemNotificationContentPart, { kind: 'systemNotification', content }, renderer));
 			return {
 				titles: [...part.domNode.querySelectorAll('code')].map(code => code.textContent),
@@ -103,8 +103,8 @@ suite('ChatSystemNotificationContentPart', () => {
 
 		assert.deepStrictEqual(rendered, names.map(name => ({
 			titles: [name],
-			text: `Background agent ${name} is complete`,
-			plaintext: `Background agent ${name} is complete`,
+			text: `Background agent ${name} finished its turn and is waiting for follow-up`,
+			plaintext: `Background agent ${name} finished its turn and is waiting for follow-up`,
 			links: 0,
 		})));
 	});
