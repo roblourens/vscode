@@ -44,7 +44,7 @@ import { CopilotCliConfigKey, CopilotCliVSCodeAssignmentContextKey, copilotCliCo
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostByokModelsEnabledConfigKey, AgentHostMcpServersConfigKey, AgentHostGitHubMcpServerEnabledConfigKey, AgentHostCopilotMultiRootEnabledConfigKey, AgentHostSessionSyncEnabledConfigKey, AgentHostSystemProxyEnabledConfigKey, AgentHostMigrateLegacyCopilotCliEnabledConfigKey, AgentHostProxyConfigKey, agentHostProxyConfigSchema, AutoApproveLevel, SessionMode, migrateLegacyAutopilotConfig, platformRootSchema, platformSessionSchema, type AgentHostMcpServers } from '../../common/agentHostSchema.js';
 import { IAgentPluginManager, ISyncedCustomization } from '../../common/agentPluginManager.js';
 import { decodeProviderData, encodeProviderData, type IPersistedChat } from '../agentChatBackings.js';
-import { AgentChatOperationContext, AgentSession, AgentSignal, AuthenticateParams, IActiveClient, IAgent, IAgentChatAdoptionResult, type IAgentAdoptedWorktree, IAgentChatConfigCompletionsParams, IAgentChatContext, IAgentChatDataChange, IAgentChatMetadata, IAgentChats, IAgentLegacyChat, IAgentCreateChatOptions, IAgentCreateChatResult, IAgentDescriptor, IAgentDiscoveredChat, IAgentHostManagedSettingsSnapshot, IAgentHostNetworkEndpoint, IAgentKnownSessionsFilter, IAgentMaterializeChatEvent, IAgentModelInfo, IAgentResolveChatConfigParams, IAgentSessionProjectInfo, IAgentSpawnChatEvent, IMcpNotification, SubagentChatSignal, resolveAgentChatContext, resolveAgentHostCustomizations, resolveAgentHostInstructions, resolveSubagentChatParent, type IAgentTurnDiagnosticSnapshot, type IAgentTurnTokenUsage } from '../../common/agent.js';
+import { AgentChatOperationContext, AgentSession, AgentSignal, AuthenticateParams, IActiveClient, IAgent, IAgentChatAdoptionResult, type IAgentAdoptedWorktree, IAgentChatConfigCompletionsParams, IAgentChatContext, IAgentChatDataChange, IAgentChatMetadata, type IAgentChatMetadataOptions, IAgentChats, IAgentLegacyChat, IAgentCreateChatOptions, IAgentCreateChatResult, IAgentDescriptor, IAgentDiscoveredChat, IAgentHostManagedSettingsSnapshot, IAgentHostNetworkEndpoint, IAgentKnownSessionsFilter, IAgentMaterializeChatEvent, IAgentModelInfo, IAgentResolveChatConfigParams, IAgentSessionProjectInfo, IAgentSpawnChatEvent, IMcpNotification, SubagentChatSignal, resolveAgentChatContext, resolveAgentHostCustomizations, resolveAgentHostInstructions, resolveSubagentChatParent, type IAgentTurnDiagnosticSnapshot, type IAgentTurnTokenUsage } from '../../common/agent.js';
 import { getReasoningEffortDescription, getReasoningEffortLabel, resolveDefaultReasoningEffort } from '../../common/reasoningEffort.js';
 import { autoModeTiers, defaultAutoModeTier, getAutoModeTierDescription, getAutoModeTierLabel } from '../../common/autoModeTiers.js';
 import { isAutoModel } from './modelIdentifiers.js';
@@ -358,6 +358,17 @@ interface IWorkingDirectoryMetadataSnapshot {
 	readonly workingDirectory: string | undefined;
 	readonly workingDirectories: string | undefined;
 	readonly customizationDirectory: string | undefined;
+}
+
+interface ICopilotStoredSessionMetadata {
+	model?: ModelSelection;
+	agent?: AgentSelection;
+	workingDirectory?: URI;
+	workingDirectories?: readonly URI[];
+	customizationDirectory?: URI;
+	project?: IAgentSessionProjectInfo;
+	resolved: boolean;
+	workspaceless?: boolean;
 }
 
 interface IWorkingDirectoryChangeTransactionOptions {
@@ -2605,16 +2616,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 			const session = AgentSession.uri(this.id, s.sessionId);
 			const chat = URI.parse(buildDefaultChatUri(session));
 			const metadata = await this._readStoredSessionMetadata(session);
-			if (!metadata || !(
-				metadata.model !== undefined
-				|| metadata.agent !== undefined
-				|| metadata.workingDirectory !== undefined
-				|| metadata.workingDirectories !== undefined
-				|| metadata.customizationDirectory !== undefined
-				|| metadata.project !== undefined
-				|| metadata.resolved
-				|| metadata.workspaceless !== undefined
-			)) {
+			if (!this._isHostOwnedStoredMetadata(metadata)) {
 				return undefined;
 			}
 			let { project, resolved } = metadata;
@@ -2952,7 +2954,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 		});
 	}
 
-	async getChatMetadata(chat: URI, context: URI | IAgentChatContext, providerData?: string): Promise<IAgentChatMetadata | undefined> {
+	async getChatMetadata(chat: URI, context: URI | IAgentChatContext, providerData?: string, options?: IAgentChatMetadataOptions): Promise<IAgentChatMetadata | undefined> {
 		const session = resolveAgentChatContext(context, chat).configurationResource;
 		const sessionId = providerData ? decodeProviderData(providerData)?.sdkSessionId : AgentSession.id(session);
 		if (!sessionId) {
@@ -2965,7 +2967,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 		const prewarmed = this._prewarmedSessionMetadata?.get(sessionId);
 		const sessionMetadata = prewarmed ?? await this._retryAfterClosedConnection('getSessionMetadata', client => client.getSessionMetadata(sessionId), createCopilotFailureCorrelation(session, chat, undefined, sessionId));
 		if (!sessionMetadata) {
-			return undefined;
+			// The SDK can omit a host-owned session that is still in session.db
+			// (e.g. after an SDK update). Ambient listing still offers registry
+			// timestamps; serve stored host metadata rather than dropping the row.
+			return this._chatMetadataWithoutSdk(chat, storedMetadata, options);
 		}
 
 		let project = storedMetadata?.project;
@@ -5863,7 +5868,47 @@ export class CopilotAgent extends Disposable implements IAgent {
 		}
 	}
 
-	private async _readStoredSessionMetadata(session: URI): Promise<{ model?: ModelSelection; agent?: AgentSelection; workingDirectory?: URI; workingDirectories?: readonly URI[]; customizationDirectory?: URI; project?: IAgentSessionProjectInfo; resolved: boolean; workspaceless?: boolean } | undefined> {
+	/**
+	 * Host-owned Copilot metadata in session.db — cwd, model, agent, project, or
+	 * the workspaceless marker. An incidental empty DB (`resolved: false` only)
+	 * is not ownership: checkpoint / git services can create those files.
+	 */
+	private _isHostOwnedStoredMetadata(metadata: ICopilotStoredSessionMetadata | undefined): metadata is ICopilotStoredSessionMetadata {
+		return !!metadata && (
+			metadata.model !== undefined
+			|| metadata.agent !== undefined
+			|| metadata.workingDirectory !== undefined
+			|| metadata.workingDirectories !== undefined
+			|| metadata.customizationDirectory !== undefined
+			|| metadata.project !== undefined
+			|| metadata.resolved
+			|| metadata.workspaceless !== undefined
+		);
+	}
+
+	/**
+	 * Ambient listing still needs a row when the SDK omits a registered session.
+	 * Prefer stored host-owned fields; otherwise accept the host's registry
+	 * timestamps so the session stays visible until restore.
+	 */
+	private _chatMetadataWithoutSdk(
+		chat: URI,
+		storedMetadata: ICopilotStoredSessionMetadata | undefined,
+		options?: IAgentChatMetadataOptions,
+	): IAgentChatMetadata | undefined {
+		if (this._isHostOwnedStoredMetadata(storedMetadata)) {
+			return {
+				chat,
+				startTime: options?.registryFallback?.startTime ?? Date.now(),
+				modifiedTime: options?.registryFallback?.modifiedTime ?? Date.now(),
+				project: storedMetadata.project,
+				workingDirectories: storedMetadata.workingDirectories,
+			};
+		}
+		return options?.registryFallback ? { chat, ...options.registryFallback } : undefined;
+	}
+
+	private async _readStoredSessionMetadata(session: URI): Promise<ICopilotStoredSessionMetadata | undefined> {
 		const ref = await this._sessionDataService.tryOpenDatabase(session);
 		if (!ref) {
 			return undefined;

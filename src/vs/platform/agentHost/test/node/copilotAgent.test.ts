@@ -8004,6 +8004,110 @@ suite('CopilotAgent', () => {
 		}
 	});
 
+	test('getChatMetadata serves stored host-owned metadata when the SDK omits the session', async () => {
+		const sessionDataService = disposables.add(new TestSessionDataService());
+		const session = AgentSession.uri('copilotcli', 'stored-only');
+		const db = sessionDataService.openDatabase(session);
+		await db.object.setMetadata('copilot.workingDirectory', URI.file('/workspace').toString());
+		await db.object.setMetadata('agentHost.workspaceless', 'false');
+		db.dispose();
+
+		const client = new TestCopilotClient([]);
+		const agent = createTestAgent(disposables, { sessionDataService, copilotClient: client });
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+
+			const chat = defaultChatUri(session);
+			const metadata = await agent.getChatMetadata(chat, exactChatContext(session, chat, session), undefined, {
+				registryFallback: { startTime: 111, modifiedTime: 222 },
+			});
+			assert.ok(metadata);
+			assert.deepStrictEqual(withoutUndefinedProperties(metadata), {
+				chat,
+				startTime: 111,
+				modifiedTime: 222,
+				workingDirectories: [URI.file('/workspace')],
+			});
+			assert.deepStrictEqual(client.getSessionMetadataCalls, ['stored-only']);
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('getChatMetadata restore uses stored host-owned fields when the SDK omits the session', async () => {
+		const sessionDataService = disposables.add(new TestSessionDataService());
+		const session = AgentSession.uri('copilotcli', 'restore-stored');
+		const db = sessionDataService.openDatabase(session);
+		await db.object.setMetadata('copilot.workingDirectory', URI.file('/workspace').toString());
+		db.dispose();
+
+		const agent = createTestAgent(disposables, { sessionDataService, copilotClient: new TestCopilotClient([]) });
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+
+			const chat = defaultChatUri(session);
+			const metadata = await agent.getChatMetadata(chat, exactChatContext(session, chat, session), undefined, { activation: 'restore' });
+			assert.ok(metadata);
+			assert.deepStrictEqual({
+				chat: metadata.chat,
+				workingDirectories: metadata.workingDirectories,
+			}, {
+				chat,
+				workingDirectories: [URI.file('/workspace')],
+			});
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('getChatMetadata accepts registry fallback when the SDK and session.db both miss', async () => {
+		const session = AgentSession.uri('copilotcli', 'registry-only');
+		const client = new TestCopilotClient([]);
+		const agent = createTestAgent(disposables, { copilotClient: client });
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+
+			const chat = defaultChatUri(session);
+			const metadata = await agent.getChatMetadata(chat, exactChatContext(session, chat, session), undefined, {
+				registryFallback: { startTime: 1, modifiedTime: 2 },
+			});
+			assert.deepStrictEqual(metadata && withoutUndefinedProperties(metadata), {
+				chat,
+				startTime: 1,
+				modifiedTime: 2,
+			});
+			assert.deepStrictEqual(client.getSessionMetadataCalls, ['registry-only']);
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('getChatMetadata does not treat an empty incidental database as host-owned', async () => {
+		const sessionDataService = disposables.add(new TestSessionDataService());
+		const session = AgentSession.uri('copilotcli', 'ghost-db');
+		sessionDataService.openDatabase(session).dispose();
+
+		const agent = createTestAgent(disposables, { sessionDataService, copilotClient: new TestCopilotClient([]) });
+		try {
+			await agent.authenticate('https://api.github.com', 'token');
+
+			const chat = defaultChatUri(session);
+			const ambient = await agent.getChatMetadata(chat, exactChatContext(session, chat, session));
+			const fallback = await agent.getChatMetadata(chat, exactChatContext(session, chat, session), undefined, {
+				registryFallback: { startTime: 5, modifiedTime: 6 },
+			});
+			assert.deepStrictEqual({
+				ambient,
+				fallback: fallback && withoutUndefinedProperties(fallback),
+			}, {
+				ambient: undefined,
+				fallback: { chat, startTime: 5, modifiedTime: 6 },
+			});
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
 	test('listChatsToMigrate checks but does not create databases for unowned SDK sessions', async () => {
 		const sessionDataService = disposables.add(new TestSessionDataService());
 		const agent = createTestAgent(disposables, { sessionDataService, copilotClient: new TestCopilotClient([sdkSession('external', '/workspace')]) });
