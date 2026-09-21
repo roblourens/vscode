@@ -1379,6 +1379,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		}
 
 		if (model) {
+			this.seedLocalChatModeFromViewState(model);
 			setModelPreservingInputTypedWhileLoading(this._widget, baselineInput, () => this._widget.setModel(model));
 			const widgetViewState = this.widgetViewStates.get(getComparisonKey(model.sessionResource));
 			if (widgetViewState) {
@@ -1409,6 +1410,23 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		}
 
 		return model;
+	}
+
+	/**
+	 * `chat.restoreLastPanelSession` defaults to false, so restart starts a new
+	 * empty local session. The view memento still holds last-used input state
+	 * including mode; copy that onto the new session so Agent survives restart
+	 * instead of falling through to Ask / `chat.newSession.defaultMode` (#337078).
+	 */
+	private seedLocalChatModeFromViewState(model: IChatModel): void {
+		if (getChatSessionType(model.sessionResource) !== localChatSessionType) {
+			return;
+		}
+		const persistedMode = this.viewState.mode;
+		if (!persistedMode?.id || model.inputModel.state.get()) {
+			return;
+		}
+		model.inputModel.setState({ mode: persistedMode });
 	}
 
 	private async updateWidgetLockState(sessionType: string): Promise<void> {

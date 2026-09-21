@@ -192,6 +192,18 @@ export function shouldRestorePerTypeModelOnSessionSwitch(isEmpty: boolean, sessi
 }
 
 /**
+ * Last-used / user-selected chat mode outranks `chat.newSession.defaultMode`.
+ *
+ * That setting (and the TAS experiment that fills it) is only a first-run seed
+ * for an empty session that has no persisted mode yet. Re-applying it after
+ * restore — including when TAS registers the default asynchronously — would
+ * reset Agent to Ask across restarts (#337078).
+ */
+export function shouldApplyDefaultNewSessionMode(hasPersistedOrUserMode: boolean): boolean {
+	return !hasPersistedOrUserMode;
+}
+
+/**
  * Whether two models bill the same way. A BYOK model and a first-party one can share id, family and
  * name, so matching across them changes which account is billed; two copies of one key do match.
  */

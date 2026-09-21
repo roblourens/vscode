@@ -16,7 +16,7 @@ import { IStorageService } from '../../../../../platform/storage/common/storage.
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { TestStorageService } from '../../../../test/common/workbenchTestServices.js';
 import { IChatAgentService } from '../../common/participants/chatAgents.js';
-import { ChatMode, ChatModeService } from '../../common/chatModes.js';
+import { ChatMode, ChatModeService, getBuiltinChatMode } from '../../common/chatModes.js';
 import { ChatModeKind } from '../../common/constants.js';
 import { IAgentSource, ICustomAgent, IPromptsService, PromptsStorage } from '../../common/promptSyntax/service/promptsService.js';
 import { createVSCodeHarnessDescriptor, CustomizationHarnessServiceBase, ICustomizationHarnessService } from '../../common/customizationHarnessService.js';
@@ -100,7 +100,7 @@ suite('ChatModeService', () => {
 		let agents = await chatModeService.getLocalModes();
 		assert.ok(agents.builtin.find(agent => agent.id === ChatModeKind.Agent));
 
-		// Without tools agent - Agent mode should not be present
+		// Without tools agent - Agent mode should not be present in the picker list
 		chatAgentService.setHasToolsAgent(false);
 		agents = await chatModeService.getLocalModes();
 		assert.strictEqual(agents.builtin.find(agent => agent.id === ChatModeKind.Agent), undefined);
@@ -108,6 +108,21 @@ suite('ChatModeService', () => {
 		// Ask and Edit modes should always be present
 		assert.ok(agents.builtin.find(agent => agent.id === ChatModeKind.Ask));
 		assert.ok(agents.builtin.find(agent => agent.id === ChatModeKind.Edit));
+	});
+
+	test('findModeById still resolves Agent when it is hidden from the picker', async () => {
+		chatAgentService.setHasToolsAgent(false);
+		const modes = await chatModeService.getLocalModes();
+		assert.strictEqual(modes.builtin.find(mode => mode.id === ChatModeKind.Agent), undefined);
+		assert.strictEqual(modes.findModeById(ChatModeKind.Agent)?.id, ChatModeKind.Agent);
+		assert.strictEqual(modes.findModeByName('Agent')?.id, ChatModeKind.Agent);
+	});
+
+	test('getBuiltinChatMode resolves Agent regardless of picker availability', () => {
+		assert.strictEqual(getBuiltinChatMode(ChatModeKind.Agent), ChatMode.Agent);
+		assert.strictEqual(getBuiltinChatMode('Agent'), ChatMode.Agent);
+		assert.strictEqual(getBuiltinChatMode('ask'), ChatMode.Ask);
+		assert.strictEqual(getBuiltinChatMode('unknown'), undefined);
 	});
 
 	test('should find builtin modes by id', async () => {

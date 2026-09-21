@@ -141,11 +141,14 @@ class ChatModes extends Disposable implements IChatModes {
 	}
 
 	findModeById(id: string | ChatModeKind): IChatMode | undefined {
-		return this.getBuiltinModes().find(mode => mode.id === id) ?? this._customModeInstances.get(id);
+		// Builtin Agent can be omitted from the picker until a tools agent is
+		// registered. Restore/set still need to resolve it so last-used Agent
+		// is not dropped to Ask (#254173, #337078).
+		return getBuiltinChatMode(id) ?? this.getBuiltinModes().find(mode => mode.id === id) ?? this._customModeInstances.get(id);
 	}
 
 	findModeByName(name: string): IChatMode | undefined {
-		return this.getBuiltinModes().find(mode => mode.name.get() === name) ?? this.getCustomModes().find(mode => mode.name.get() === name || mode.id === name);
+		return getBuiltinChatMode(name) ?? this.getBuiltinModes().find(mode => mode.name.get() === name) ?? this.getCustomModes().find(mode => mode.name.get() === name || mode.id === name);
 	}
 
 	waitForPendingUpdates(): Promise<void> {
@@ -720,6 +723,24 @@ export function isBuiltinChatMode(mode: IChatMode): boolean {
 	return mode.id === ChatMode.Ask.id ||
 		mode.id === ChatMode.Edit.id ||
 		mode.id === ChatMode.Agent.id;
+}
+
+/**
+ * Resolve a builtin chat mode by id, kind, or case-insensitive name/label.
+ * Unlike {@link IChatModes.builtin}, this does not depend on tools-agent
+ * availability, so Agent remains restorable while the picker is still loading.
+ */
+export function getBuiltinChatMode(idOrName: string | ChatModeKind): IChatMode | undefined {
+	switch (String(idOrName).toLowerCase()) {
+		case ChatModeKind.Ask:
+			return ChatMode.Ask;
+		case ChatModeKind.Edit:
+			return ChatMode.Edit;
+		case ChatModeKind.Agent:
+			return ChatMode.Agent;
+		default:
+			return undefined;
+	}
 }
 
 /**

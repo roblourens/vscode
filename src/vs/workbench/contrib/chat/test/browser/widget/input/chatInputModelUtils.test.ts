@@ -28,6 +28,7 @@ import {
 	shouldResetModelToDefault,
 	shouldResetOnModelListChange,
 	shouldRestorePerTypeModelOnSessionSwitch,
+	shouldApplyDefaultNewSessionMode,
 } from '../../../../browser/widget/input/chatInputModelUtils.js';
 
 /**
@@ -1550,6 +1551,13 @@ suite('ChatInputModelUtils', () => {
 				shouldRestorePerTypeModelOnSessionSwitch(false, true, false),
 				shouldRestorePerTypeModelOnSessionSwitch(true, false, false),
 			], [true, false, false, false]);
+		});
+
+		test('does not apply the new-session default over a persisted or user-selected mode', () => {
+			assert.deepStrictEqual([
+				shouldApplyDefaultNewSessionMode(false),
+				shouldApplyDefaultNewSessionMode(true),
+			], [true, false]);
 		});
 
 		test('a started contributed session is never a new conversation, even before its requests load', () => {
