@@ -174,6 +174,13 @@ describe('CopilotCLIModels', () => {
 			expect(result[1].id).toBe('gpt-3.5');
 		});
 
+		it('does not load the Copilot SDK until models are requested', () => {
+			const sdk = createMockSDK();
+			createModels({ hasSession: true, sdk });
+
+			expect(sdk.getPackage).not.toHaveBeenCalled();
+		});
+
 		it('returns cached models on subsequent calls', async () => {
 			const sdk = createMockSDK();
 			const { models } = createModels({ hasSession: true, sdk });
@@ -182,7 +189,6 @@ describe('CopilotCLIModels', () => {
 			const second = await models.getModels();
 
 			expect(first).toBe(second);
-			// getPackage is called during constructor's eager fetch and at most once more
 			expect(sdk.getPackage).toHaveBeenCalledTimes(1);
 		});
 	});
@@ -279,7 +285,6 @@ describe('CopilotCLIModels', () => {
 			);
 			disposables.add(models);
 
-			// Wait for the eager model fetch to complete
 			await models.getModels();
 
 			// Subscribe to the change event via registerLanguageModelChatProvider
@@ -392,6 +397,19 @@ describe('CopilotCLIModels', () => {
 			};
 		}
 
+		it('starts an SDK fetch when the language model picker is first queried, not at construction', async () => {
+			const sdk = createMockSDK();
+			const { models } = createModels({ hasSession: true, sdk });
+			const lm = createLmMock();
+			models.registerLanguageModelChatProvider(lm.mock as any);
+
+			expect(sdk.getPackage).not.toHaveBeenCalled();
+
+			await lm.getProvider().provideLanguageModelChatInformation({}, undefined);
+
+			expect(sdk.getPackage).toHaveBeenCalledTimes(1);
+		});
+
 		it('includes auto and preserves declared context limits', async () => {
 			const configService = new MockConfigurationService();
 			await configService.setConfig(ConfigKey.Advanced.CLIAutoModelEnabled, true);
@@ -403,7 +421,6 @@ describe('CopilotCLIModels', () => {
 			const lm = createLmMock();
 			models.registerLanguageModelChatProvider(lm.mock as any);
 
-			// Wait for the eager fetch to complete
 			await models.getModels();
 			// Allow the _fetchAndCacheModels .then() to run
 			await new Promise(r => setTimeout(r, 0));
@@ -422,7 +439,7 @@ describe('CopilotCLIModels', () => {
 			const lm = createLmMock();
 			models.registerLanguageModelChatProvider(lm.mock as any);
 
-			// Allow microtasks to settle (the eager fetch is skipped when no token source)
+			// Allow microtasks to settle (model fetch is skipped when no token source)
 			await new Promise(r => setTimeout(r, 0));
 
 			const result = await lm.getProvider().provideLanguageModelChatInformation({}, undefined);
@@ -476,7 +493,6 @@ describe('CopilotCLIModels', () => {
 			const lm = createLmMock();
 			models.registerLanguageModelChatProvider(lm.mock as any);
 
-			// Wait for the eager fetch to complete
 			await models.getModels();
 			await new Promise(r => setTimeout(r, 0));
 
@@ -535,6 +551,9 @@ describe('CopilotCLIModels', () => {
 
 			let changeCount = 0;
 			disposables.add(lm.getProvider().onDidChangeLanguageModelChatInformation(() => { changeCount++; }));
+
+			// Start the deferred fetch; constructor no longer loads the SDK.
+			void models.getModels();
 
 			// Flush microtasks so getPackage()/getAuthInfo() resolve and getAvailableModels is called,
 			// which captures resolveModels.

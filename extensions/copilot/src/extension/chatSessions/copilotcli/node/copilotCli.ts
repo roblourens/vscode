@@ -17,7 +17,6 @@ import { IPromptsService } from '../../../../platform/promptFiles/common/prompts
 import { IWorkspaceService } from '../../../../platform/workspace/common/workspaceService';
 import { createServiceIdentifier } from '../../../../util/common/services';
 import { Emitter, Event } from '../../../../util/vs/base/common/event';
-import { Lazy } from '../../../../util/vs/base/common/lazy';
 import { Disposable } from '../../../../util/vs/base/common/lifecycle';
 import { ResourceSet } from '../../../../util/vs/base/common/map';
 import { basename } from '../../../../util/vs/base/common/resources';
@@ -85,7 +84,7 @@ export const ICopilotCLIModels = createServiceIdentifier<ICopilotCLIModels>('ICo
 export class CopilotCLIModels extends Disposable implements ICopilotCLIModels {
 	declare _serviceBrand: undefined;
 	private _availableModels?: Promise<CopilotCLIModelInfo[]>;
-	/** Synchronously available model infos (includes `auto`). Set once the eager fetch completes. */
+	/** Synchronously available model infos (includes `auto`). Set once a fetch has completed. */
 	private _resolvedModelInfos?: vscode.LanguageModelChatInformation[];
 	private readonly _onDidChange = this._register(new Emitter<void>());
 
@@ -97,9 +96,13 @@ export class CopilotCLIModels extends Disposable implements ICopilotCLIModels {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
-		this._fetchAndCacheModels();
+		// Do not fetch models (or load `runtime.node`) until a CLI session or the
+		// language-model picker actually needs them. Eager fetch imported the
+		// in-process Copilot SDK into every Copilot Chat extension host, including
+		// idle Remote-SSH hosts (#337022, #324809).
 		this._register(this._authenticationService.onDidAuthenticationChange(() => {
 			// Auth changed which means models could've changed.
+			this._availableModels = undefined;
 			this._onDidChange.fire();
 			this._fetchAndCacheModels();
 		}));
@@ -108,6 +111,9 @@ export class CopilotCLIModels extends Disposable implements ICopilotCLIModels {
 	private _fetchAndCacheModels(): void {
 		if (!this._authenticationService.hasCopilotTokenSource) {
 			this.logService.info('[CopilotCLIModels] Skipping model fetch since there is no Copilot token source');
+			return;
+		}
+		if (this._availableModels) {
 			return;
 		}
 		const availableModels = this._availableModels = this._getAvailableModels();
@@ -156,11 +162,8 @@ export class CopilotCLIModels extends Disposable implements ICopilotCLIModels {
 			return [];
 		}
 
-		// No need to query sdk multiple times, cache the result, this cannot change during a vscode session.
-		if (!this._availableModels) {
-			this._availableModels = this._getAvailableModels();
-		}
-		return this._availableModels;
+		this._fetchAndCacheModels();
+		return this._availableModels ?? Promise.resolve([]);
 	}
 
 	private async _getAvailableModels(): Promise<CopilotCLIModelInfo[]> {
@@ -205,6 +208,7 @@ export class CopilotCLIModels extends Disposable implements ICopilotCLIModels {
 		const provider: vscode.LanguageModelChatProvider = {
 			onDidChangeLanguageModelChatInformation: this._onDidChange.event,
 			provideLanguageModelChatInformation: async (_options, _token) => {
+				this._fetchAndCacheModels();
 				const models = this._resolvedModelInfos ?? [];
 				if (models.length) {
 					return models;
@@ -552,7 +556,7 @@ export class CopilotCLISDK implements ICopilotCLISDK {
 	declare _serviceBrand: undefined;
 	private requestMap: Record<string, RequestDetails> = {};
 	private _ensureShimsPromise?: Promise<void>;
-	private _initializeLogger = new Lazy<Promise<void>>(() => this.initLogger());
+	private _initializeLogger?: Promise<void>;
 	constructor(
 		@IVSCodeExtensionContext private readonly extensionContext: IVSCodeExtensionContext,
 		@IEnvService private readonly envService: IEnvService,
@@ -562,10 +566,10 @@ export class CopilotCLISDK implements ICopilotCLISDK {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		this.requestMap = this.extensionContext.workspaceState.get<Record<string, RequestDetails>>(COPILOT_CLI_REQUEST_MAP_KEY, {});
-		this._ensureShimsPromise = this.ensureShims();
-		this._initializeLogger.value.catch((error) => {
-			this.logService.error('[CopilotCLISDK] Failed to initialize logger', error);
-		});
+		// Shim setup and native SDK import happen in getPackage(). Loading
+		// `@github/copilot/sdk` (runtime.node / Tokio) from this constructor
+		// leaked remote extension-host memory on idle Copilot Chat Remote-SSH
+		// windows (#337022, #324809).
 	}
 
 	/**
@@ -578,6 +582,7 @@ export class CopilotCLISDK implements ICopilotCLISDK {
 	public async getPackage(): Promise<typeof import('@github/copilot/sdk')> {
 		try {
 			// Ensure the node-pty and ripgrep shims exist before importing the SDK (required for CLI sessions)
+			this._ensureShimsPromise ??= this.ensureShims();
 			await this._ensureShimsPromise;
 			// The SDK's sandbox auto-detection looks for `mxc-bin/<arch>/wxc-exec.exe` (and the
 			// Linux/macOS equivalents) under `MXC_BIN_DIR`. VS Code core ships the MXC
@@ -604,16 +609,19 @@ export class CopilotCLISDK implements ICopilotCLISDK {
 				process.env['COPILOT_CLI_ENABLED_FEATURE_FLAGS'] = [...flags].join(',');
 			}
 
-			return await import('@github/copilot/sdk');
+			const sdk = await import('@github/copilot/sdk');
+			this._initializeLogger ??= this.initLogger(sdk).catch((error) => {
+				this.logService.error('[CopilotCLISDK] Failed to initialize logger', error);
+			});
+			return sdk;
 		} catch (error) {
 			this.logService.error(`[CopilotCLISession] Failed to load @github/copilot/sdk: ${error}`);
 			throw error;
 		}
 	}
 
-	private async initLogger() {
-		const { logger } = await this.getPackage();
-		logger.setLogWriter({
+	private async initLogger(sdk: typeof import('@github/copilot/sdk')) {
+		sdk.logger.setLogWriter({
 			outputPath: () => 'na',
 			writeLog: (level, message) => {
 				switch (level) {

@@ -77,6 +77,31 @@ describe('Copilot CLI shims', () => {
 		);
 	}
 
+	it('does not import the Copilot SDK from the constructor', () => {
+		let getPackageCalls = 0;
+		class ProbeCopilotCLISDK extends CopilotCLISDK {
+			protected override async ensureShims(): Promise<void> {
+				return;
+			}
+
+			public override async getPackage(): Promise<CopilotSdkModule> {
+				getPackageCalls++;
+				throw new Error('SDK import is disabled in constructor tests');
+			}
+		}
+
+		new ProbeCopilotCLISDK(
+			new TestExtensionContext(join(testDir, 'extension')),
+			new TestEnvService(join(testDir, 'app')),
+			logService,
+			new TestInstantiationService(),
+			new TestAuthenticationService(),
+			new TestConfigurationService()
+		);
+
+		expect(getPackageCalls).toBe(0);
+	});
+
 	it('creates runtime ripgrep and node-pty shims for separate extension installs before SDK import', async () => {
 		const extensionPath = join(testDir, 'extension');
 		const vscodeAppRoot = join(testDir, 'app');
