@@ -778,7 +778,7 @@ export class RenameAgentSessionAction extends BaseAgentSessionAction {
 			if (renameTarget.type === 'contributed') {
 				await renameTarget.service.renameChatSession(sessionResource, title, CancellationToken.None);
 			} else {
-				renameTarget.service.setChatSessionTitle(sessionResource, title);
+				await renameTarget.service.setChatSessionTitle(sessionResource, title);
 			}
 		}
 	}

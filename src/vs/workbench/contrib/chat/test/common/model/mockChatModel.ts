@@ -20,8 +20,12 @@ export class MockChatModel extends Disposable implements IChatModel {
 	readonly timing: IChatSessionTiming = { created: Date.now(), lastRequestStarted: undefined, lastRequestEnded: undefined };
 	readonly initialLocation = ChatAgentLocation.Chat;
 	readonly sessionTypeSelectionReason = undefined;
-	readonly title = '';
-	readonly hasCustomTitle = false;
+	get title(): string {
+		return this.customTitle ?? '';
+	}
+	get hasCustomTitle(): boolean {
+		return this.customTitle !== undefined;
+	}
 	customTitle: string | undefined;
 	lastMessageDate = Date.now();
 	creationDate = Date.now();
@@ -73,6 +77,7 @@ export class MockChatModel extends Disposable implements IChatModel {
 	setRepoData(data: IExportableRepoData | undefined): void { this.repoData = data; }
 	workingDirectory: URI | undefined = undefined;
 	setWorkingDirectory(uri: URI | undefined): void { this.workingDirectory = uri; }
+	setCustomTitle(title: string): void { this.customTitle = title; }
 	readonly onDidChangePendingRequests: Event<void> = this._register(new Emitter<void>()).event;
 	getPendingRequests(): readonly IChatPendingRequest[] { return []; }
 	toExport(): IExportableChatData {

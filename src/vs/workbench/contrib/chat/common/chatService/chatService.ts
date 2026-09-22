@@ -2146,7 +2146,7 @@ export interface IChatService {
 	 */
 	sendPendingRequestImmediately(sessionResource: URI, requestId: string): Promise<void>;
 	addCompleteRequest(sessionResource: URI, message: IParsedChatRequest | string, variableData: IChatRequestVariableData | undefined, attempt: number | undefined, response: IChatCompleteResponse): void;
-	setChatSessionTitle(sessionResource: URI, title: string): void;
+	setChatSessionTitle(sessionResource: URI, title: string): Promise<void>;
 	getLocalSessionHistory(): Promise<IChatDetail[]>;
 	clearAllHistoryEntries(): Promise<void>;
 	removeHistoryEntry(sessionResource: URI): Promise<void>;

@@ -209,7 +209,7 @@ suite('RenameAgentSessionAction', () => {
 
 		const renamed: Array<{ resource: string; title: string }> = [];
 		instantiationService.stub(IChatService, upcastPartial<IChatService>({
-			setChatSessionTitle: (resource, title) => renamed.push({ resource: resource.toString(), title }),
+			setChatSessionTitle: async (resource, title) => { renamed.push({ resource: resource.toString(), title }); },
 		}));
 
 		const action = new RenameAgentSessionAction();

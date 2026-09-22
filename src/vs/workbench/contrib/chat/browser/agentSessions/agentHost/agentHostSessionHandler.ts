@@ -2459,7 +2459,13 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 
 			const currentTitle = getChatTitle(e.state, chatURI);
 			if (currentTitle && currentTitle !== previousTitle) {
-				this._chatService.setChatSessionTitle(sessionResource, currentTitle);
+				const model = this._chatService.getSession(sessionResource);
+				// A user rename updates the chat model immediately. A later catalog
+				// refresh can still emit the pre-rename title; don't copy that stale
+				// value back onto the model (and into jsonl) over the user's title.
+				if (!model?.hasCustomTitle || model.title === previousTitle || model.title === currentTitle) {
+					this._chatService.setChatSessionTitle(sessionResource, currentTitle);
+				}
 			}
 			previousTitle = currentTitle;
 

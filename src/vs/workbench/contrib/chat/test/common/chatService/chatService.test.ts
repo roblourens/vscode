@@ -4072,6 +4072,32 @@ suite('ChatService', () => {
 			'Deleted session should NOT reappear in history after model disposal'
 		);
 	});
+
+	test('setChatSessionTitle persists customTitle despite an in-memory title re-sync', async () => {
+		const testService = createChatService();
+		const ref = testDisposables.add(startSessionModel(testService));
+		const model = ref.object as ChatModel;
+		model.addRequest({ parts: [], text: 'hello' }, { variables: [] }, 0);
+		model.setCustomTitle('Original Title');
+
+		testFileService.clearTracking();
+		const persist = testService.setChatSessionTitle(model.sessionResource, 'Renamed Title');
+		// Simulate a catalog/item re-sync that copies the pre-rename title back
+		// onto the live model while the store queue is yielded.
+		model.setCustomTitle('Original Title');
+		await persist;
+
+		assert.strictEqual(model.customTitle, 'Renamed Title');
+		assert.strictEqual(model.hasCustomTitle, true);
+		assert.ok(
+			testFileService.writeOperations.some(op =>
+				op.resource.path.endsWith('.jsonl') &&
+				op.content.includes('customTitle') &&
+				op.content.includes('Renamed Title')
+			),
+			'rename must write a customTitle op to the session jsonl even if the live title is re-synced'
+		);
+	});
 });
 
 suite('backfillRestoredPickerState', () => {

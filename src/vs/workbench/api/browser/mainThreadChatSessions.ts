@@ -408,6 +408,12 @@ class MainThreadChatSessionItemController extends Disposable implements IChatSes
 	private readonly _modelListeners = this._register(new DisposableResourceMap());
 	private readonly _resolveCache = new ResourceMap<Promise<IChatSessionItem | undefined>>();
 	private readonly _resolving = new ResourceMap<true>();
+	/**
+	 * Last session-item label applied to the live chat model (or skipped because
+	 * the model already had that title). Used to tell provider-driven renames
+	 * from a user rename that the in-memory model already holds.
+	 */
+	private readonly _lastAppliedItemTitle = new ResourceMap<string>();
 
 	private _isDisposed = false;
 
@@ -502,6 +508,7 @@ class MainThreadChatSessionItemController extends Disposable implements IChatSes
 		for (const uri of change.removed) {
 			this._resolveCache.delete(uri);
 			this._items.delete(uri);
+			this._lastAppliedItemTitle.delete(uri);
 		}
 		this._onDidChangeChatSessionItems.fire({
 			addedOrUpdated: addedOrUpdatedItems,
@@ -518,9 +525,21 @@ class MainThreadChatSessionItemController extends Disposable implements IChatSes
 		}
 
 		// Propagate a renamed item label to the open chat model so the chat editor tab
-		// and chat panel header reflect the new title.
-		if (existing && existing.label !== updated.label && this._chatService.getSession(resource)) {
-			this._chatService.setSessionTitle(resource, updated.label);
+		// and chat panel header reflect the new title. Do not copy a stale item
+		// label over a user-set custom title — that race drops the rename before
+		// it is written to the session jsonl.
+		if (existing && existing.label !== updated.label) {
+			const model = this._chatService.getSession(resource);
+			if (model) {
+				const lastApplied = this._lastAppliedItemTitle.get(resource) ?? existing.label;
+				const independentCustomTitle = model.hasCustomTitle && model.title !== lastApplied;
+				if (!independentCustomTitle) {
+					if (model.title !== updated.label) {
+						this._chatService.setSessionTitle(resource, updated.label);
+					}
+					this._lastAppliedItemTitle.set(resource, updated.label);
+				}
+			}
 		}
 
 		this._items.set(resource, updated);

@@ -507,13 +507,64 @@ export class ChatSessionStore extends Disposable {
 		});
 	}
 
-	public async setSessionTitle(sessionId: string, title: string): Promise<void> {
+	/**
+	 * Persist a session title to the index and jsonl log.
+	 *
+	 * The live model (when provided) is the source of the jsonl write. Re-assert
+	 * the title on that model immediately before extracting so a concurrent
+	 * in-memory title re-sync cannot clobber the rename before it is logged.
+	 * History sessions with no live model get a `customTitle` op appended to the
+	 * existing jsonl file.
+	 */
+	public async setSessionTitle(sessionId: string, title: string, session?: ChatModel): Promise<void> {
 		await this.storeQueue.queue(async () => {
+			if (session) {
+				session.setCustomTitle(title);
+				await this.writeSession(session);
+				// writeSession awaits the file write; re-assert so a stale re-sync
+				// that landed during that await cannot leave the live model on the
+				// pre-rename title.
+				session.setCustomTitle(title);
+			} else {
+				await this.appendCustomTitle(sessionId, title);
+			}
+
 			const index = this.internalGetIndex();
 			if (index.entries[sessionId]) {
 				index.entries[sessionId].title = title;
 			}
+			await this.flushIndex();
 		});
+	}
+
+	/**
+	 * Append a `customTitle` mutation to an existing session log. Used when the
+	 * session is not currently loaded, so there is no live {@link ChatModel} to
+	 * serialize. No-ops when the log file is missing (nothing to rename).
+	 */
+	private async appendCustomTitle(sessionId: string, title: string): Promise<void> {
+		let storageLocation: ReturnType<ChatSessionStore['getStorageLocation']>;
+		try {
+			storageLocation = this.getStorageLocation(sessionId);
+		} catch (e) {
+			this.reportError('invalidSessionId', `Ignoring invalid chat session while renaming: ${sessionId}`, e);
+			return;
+		}
+
+		if (!storageLocation.log) {
+			return;
+		}
+
+		try {
+			if (!await this.fileService.exists(storageLocation.log)) {
+				return;
+			}
+
+			const entry = { kind: 1, k: ['customTitle'], v: title };
+			await this.fileService.writeFile(storageLocation.log, VSBuffer.fromString(stringifyEntryWithFallback(entry) + '\n'), { append: true });
+		} catch (e) {
+			this.reportError('sessionWrite', `Error appending custom title for chat session ${sessionId}`, e);
+		}
 	}
 
 	private reportError(reasonForTelemetry: string, message: string, error?: Error): void {

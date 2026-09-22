@@ -274,6 +274,51 @@ suite('ChatSessionStore', () => {
 		assert.strictEqual(index['session-1'].title, 'New Title');
 	});
 
+	test('setSessionTitle writes a customTitle op even if the live title is re-synced', async () => {
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1'), { customTitle: 'Original Title' }));
+
+		await store.storeSessions([model]);
+		fileService.clearTracking();
+
+		const persist = store.setSessionTitle('session-1', 'Renamed Title', model);
+		model.setCustomTitle('Original Title');
+		await persist;
+
+		assert.strictEqual(model.customTitle, 'Renamed Title');
+		const index = await store.getIndex();
+		assert.strictEqual(index['session-1'].title, 'Renamed Title');
+		assert.ok(
+			fileService.writeOperations.some(op =>
+				op.resource.path.endsWith('.jsonl') &&
+				op.content.includes('customTitle') &&
+				op.content.includes('Renamed Title')
+			),
+			'rename must write a customTitle op to the session jsonl'
+		);
+	});
+
+	test('setSessionTitle appends customTitle for a history session with no live model', async () => {
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1'), { customTitle: 'Original Title' }));
+
+		await store.storeSessions([model]);
+		fileService.clearTracking();
+
+		await store.setSessionTitle('session-1', 'History Rename');
+
+		const index = await store.getIndex();
+		assert.strictEqual(index['session-1'].title, 'History Rename');
+		assert.ok(
+			fileService.writeOperations.some(op =>
+				op.resource.path.endsWith('.jsonl') &&
+				op.content.includes('customTitle') &&
+				op.content.includes('History Rename')
+			),
+			'unloaded session rename must still append a customTitle op'
+		);
+	});
+
 	test('setSessionTitle does nothing for non-existent session', async () => {
 		const store = createChatSessionStore();
 

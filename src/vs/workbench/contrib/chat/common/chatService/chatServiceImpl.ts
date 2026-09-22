@@ -441,11 +441,19 @@ export class ChatService extends Disposable implements IChatService {
 			model.setCustomTitle(title);
 		}
 
-		// Update the title in the file storage
 		const localSessionId = LocalChatSessionUri.parseLocalSessionId(sessionResource);
 		if (localSessionId) {
-			await this._chatSessionStore.setSessionTitle(localSessionId, title);
-			// Trigger immediate save to ensure consistency
+			// Persist the requested title through the store queue, re-asserting it
+			// on the live model immediately before the jsonl write. A separate
+			// saveState() here would serialize whatever title is on the model after
+			// awaiting the queue — which loses the rename when an in-memory title
+			// re-sync lands in that window.
+			const liveModel = model && this.shouldStoreSession(model) ? model : undefined;
+			await this._chatSessionStore.setSessionTitle(localSessionId, title, liveModel);
+			return;
+		}
+
+		if (model && this.shouldStoreExternalSession(model)) {
 			this.saveState();
 		}
 	}

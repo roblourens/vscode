@@ -31,6 +31,7 @@ import { ChatAgentLocation } from '../../../contrib/chat/common/constants.js';
 import { LocalChatSessionUri } from '../../../contrib/chat/common/model/chatUri.js';
 import { IChatAgentRequest, IChatAgentResult } from '../../../contrib/chat/common/participants/chatAgents.js';
 import { MockChatService } from '../../../contrib/chat/test/common/chatService/mockChatService.js';
+import { MockChatModel } from '../../../contrib/chat/test/common/model/mockChatModel.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IExtHostContext } from '../../../services/extensions/common/extHostCustomers.js';
 import { ExtensionHostKind } from '../../../services/extensions/common/extensionHostKind.js';
@@ -1172,6 +1173,42 @@ suite('MainThreadChatSessions', function () {
 		const result = await pendingResolve;
 		assert.strictEqual(result?.label, 'Session A Updated');
 		assert.strictEqual(result?.badge, undefined);
+
+		mainThread.$unregisterChatSessionItemController(controllerHandle);
+	});
+
+	test('does not copy a stale item label over a user-set custom title', async function () {
+		const sessionScheme = 'test-session-type';
+		const controllerHandle = 0;
+		mainThread.$registerChatSessionItemController(controllerHandle, sessionScheme, false);
+
+		const resource = URI.parse(`${sessionScheme}:/session-a`);
+		const timing = { created: 0, lastRequestStarted: undefined, lastRequestEnded: undefined };
+		await mainThread.$addOrUpdateChatSessionItem(controllerHandle, {
+			resource,
+			label: 'Original Title',
+			timing,
+		});
+
+		const chatService = instantiationService.get(IChatService) as MockChatService;
+		const model = disposables.add(new MockChatModel(resource));
+		model.setCustomTitle('User Rename');
+		chatService.addSession(model);
+
+		const applied: string[] = [];
+		chatService.setSessionTitle = (sessionResource, title) => {
+			applied.push(title);
+			model.setCustomTitle(title);
+		};
+
+		await mainThread.$addOrUpdateChatSessionItem(controllerHandle, {
+			resource,
+			label: 'Stale Refresh Title',
+			timing,
+		});
+
+		assert.deepStrictEqual(applied, []);
+		assert.strictEqual(model.title, 'User Rename');
 
 		mainThread.$unregisterChatSessionItemController(controllerHandle);
 	});
