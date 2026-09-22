@@ -346,46 +346,17 @@ export class ChatSessionStore extends Disposable {
 
 	private _didReportIssue = false;
 
+	private isLiveChatModel(session: ChatModel | ISerializableChatData): session is ChatModel {
+		return typeof (session as ChatModel).getRequests === 'function';
+	}
+
 	private async writeSession(session: ChatModel | ISerializableChatData): Promise<void> {
 		try {
 			const index = this.internalGetIndex();
 			const storageLocation = this.getStorageLocation(session.sessionId);
 			if (storageLocation.log) {
-				if (session instanceof ChatModel) {
-					if (!session.dataSerializer) {
-						session.dataSerializer = new ChatSessionOperationLog();
-					}
-
-					let op: 'append' | 'replace';
-					let data: VSBuffer;
-					try {
-						({ op, data } = session.dataSerializer.write(session));
-					} catch (e) {
-						// This is a big of an ugly prompt, but there is _something_ going on with
-						// missing sessions. Unfortunately it's hard to root cause because users would
-						// not notice an error until they reload the window, at which point any error
-						// is gone. Throw a very verbose dialog here so we can get some quality
-						// bug reports, if the issue is indeed in the serialized.
-						// todo@connor4312: remove after a little bit
-						if (!this._didReportIssue) {
-							this._didReportIssue = true;
-							this.dialogService.prompt({
-								custom: true, // so text is copyable
-								title: localize('chatSessionStore.serializationError', 'Error saving chat session'),
-								message: localize('chatSessionStore.writeError', 'Error serializing chat session for storage. The session will be lost if the window is closed. Please report this issue to the VS Code team:\n\n{0}', e.stack || toErrorMessage(e)),
-								buttons: [
-									{ label: localize('reportIssue', 'Report Issue'), run: () => this.openerService.open('https://github.com/microsoft/vscode/issues/new?template=bug_report.md') }
-								]
-							});
-						}
-
-						throw e;
-					}
-
-					if (data.byteLength > 0) {
-						await this.fileService.writeFile(storageLocation.log, data, { append: op === 'append' });
-					}
-					session.dataSerializer.confirmWrite();
+				if (this.isLiveChatModel(session)) {
+					await this.persistLiveSessionLog(session, storageLocation.log);
 				} else {
 					const content = new ChatSessionOperationLog().createInitialFromSerialized(session);
 					await this.fileService.writeFile(storageLocation.log, content);
@@ -399,7 +370,93 @@ export class ChatSessionStore extends Disposable {
 			index.entries[session.sessionId] = newMetadata;
 		} catch (e) {
 			this.reportError('sessionWrite', 'Error writing chat session', e);
+			this.reportPersistFailure(e);
 		}
+	}
+
+	/**
+	 * Serialize a live session and persist it to the jsonl op log. Appends when
+	 * the serializer has confirmed prior state; if the append fails or is a
+	 * silent no-op, rewrite a full snapshot instead of confirming unpersisted
+	 * ops. Never call {@link ObjectMutationLog.confirmWrite} unless bytes landed.
+	 */
+	private async persistLiveSessionLog(session: ChatModel, logResource: URI): Promise<void> {
+		if (!session.dataSerializer) {
+			session.dataSerializer = new ChatSessionOperationLog();
+		}
+
+		const serializer = session.dataSerializer;
+		let op: 'append' | 'replace';
+		let data: VSBuffer;
+		try {
+			({ op, data } = serializer.write(session));
+		} catch (e) {
+			this.reportPersistFailure(e);
+			throw e;
+		}
+
+		if (data.byteLength === 0) {
+			serializer.confirmWrite();
+			return;
+		}
+
+		try {
+			await this.writeSessionLogData(logResource, data, op);
+			serializer.confirmWrite();
+		} catch (appendError) {
+			if (op !== 'append') {
+				throw appendError;
+			}
+
+			this.reportError('sessionWriteAppend', 'Error appending chat session log; rewriting full snapshot', appendError);
+			serializer.discardConfirmedState();
+			({ op, data } = serializer.write(session));
+			await this.writeSessionLogData(logResource, data, 'replace');
+			serializer.confirmWrite();
+			this.reportPersistFailure(appendError);
+		}
+	}
+
+	/**
+	 * Write log bytes, verifying that an append actually grew the file. Some
+	 * file providers ignore `append` (overwrite or no-op) without throwing,
+	 * which would otherwise leave a kind:0 stub on disk while the serializer
+	 * believes later ops were committed.
+	 */
+	private async writeSessionLogData(resource: URI, data: VSBuffer, op: 'append' | 'replace'): Promise<void> {
+		const append = op === 'append';
+		let sizeBefore = 0;
+		if (append) {
+			try {
+				sizeBefore = (await this.fileService.stat(resource)).size;
+			} catch (e) {
+				if (toFileOperationResult(e) !== FileOperationResult.FILE_NOT_FOUND) {
+					throw e;
+				}
+			}
+		}
+
+		const written = await this.fileService.writeFile(resource, data, { append });
+
+		if (append && written.size < sizeBefore + data.byteLength) {
+			throw new Error(`Chat session log append did not persist (${sizeBefore} -> ${written.size} bytes, expected at least ${sizeBefore + data.byteLength})`);
+		}
+	}
+
+	private reportPersistFailure(error: unknown): void {
+		const err = error instanceof Error ? error : new Error(toErrorMessage(error));
+		if (this._didReportIssue) {
+			return;
+		}
+		this._didReportIssue = true;
+		this.dialogService.prompt({
+			custom: true, // so text is copyable
+			title: localize('chatSessionStore.serializationError', 'Error saving chat session'),
+			message: localize('chatSessionStore.writeError', 'Error saving chat session. The session will be lost if the window is closed. Please report this issue to the VS Code team:\n\n{0}', err.stack || toErrorMessage(err)),
+			buttons: [
+				{ label: localize('reportIssue', 'Report Issue'), run: () => this.openerService.open('https://github.com/microsoft/vscode/issues/new?template=bug_report.md') }
+			]
+		});
 	}
 
 	private async writeSessionMetadataOnly(session: ChatModel): Promise<void> {
@@ -488,6 +545,35 @@ export class ChatSessionStore extends Disposable {
 	isSessionEmpty(sessionId: string): boolean {
 		const index = this.internalGetIndex();
 		return index.entries[sessionId]?.isEmpty ?? true;
+	}
+
+	/**
+	 * True when this session has a jsonl (or legacy json) file on disk.
+	 * Used so history does not hide a session whose index says `isEmpty`
+	 * while a persisted log still exists.
+	 */
+	async hasPersistedSession(sessionId: string): Promise<boolean> {
+		try {
+			const storageLocation = this.getStorageLocation(sessionId);
+			if (storageLocation.log && await this.resourceExists(storageLocation.log)) {
+				return true;
+			}
+			return this.resourceExists(storageLocation.flat);
+		} catch {
+			return false;
+		}
+	}
+
+	private async resourceExists(resource: URI): Promise<boolean> {
+		try {
+			await this.fileService.stat(resource);
+			return true;
+		} catch (e) {
+			if (toFileOperationResult(e) === FileOperationResult.FILE_NOT_FOUND) {
+				return false;
+			}
+			throw e;
+		}
 	}
 
 	async deleteSession(sessionId: string): Promise<void> {

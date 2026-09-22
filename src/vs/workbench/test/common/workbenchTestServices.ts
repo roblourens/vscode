@@ -20,7 +20,7 @@ import { URI } from '../../../base/common/uri.js';
 import { ITextResourcePropertiesService } from '../../../editor/common/services/textResourceConfiguration.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IResourceEditorInput } from '../../../platform/editor/common/editor.js';
-import { FileChangesEvent, FileOperationEvent, FileSystemProviderCapabilities, IBaseFileStat, ICreateFileOptions, IFileContent, IFileService, IFileStat, IFileStatResult, IFileStatWithMetadata, IFileStatWithPartialMetadata, IFileStreamContent, IFileSystemProvider, IFileSystemProviderActivationEvent, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemWatcher, IReadFileOptions, IReadFileStreamOptions, IResolveFileOptions, IResolveMetadataFileOptions, IWatchOptions, IWatchOptionsWithCorrelation, IWriteFileOptions } from '../../../platform/files/common/files.js';
+import { FileChangesEvent, FileOperationError, FileOperationEvent, FileOperationResult, FileSystemProviderCapabilities, IBaseFileStat, ICreateFileOptions, IFileContent, IFileService, IFileStat, IFileStatResult, IFileStatWithMetadata, IFileStatWithPartialMetadata, IFileStreamContent, IFileSystemProvider, IFileSystemProviderActivationEvent, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemWatcher, IReadFileOptions, IReadFileStreamOptions, IResolveFileOptions, IResolveMetadataFileOptions, IWatchOptions, IWatchOptionsWithCorrelation, IWriteFileOptions } from '../../../platform/files/common/files.js';
 import { AbstractLoggerService, ILogger, LogLevel, NullLogger } from '../../../platform/log/common/log.js';
 import { IMarker, IMarkerData, IMarkerService, IResourceMarker, MarkerStatistics } from '../../../platform/markers/common/markers.js';
 import product from '../../../platform/product/common/product.js';
@@ -251,13 +251,13 @@ export class TestWorkingCopy extends Disposable implements IWorkingCopy {
 	}
 }
 
-export function createFileStat(resource: URI, readonly = false, isFile?: boolean, isDirectory?: boolean, isSymbolicLink?: boolean, children?: { resource: URI; isFile?: boolean; isDirectory?: boolean; isSymbolicLink?: boolean; executable?: boolean }[] | undefined, executable?: boolean): IFileStatWithMetadata {
+export function createFileStat(resource: URI, readonly = false, isFile?: boolean, isDirectory?: boolean, isSymbolicLink?: boolean, children?: { resource: URI; isFile?: boolean; isDirectory?: boolean; isSymbolicLink?: boolean; executable?: boolean }[] | undefined, executable?: boolean, size = 42): IFileStatWithMetadata {
 	return {
 		resource,
 		etag: Date.now().toString(),
 		mtime: Date.now(),
 		ctime: Date.now(),
-		size: 42,
+		size,
 		isFile: isFile ?? true,
 		isDirectory: isDirectory ?? false,
 		isSymbolicLink: isSymbolicLink ?? false,
@@ -550,8 +550,18 @@ export class TestFileService implements IFileService {
 	readonly = false;
 
 	// Tracking functionality for tests
-	readonly writeOperations: Array<{ resource: URI; content: string }> = [];
+	readonly writeOperations: Array<{ resource: URI; content: string; append?: boolean }> = [];
 	readonly readOperations: Array<{ resource: URI }> = [];
+	/**
+	 * When true, `writeFile` with `{ append: true }` neither throws nor writes.
+	 * Used to simulate a silent append no-op.
+	 */
+	simulateAppendNoOp = false;
+	/**
+	 * When true, `writeFile` with `{ append: true }` overwrites instead of appending.
+	 * Used to simulate a provider that ignores the append option.
+	 */
+	simulateAppendOverwrite = false;
 
 	setContent(content: string): void { this.content = content; }
 	getContent(): string { return this.content; }
@@ -637,10 +647,10 @@ export class TestFileService implements IFileService {
 		}
 
 		if (content) {
-			this.writeOperations.push({ resource, content: content.toString() });
+			this.writeOperations.push({ resource, content: content.toString(), append: options?.append });
 		}
 
-		return createFileStat(resource, this.readonly);
+		return createFileStat(resource, this.readonly, undefined, undefined, undefined, undefined, undefined, content?.byteLength);
 	}
 
 	move(_source: URI, _target: URI, _overwrite?: boolean): Promise<IFileStatWithMetadata> { return Promise.resolve(null!); }
@@ -762,11 +772,32 @@ export class InMemoryTestFileService extends TestFileService {
 			content = readableToBuffer(bufferOrReadable);
 		}
 
+		if (options?.append && this.simulateAppendNoOp) {
+			this.writeOperations.push({ resource, content: content.toString(), append: true });
+			const existing = this.files.get(resource);
+			return createFileStat(resource, this.readonly, undefined, undefined, undefined, undefined, undefined, existing?.byteLength ?? 0);
+		}
+
+		if (options?.append && !this.simulateAppendOverwrite) {
+			const existing = this.files.get(resource);
+			if (existing) {
+				content = VSBuffer.concat([existing, content]);
+			}
+		}
+
 		// Store in memory and track
 		this.files.set(resource, content);
-		this.writeOperations.push({ resource, content: content.toString() });
+		this.writeOperations.push({ resource, content: content.toString(), append: options?.append });
 
-		return createFileStat(resource, this.readonly);
+		return createFileStat(resource, this.readonly, undefined, undefined, undefined, undefined, undefined, content.byteLength);
+	}
+
+	override async stat(resource: URI): Promise<IFileStatWithPartialMetadata> {
+		const content = this.files.get(resource);
+		if (!content) {
+			throw new FileOperationError('File not found', FileOperationResult.FILE_NOT_FOUND);
+		}
+		return createFileStat(resource, this.readonly, undefined, undefined, undefined, undefined, undefined, content.byteLength);
 	}
 
 	override async del(resource: URI, _options?: { useTrash?: boolean; recursive?: boolean }): Promise<void> {

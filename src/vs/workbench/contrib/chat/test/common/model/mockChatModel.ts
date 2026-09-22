@@ -8,7 +8,7 @@ import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import { IObservable, observableValue } from '../../../../../../base/common/observable.js';
 import { URI } from '../../../../../../base/common/uri.js';
 import { IChatEditingSession } from '../../../common/editing/chatEditingService.js';
-import { IChatChangeEvent, IChatModel, IChatPendingRequest, IChatRequestModel, IChatRequestNeedsInputInfo, IExportableChatData, IExportableRepoData, IInputModel, ISerializableChatData } from '../../../common/model/chatModel.js';
+import { IChatChangeEvent, IChatDataSerializerLog, IChatModel, IChatPendingRequest, IChatRequestModel, IChatRequestNeedsInputInfo, IExportableChatData, IExportableRepoData, IInputModel, ISerializableChatData } from '../../../common/model/chatModel.js';
 import { ChatAgentLocation } from '../../../common/constants.js';
 import { IChatSessionContext, IChatSessionTiming } from '../../../common/chatService/chatService.js';
 
@@ -20,12 +20,17 @@ export class MockChatModel extends Disposable implements IChatModel {
 	readonly timing: IChatSessionTiming = { created: Date.now(), lastRequestStarted: undefined, lastRequestEnded: undefined };
 	readonly initialLocation = ChatAgentLocation.Chat;
 	readonly sessionTypeSelectionReason = undefined;
-	readonly title = '';
-	readonly hasCustomTitle = false;
+	get title(): string {
+		return this.customTitle ?? '';
+	}
+	get hasCustomTitle(): boolean {
+		return this.customTitle !== undefined;
+	}
 	customTitle: string | undefined;
 	lastMessageDate = Date.now();
 	creationDate = Date.now();
 	requests: IChatRequestModel[] = [];
+	dataSerializer?: IChatDataSerializerLog;
 	readonly requestInProgress = observableValue('requestInProgress', false);
 	readonly hasActiveRequest = observableValue('hasActiveRequest', false);
 	readonly requestNeedsInput = observableValue<IChatRequestNeedsInputInfo | undefined>('requestNeedsInput', undefined);
@@ -68,7 +73,7 @@ export class MockChatModel extends Disposable implements IChatModel {
 	}
 
 	startEditingSession(isGlobalEditingSession?: boolean, transferFromSession?: IChatEditingSession): void { }
-	getRequests(): IChatRequestModel[] { return []; }
+	getRequests(): IChatRequestModel[] { return this.requests; }
 	setCheckpoint(requestId: string | undefined): void { }
 	setRepoData(data: IExportableRepoData | undefined): void { this.repoData = data; }
 	workingDirectory: URI | undefined = undefined;

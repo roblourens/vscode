@@ -728,6 +728,23 @@ suite('ChatSessionOperationLog', () => {
 			const result = reader.read(fileContent);
 			assert.strictEqual(result.count, 2);
 		});
+
+		test('discardConfirmedState makes the next write a full replace', () => {
+			const schema = createTestSchema();
+			const adapter = new Adapt.ObjectMutationLog(schema);
+
+			const obj: TestObject = { name: 'test', count: 0, items: [] };
+			adapter.createInitial(obj);
+			adapter.write({ ...obj, count: 1 });
+			adapter.confirmWrite();
+
+			adapter.discardConfirmedState();
+			const result = adapter.write({ ...obj, count: 2 });
+			assert.deepStrictEqual(
+				{ op: result.op, entry: JSON.parse(result.data.toString().trim()) },
+				{ op: 'replace', entry: { kind: 0, v: { name: 'test', count: 2, items: [] } } },
+			);
+		});
 	});
 
 	suite('persistence size safety net', () => {

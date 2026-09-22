@@ -19,6 +19,8 @@ import { Range } from '../../../../../../editor/common/core/range.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IContextKeyService } from '../../../../../../platform/contextkey/common/contextkey.js';
+import { IDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
+import { TestDialogService } from '../../../../../../platform/dialogs/test/common/testDialogService.js';
 import { IEnvironmentService } from '../../../../../../platform/environment/common/environment.js';
 import { ExtensionIdentifier } from '../../../../../../platform/extensions/common/extensions.js';
 import { IFileService } from '../../../../../../platform/files/common/files.js';
@@ -26,6 +28,8 @@ import { ServiceCollection } from '../../../../../../platform/instantiation/comm
 import { TestInstantiationService } from '../../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { MockContextKeyService } from '../../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { ILogService, NullLogService } from '../../../../../../platform/log/common/log.js';
+import { IOpenerService } from '../../../../../../platform/opener/common/opener.js';
+import { NullOpenerService } from '../../../../../../platform/opener/test/common/nullOpenerService.js';
 import { IStorageService, StorageScope, StorageTarget, WillSaveStateReason } from '../../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { NullTelemetryService, NullTelemetryServiceShape } from '../../../../../../platform/telemetry/common/telemetryUtils.js';
@@ -195,6 +199,8 @@ suite('ChatService', () => {
 		instantiationService.stub(IStorageService, testDisposables.add(new TestStorageService()));
 		instantiationService.stub(IChatEntitlementService, new TestChatEntitlementService());
 		instantiationService.stub(ILogService, new NullLogService());
+		instantiationService.stub(IDialogService, new TestDialogService());
+		instantiationService.stub(IOpenerService, NullOpenerService);
 		instantiationService.stub(IUserDataProfilesService, { defaultProfile: toUserDataProfile('default', 'Default', URI.file('/test/userdata'), URI.file('/test/cache')) });
 		instantiationService.stub(ITelemetryService, NullTelemetryService);
 		instantiationService.stub(IExtensionService, new TestExtensionService());
@@ -4114,6 +4120,23 @@ suite('ChatService', () => {
 		assert.ok(
 			!historyItems.some(item => item.sessionResource.toString() === model.sessionResource.toString()),
 			'Deleted session should NOT reappear in history after model disposal'
+		);
+	});
+
+	test('getHistorySessionItems includes a persisted session even when the index says isEmpty', async () => {
+		const testService = createChatService();
+		const ref = testService.startNewLocalSession(ChatAgentLocation.Chat);
+		const model = ref.object as ChatModel;
+		model.setCustomTitle('Titled empty session');
+
+		ref.dispose();
+		await testService.waitForModelDisposals();
+
+		const testService2 = createChatService();
+		const historyItems = await testService2.getHistorySessionItems();
+		assert.ok(
+			historyItems.some(item => item.sessionResource.toString() === model.sessionResource.toString()),
+			'A session whose jsonl exists must stay in history even if the index records isEmpty'
 		);
 	});
 });

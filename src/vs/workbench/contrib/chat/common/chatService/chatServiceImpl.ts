@@ -516,9 +516,22 @@ export class ChatService extends Disposable implements IChatService {
 	 */
 	async getHistorySessionItems(): Promise<IChatDetail[]> {
 		const index = await this._chatSessionStore.getIndex();
-		return Object.values(index)
+		const candidates = Object.values(index)
 			.filter(entry => !entry.isExternal)
-			.filter(entry => !this._sessionModels.has(LocalChatSessionUri.forSession(entry.sessionId)) && entry.initialLocation === ChatAgentLocation.Chat && !entry.isEmpty)
+			.filter(entry => !this._sessionModels.has(LocalChatSessionUri.forSession(entry.sessionId)) && entry.initialLocation === ChatAgentLocation.Chat);
+
+		const keep = await Promise.all(candidates.map(async entry => {
+			if (!entry.isEmpty) {
+				return true;
+			}
+			// Index `isEmpty` can disagree with disk (ops never appended, or a
+			// live session was flagged empty). If the jsonl still exists, keep
+			// the session visible and resumable.
+			return this._chatSessionStore.hasPersistedSession(entry.sessionId);
+		}));
+
+		return candidates
+			.filter((_, i) => keep[i])
 			.map((entry): IChatDetail => {
 				const sessionResource = LocalChatSessionUri.forSession(entry.sessionId);
 				const { workingDirectory: workingDirectoryStr, ...rest } = entry;

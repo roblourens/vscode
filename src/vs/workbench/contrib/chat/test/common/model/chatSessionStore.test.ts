@@ -28,6 +28,10 @@ import { LocalChatSessionUri } from '../../../common/model/chatUri.js';
 import { MockChatModel } from './mockChatModel.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../../platform/configuration/test/common/testConfigurationService.js';
+import { IDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
+import { TestDialogService } from '../../../../../../platform/dialogs/test/common/testDialogService.js';
+import { IOpenerService } from '../../../../../../platform/opener/common/opener.js';
+import { NullOpenerService } from '../../../../../../platform/opener/test/common/nullOpenerService.js';
 
 function createMockChatModel(sessionResource: URI, options?: { customTitle?: string }): ChatModel {
 	const sessionId = LocalChatSessionUri.parseLocalSessionId(sessionResource);
@@ -92,6 +96,8 @@ suite('ChatSessionStore', () => {
 		instantiationService.stub(ILifecycleService, testDisposables.add(new TestLifecycleService()));
 		instantiationService.stub(IUserDataProfilesService, { defaultProfile: toUserDataProfile('default', 'Default', URI.file('/test/userdata'), URI.file('/test/cache')) });
 		instantiationService.stub(IConfigurationService, new TestConfigurationService());
+		instantiationService.stub(IDialogService, new TestDialogService());
+		instantiationService.stub(IOpenerService, NullOpenerService);
 		mockWorkspaceEditingService = testDisposables.add(new MockWorkspaceEditingService());
 		instantiationService.stub(IWorkspaceEditingService, mockWorkspaceEditingService as unknown as IWorkspaceEditingService);
 	});
@@ -282,6 +288,88 @@ suite('ChatSessionStore', () => {
 
 		const index = await store.getIndex();
 		assert.strictEqual(index['non-existent'], undefined);
+	});
+
+	test('storeSessions appends ops after the initial kind:0 snapshot', async () => {
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1')));
+
+		await store.storeSessions([model]);
+		const writesAfterSnapshot = fileService.writeOperations.length;
+
+		model.customTitle = 'After first persist';
+		await store.storeSessions([model]);
+
+		const session = await store.readSession('session-1');
+		assert.ok(session);
+		assert.strictEqual((session.value as ISerializableChatData3).customTitle, 'After first persist');
+		const newWrites = fileService.writeOperations.slice(writesAfterSnapshot);
+		assert.ok(
+			newWrites.some(op =>
+				op.resource.path.endsWith('.jsonl') &&
+				op.append === true &&
+				op.content.includes('customTitle') &&
+				op.content.includes('After first persist')
+			),
+			'subsequent storeSessions must append a mutation op, not rewrite the kind:0 snapshot'
+		);
+		const logResource = fileService.writeOperations.find(op => op.resource.path.endsWith('.jsonl'))?.resource;
+		assert.ok(logResource);
+		const lines = (await fileService.readFile(logResource)).value.toString().trim().split('\n');
+		assert.ok(lines.length >= 2, `jsonl should contain snapshot plus ops, got ${lines.length} line(s)`);
+		assert.strictEqual(JSON.parse(lines[0]).kind, 0);
+	});
+
+	test('storeSessions rewrites a full snapshot when append silently no-ops', async () => {
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1')));
+
+		await store.storeSessions([model]);
+		fileService.simulateAppendNoOp = true;
+		const writesAfterSnapshot = fileService.writeOperations.length;
+
+		model.customTitle = 'Recovered Title';
+		await store.storeSessions([model]);
+
+		const session = await store.readSession('session-1');
+		assert.ok(session);
+		assert.strictEqual((session.value as ISerializableChatData3).customTitle, 'Recovered Title');
+		assert.ok(
+			fileService.writeOperations.slice(writesAfterSnapshot).some(op =>
+				op.resource.path.endsWith('.jsonl') &&
+				op.append !== true &&
+				op.content.includes('Recovered Title')
+			),
+			'failed append must fall back to a replace write of the full snapshot'
+		);
+	});
+
+	test('storeSessions surfaces a failure instead of silently no-opping when persist throws', async () => {
+		const prompts: string[] = [];
+		instantiationService.stub(IDialogService, {
+			prompt: async (prompt: { message: string }) => {
+				prompts.push(prompt.message);
+				return { result: undefined };
+			}
+		} as unknown as IDialogService);
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1')));
+		fileService.writeShouldThrowError = new Error('disk full');
+
+		await store.storeSessions([model]);
+
+		assert.ok(prompts.some(message => message.includes('disk full')), `expected persist failure dialog, got: ${prompts.join(' | ')}`);
+	});
+
+	test('hasPersistedSession is true when jsonl exists even if the index says isEmpty', async () => {
+		const store = createChatSessionStore();
+		const model = testDisposables.add(createMockChatModel(LocalChatSessionUri.forSession('session-1'), { customTitle: 'Titled empty' }));
+
+		await store.storeSessions([model]);
+		const index = await store.getIndex();
+		assert.strictEqual(index['session-1'].isEmpty, true);
+		assert.strictEqual(await store.hasPersistedSession('session-1'), true);
+		assert.strictEqual(await store.hasPersistedSession('missing'), false);
 	});
 
 	test('multiple stores can be created with different workspaces', async () => {

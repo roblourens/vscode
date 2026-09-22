@@ -461,6 +461,17 @@ export class ObjectMutationLog<TFrom, TTo> {
 		}
 	}
 
+	/**
+	 * Drop confirmed and pending state so the next {@link write} emits a full
+	 * `Initial` snapshot (`op: 'replace'`). Used when an append failed to
+	 * persist — retrying another append would still miss the bytes on disk.
+	 */
+	discardConfirmedState(): void {
+		this._previous = undefined;
+		this._entryCount = 0;
+		this._clearPending();
+	}
+
 	private _clearPending(): void {
 		this._hasPendingWrite = false;
 		this._pendingPrevious = undefined;
