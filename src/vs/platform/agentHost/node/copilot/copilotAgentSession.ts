@@ -7,11 +7,11 @@ import type { CopilotSession, CurrentToolMetadata, ElicitationContext, Elicitati
 import { realpath as fsRealpath } from 'fs';
 import { cp, rm } from 'fs/promises';
 import { promisify } from 'util';
-import { DeferredPromise, firstParallel, raceCancellation, raceTimeout, RunOnceScheduler, Sequencer, SequencerByKey, Throttler, timeout } from '../../../../base/common/async.js';
+import { DeferredPromise, firstParallel, raceCancellation, raceCancellationError, raceTimeout, RunOnceScheduler, Sequencer, SequencerByKey, Throttler, timeout } from '../../../../base/common/async.js';
 import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { Emitter } from '../../../../base/common/event.js';
-import { CancellationError, getErrorMessage } from '../../../../base/common/errors.js';
+import { CancellationError, getErrorMessage, isCancellationError } from '../../../../base/common/errors.js';
 import { escapeMarkdownSyntaxTokens } from '../../../../base/common/htmlContent.js';
 import { Disposable, DisposableMap, IReference, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { LRUCache } from '../../../../base/common/map.js';
@@ -63,6 +63,7 @@ import { MessageAttachmentKind, ToolCallContributorKind, type FileEdit, type Mes
 import { ActionType, isChatAction, type ChatAction, type SessionAction } from '../../common/state/sessionActions.js';
 import { MessageKind, ResponsePartKind, ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, ChatInputResponseKind, ToolCallConfirmationReason, ToolCallRiskAssessmentKind, ToolCallRiskAssessmentStatus, ToolCallStatus, ToolResultContentType, buildSubagentSessionUri, createErrorResponsePart, isSubagentSession, parseRequiredSessionUriFromChatUri, type Customization, type Message, type PendingMessage, type ChatInputAnswer, type ChatInputOption, type ChatInputQuestion, type ChatInputRequest, type ToolCallResult, type ToolResultContent, type ToolResultTerminalContent, type Turn, type ITurnTokenTotal, type UsageInfo, type UsageInfoMeta, type IContextAttributionData, type ISessionPromptCacheState } from '../../common/state/sessionState.js';
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
+import { parseSessionEventsFromJsonl } from './buildSessionEvents.js';
 import { CopilotSessionWrapper, type ICopilotModelCallFinishedEvent } from './copilotSessionWrapper.js';
 import { getCopilotSdkToolResourceUri } from './copilotSdkMeta.js';
 import { isAutoModel } from './modelIdentifiers.js';
@@ -423,6 +424,18 @@ function isCopilotSdkToolOutputTempFile(filePath: string, tmpDir: string): boole
 const realpath = promisify(fsRealpath);
 // A non-settling control RPC must not permanently block the per-chat sequencer.
 const CONTROL_PLANE_RPC_TIMEOUT_MS = 30_000;
+/**
+ * Bound for SDK `session.getEvents()` / `session.getMessages`. A week-long
+ * session's full history is one JSON-RPC payload with no SDK deadline; without
+ * this the restore subscription stays pending and the UI loads forever.
+ */
+const HISTORY_READ_TIMEOUT_MS = 60_000;
+/**
+ * Prefer the on-disk `events.jsonl` journal over `session.getEvents()` once
+ * the log is large enough that serializing it through JSON-RPC is likely to
+ * stall. Smaller logs keep the existing SDK path.
+ */
+const HISTORY_DISK_FALLBACK_BYTES = 1024 * 1024;
 const SUBAGENT_TASK_COMPLETION_DELAY_MS = 250;
 
 function hasParentPathSegment(filePath: string): boolean {
@@ -514,6 +527,10 @@ export interface ICopilotAgentSessionOptions {
 	readonly realpath?: (path: string) => Promise<string>;
 	/** Overrides the control-plane RPC timeout for deterministic tests. */
 	readonly controlPlaneRpcTimeoutMs?: number;
+	/** Overrides the persisted-history RPC timeout for deterministic tests. */
+	readonly historyReadTimeoutMs?: number;
+	/** Overrides the on-disk history size at which `events.jsonl` is preferred over `session.getEvents()`. */
+	readonly historyDiskFallbackBytes?: number;
 }
 
 /** Keeps provider-owned state consistent with a live SDK working-directory mutation. */
@@ -815,6 +832,8 @@ export class CopilotAgentSession extends Disposable {
 	readonly resourceUri: URI;
 	private readonly _ownerSessionUri: URI;
 	private readonly _controlPlaneRpcTimeoutMs: number;
+	private readonly _historyReadTimeoutMs: number;
+	private readonly _historyDiskFallbackBytes: number;
 	private _controlPlaneDesynchronized = false;
 	get ownerSessionUri(): URI { return this._ownerSessionUri; }
 	/** @deprecated Compatibility alias for SDK callbacks; this is the exact persistence resource. */
@@ -1239,6 +1258,8 @@ export class CopilotAgentSession extends Disposable {
 		this.sessionId = options.rawSessionId;
 		this._ownerSessionUri = options.sessionUri;
 		this._controlPlaneRpcTimeoutMs = options.controlPlaneRpcTimeoutMs ?? CONTROL_PLANE_RPC_TIMEOUT_MS;
+		this._historyReadTimeoutMs = options.historyReadTimeoutMs ?? HISTORY_READ_TIMEOUT_MS;
+		this._historyDiskFallbackBytes = options.historyDiskFallbackBytes ?? HISTORY_DISK_FALLBACK_BYTES;
 		this.resourceUri = options.resource ?? options.sessionUri;
 		this._chatChannelUri = options.chatChannelUri;
 		this._storageUri = this.resourceUri;
@@ -3518,7 +3539,7 @@ export class CopilotAgentSession extends Disposable {
 
 	private async _computeMappedEvents(): Promise<IMappedSessionEvents> {
 		this._logService.trace(`[Copilot:${this.sessionId}] Reading persisted session events`);
-		const events = await this._wrapper.session.getEvents();
+		const events = await this._readPersistedSessionEvents();
 		this._seedSubagentDisplayNames(events);
 		this._logService.trace(`[Copilot:${this.sessionId}] Read ${events.length} persisted event(s); reconstructing turns`);
 		let db: ISessionDatabase | undefined;
@@ -3554,6 +3575,89 @@ export class CopilotAgentSession extends Disposable {
 	/** Drop the memoized event reconstruction; the next read rebuilds it. */
 	private _invalidateMappedEvents(): void {
 		this._mappedEventsMemo = undefined;
+	}
+
+	/**
+	 * Reads the persisted SDK event log with a deadline and abort cancellation.
+	 *
+	 * `session.getEvents()` is a single unbounded JSON-RPC `session.getMessages`
+	 * call. For a long-lived session that payload can stall indefinitely while
+	 * the host (and AHP pings) remain responsive, leaving the UI loading. Large
+	 * on-disk journals are read directly; a timed-out RPC falls back to the
+	 * same journal so restore can still complete.
+	 */
+	private async _readPersistedSessionEvents(): Promise<readonly SessionEvent[]> {
+		if (this._abortToken.isCancellationRequested) {
+			throw new CancellationError();
+		}
+
+		const disk = await this._readPersistedEventsFromDisk();
+		if (disk && disk.bytes >= this._historyDiskFallbackBytes) {
+			this._logService.info(`[Copilot:${this.sessionId}] Reading ${disk.events.length} persisted event(s) from events.jsonl (${disk.bytes} bytes) instead of session.getEvents`);
+			return disk.events;
+		}
+
+		try {
+			const events = await this._awaitHistoryRead(this._wrapper.session.getEvents());
+			if (events !== undefined) {
+				return events;
+			}
+		} catch (error) {
+			if (isCancellationError(error) || this._abortToken.isCancellationRequested) {
+				throw isCancellationError(error) ? error : new CancellationError();
+			}
+			if (disk?.events.length) {
+				this._logService.warn(`[Copilot:${this.sessionId}] session.getEvents failed; reconstructed ${disk.events.length} event(s) from events.jsonl`, error);
+				return disk.events;
+			}
+			throw error;
+		}
+
+		if (disk?.events.length) {
+			this._logService.warn(`[Copilot:${this.sessionId}] session.getEvents timed out after ${this._historyReadTimeoutMs}ms; reconstructed ${disk.events.length} event(s) from events.jsonl`);
+			return disk.events;
+		}
+
+		const error = new Error(`[Copilot:${this.sessionId}] session.getEvents timed out after ${this._historyReadTimeoutMs}ms`);
+		this._logService.error(error, `[Copilot:${this.sessionId}] Persisted-history RPC timed out: session.getEvents`);
+		throw error;
+	}
+
+	private _persistedEventsFile(): URI {
+		return URI.joinPath(URI.file(getCopilotCLISessionStateDir(this._environmentService.userHome.fsPath)), this.sessionId, 'events.jsonl');
+	}
+
+	private async _readPersistedEventsFromDisk(): Promise<{ readonly events: SessionEvent[]; readonly bytes: number } | undefined> {
+		const resource = this._persistedEventsFile();
+		try {
+			if (!await this._fileService.exists(resource)) {
+				return undefined;
+			}
+			const contents = (await this._fileService.readFile(resource)).value.toString();
+			const events = parseSessionEventsFromJsonl(contents);
+			if (events.length === 0) {
+				return undefined;
+			}
+			return { events, bytes: contents.length };
+		} catch (error) {
+			this._logService.warn(`[Copilot:${this.sessionId}] Failed to read persisted events.jsonl`, error);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Bounds SDK history retrieval so a non-settling `getEvents` cannot leave
+	 * session restore pending. The in-flight RPC is not cancelled (JSON-RPC
+	 * has no abort); the caller falls back to `events.jsonl` or fails.
+	 */
+	private async _awaitHistoryRead(rpc: Promise<readonly SessionEvent[]>): Promise<readonly SessionEvent[] | undefined> {
+		if (this._abortToken.isCancellationRequested) {
+			throw new CancellationError();
+		}
+		return raceCancellationError(
+			raceTimeout(rpc, this._historyReadTimeoutMs),
+			this._abortToken,
+		);
 	}
 
 	async abort(): Promise<void> {

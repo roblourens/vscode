@@ -9,7 +9,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { generateUuid, isUUID } from '../../../../base/common/uuid.js';
 import { AgentSession } from '../../common/agent.js';
 import { MessageKind, ResponsePartKind, ToolCallConfirmationReason, ToolCallStatus, ToolResultContentType, TurnState, buildChatUri, type ResponsePart, type ToolCallCompletedState, type Turn } from '../../common/state/sessionState.js';
-import { buildSessionEventLogFromTurns, buildSessionEventsFromTurns, serializeSessionEventsToJsonl } from '../../node/copilot/buildSessionEvents.js';
+import { buildSessionEventLogFromTurns, buildSessionEventsFromTurns, parseSessionEventsFromJsonl, serializeSessionEventsToJsonl } from '../../node/copilot/buildSessionEvents.js';
 import { mapSessionEvents as mapSessionEventsWithRouting } from '../../node/copilot/mapSessionEvents.js';
 import type { SessionEvent } from '@github/copilot-sdk';
 
@@ -340,6 +340,19 @@ suite('buildSessionEventsFromTurns — reverse of mapSessionEvents', () => {
 
 		// Empty input serializes to the empty string.
 		assert.strictEqual(serializeSessionEventsToJsonl([]), '');
+	});
+
+	test('parses newline-terminated JSONL and skips malformed lines', () => {
+		const events = buildSessionEventsFromTurns([
+			userTurn('turn-a', 'What is 2+2?', [markdown('It is 4.')]),
+		], { sessionId });
+		const jsonl = serializeSessionEventsToJsonl(events);
+
+		assert.deepStrictEqual(parseSessionEventsFromJsonl(jsonl), events);
+		assert.deepStrictEqual(parseSessionEventsFromJsonl(''), []);
+		assert.deepStrictEqual(parseSessionEventsFromJsonl('not json\n\n{"type":"session.start"}\n'), [
+			{ type: 'session.start' },
+		]);
 	});
 
 	test('the on-disk JSONL bytes reconstruct the original turns end to end', async () => {

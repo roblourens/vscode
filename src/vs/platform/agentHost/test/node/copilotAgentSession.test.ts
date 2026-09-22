@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { PluginFormat } from '../../../agentPlugins/common/pluginParsers.js';
 import { isCustomizationEnabled } from '../../common/customizationEnablement.js';
+import { CancellationError } from '../../../../base/common/errors.js';
 import { DeferredPromise, timeout } from '../../../../base/common/async.js';
 import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Emitter } from '../../../../base/common/event.js';
@@ -27,6 +28,7 @@ import { McpServerType } from '../../../mcp/common/mcpPlatformTypes.js';
 import type { ClassifiedEvent, IGDPRProperty, OmitMetadata, StrictPropertyCheck } from '../../../telemetry/common/gdprTypings.js';
 import { ITelemetryService, TelemetryLevel } from '../../../telemetry/common/telemetry.js';
 import { NullTelemetryServiceShape } from '../../../telemetry/common/telemetryUtils.js';
+import { getCopilotHomePath } from '../../common/copilotHome.js';
 import { getTelemetryChatSessionId } from '../../common/agentTelemetryCorrelation.js';
 import { AgentSession, type AgentSignal, type IAgentActionSignal, type IAgentToolPendingConfirmationSignal } from '../../common/agent.js';
 import { AgentHostClientType } from '../../common/agentHostClientInfo.js';
@@ -47,6 +49,7 @@ import { TerminalClaimKind } from '../../common/state/protocol/state.js';
 import { toHostSnapshotAttachmentMeta } from '../../common/meta/agentSnapshotAttachmentMeta.js';
 import { STREAMING_TOOL_DISPLAY_INTERVAL_MS } from '../../common/streamingToolCallDisplay.js';
 import { CustomizationEnablementKind, CustomizationType, McpAuthRequiredReason, McpServerStatus, type Customization, type McpServerCustomization } from '../../common/state/protocol/channels-session/state.js';
+import { serializeSessionEventsToJsonl } from '../../node/copilot/buildSessionEvents.js';
 import { CopilotAgentSession, type ICopilotWorkingDirectoryChangeTransaction } from '../../node/copilot/copilotAgentSession.js';
 import { CopilotGitHubCredentials, CopilotGitHubSessionCredentials } from '../../node/copilot/copilotGitHubCredentials.js';
 import { buildNonPtyShellTerminalUri } from '../../node/copilot/copilotNonPtyShellTerminals.js';
@@ -857,6 +860,8 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	/** Configure the mock session before {@link CopilotAgentSession.initializeSession} runs. */
 	configureMockSession?: (session: MockCopilotSession) => void;
 	controlPlaneRpcTimeoutMs?: number;
+	historyReadTimeoutMs?: number;
+	historyDiskFallbackBytes?: number;
 	sessionCustomizations?: () => readonly Customization[];
 	resolveCustomizationEnablement?: (target: ICustomizationEnablementTarget) => CustomizationEnablementResolution;
 	initialSessionMeta?: Record<string, unknown>;
@@ -1181,6 +1186,8 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 			enableDevelopmentErrorInjection: options?.enableDevelopmentErrorInjection ?? true,
 			realpath: options?.realpath,
 			controlPlaneRpcTimeoutMs: options?.controlPlaneRpcTimeoutMs,
+			historyReadTimeoutMs: options?.historyReadTimeoutMs,
+			historyDiskFallbackBytes: options?.historyDiskFallbackBytes,
 			subagentTaskCompletionDelay: options?.subagentTaskCompletionDelay ?? 0,
 		},
 	));
@@ -2442,6 +2449,101 @@ suite('CopilotAgentSession', () => {
 		await session.getSubagentMessages('tc-x');
 
 		assert.strictEqual(getEventsCalls, 1);
+	});
+
+	test('times out a non-settling persisted-event read', async () => {
+		const { session, mockSession } = await createAgentSession(disposables, { historyReadTimeoutMs: 1 });
+		mockSession.getEvents = () => new Promise(() => { });
+
+		await assert.rejects(
+			() => session.getMessages(),
+			error => error instanceof Error && error.message === '[Copilot:test-session-1] session.getEvents timed out after 1ms',
+		);
+	});
+
+	test('reconstructs history from events.jsonl when session.getEvents never settles', async () => {
+		const events = toSessionEvents([
+			{ type: 'user.message', id: 'turn-disk', data: { interactionId: 'message-1', content: 'From disk' } },
+			{ type: 'assistant.message', data: { messageId: 'message-2', content: 'Loaded' } },
+		]);
+		const eventsFile = URI.file(join(getCopilotHomePath('/mock-home', process.env), 'session-state', 'test-session-1', 'events.jsonl'));
+		const { session, mockSession } = await createAgentSession(disposables, {
+			historyReadTimeoutMs: 1,
+			fileContents: {
+				[eventsFile.toString()]: serializeSessionEventsToJsonl(events),
+				[eventsFile.fsPath]: serializeSessionEventsToJsonl(events),
+			},
+		});
+		mockSession.getEvents = () => new Promise(() => { });
+
+		const turns = await session.getMessages();
+		assert.strictEqual(turns[0]?.id, 'turn-disk');
+		assert.strictEqual(turns[0]?.message.text, 'From disk');
+	});
+
+	test('prefers a large on-disk event log over a non-settling session.getEvents', async () => {
+		const events = toSessionEvents([
+			{ type: 'user.message', id: 'turn-large', data: { interactionId: 'message-1', content: 'Large journal' } },
+			{ type: 'assistant.message', data: { messageId: 'message-2', content: 'Opened without RPC' } },
+		]);
+		const eventsFile = URI.file(join(getCopilotHomePath('/mock-home', process.env), 'session-state', 'test-session-1', 'events.jsonl'));
+		let getEventsCalls = 0;
+		const { session } = await createAgentSession(disposables, {
+			historyReadTimeoutMs: 30_000,
+			historyDiskFallbackBytes: 1,
+			fileContents: {
+				[eventsFile.toString()]: serializeSessionEventsToJsonl(events),
+				[eventsFile.fsPath]: serializeSessionEventsToJsonl(events),
+			},
+			configureMockSession: mock => {
+				mock.getEvents = () => {
+					getEventsCalls++;
+					return new Promise(() => { });
+				};
+			},
+		});
+
+		const turns = await session.getMessages();
+
+		assert.strictEqual(getEventsCalls, 0);
+		assert.strictEqual(turns[0]?.id, 'turn-large');
+		assert.strictEqual(turns[0]?.message.text, 'Large journal');
+	});
+
+	test('reconstructs history from events.jsonl when session.getEvents rejects', async () => {
+		const events = toSessionEvents([
+			{ type: 'user.message', id: 'turn-error-fallback', data: { interactionId: 'message-1', content: 'Recovered' } },
+			{ type: 'assistant.message', data: { messageId: 'message-2', content: 'From disk' } },
+		]);
+		const eventsFile = URI.file(join(getCopilotHomePath('/mock-home', process.env), 'session-state', 'test-session-1', 'events.jsonl'));
+		const { session, mockSession } = await createAgentSession(disposables, {
+			fileContents: {
+				[eventsFile.toString()]: serializeSessionEventsToJsonl(events),
+				[eventsFile.fsPath]: serializeSessionEventsToJsonl(events),
+			},
+		});
+		mockSession.getEvents = async () => { throw new Error('payload too large'); };
+
+		const turns = await session.getMessages();
+		assert.strictEqual(turns[0]?.id, 'turn-error-fallback');
+		assert.strictEqual(turns[0]?.message.text, 'Recovered');
+	});
+
+	test('cancels a hung persisted-event read when the session is disposed', async () => {
+		const { session, mockSession } = await createAgentSession(disposables, { historyReadTimeoutMs: 30_000 });
+		mockSession.getEvents = () => new Promise(() => { });
+
+		const pending = session.getMessages();
+		session.dispose();
+
+		await assert.rejects(pending, error => error instanceof CancellationError);
+	});
+
+	test('rethrows a session.getEvents failure when no events.jsonl is available', async () => {
+		const { session, mockSession } = await createAgentSession(disposables);
+		mockSession.getEvents = async () => { throw new Error('payload too large'); };
+
+		await assert.rejects(() => session.getMessages(), /payload too large/);
 	});
 
 	test('falls back to file reference when reading a symbol Resource attachment fails', async () => {

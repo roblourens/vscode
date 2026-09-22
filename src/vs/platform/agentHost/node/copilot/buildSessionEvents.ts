@@ -271,6 +271,29 @@ export function serializeSessionEventsToJsonl(events: readonly SessionEvent[]): 
 }
 
 /**
+ * Parses on-disk `events.jsonl` into SDK {@link SessionEvent}s. Empty lines are
+ * ignored. A malformed line is skipped so a single corrupt record cannot block
+ * reconstructing the rest of a long session.
+ */
+export function parseSessionEventsFromJsonl(contents: string): SessionEvent[] {
+	if (!contents) {
+		return [];
+	}
+	const events: SessionEvent[] = [];
+	for (const line of contents.split(/\r?\n/)) {
+		if (line.length === 0) {
+			continue;
+		}
+		try {
+			events.push(JSON.parse(line) as SessionEvent);
+		} catch {
+			// Skip the corrupt record and keep reconstructing.
+		}
+	}
+	return events;
+}
+
+/**
  * Convenience combining {@link buildSessionEventsFromTurns} and
  * {@link serializeSessionEventsToJsonl}: turns the given VS Code turns directly
  * into the `events.jsonl` bytes to write for the target session.
