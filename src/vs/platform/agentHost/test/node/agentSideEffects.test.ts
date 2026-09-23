@@ -7007,6 +7007,209 @@ suite('AgentSideEffects', () => {
 			assert.strictEqual(sub2?.activeTurn, undefined, 'sub2 turn should be cancelled');
 		});
 
+		test('parent cancellation preserves child routing so a later resume delivers explicit approval', async () => {
+			setupSession();
+			startTurn('turn-1', defaultChatUri);
+			disposables.add(sideEffects.registerProgressListener(agent));
+
+			agent.fireProgress({ kind: 'action', resource: URI.parse(defaultChatUri), action: { type: ActionType.ChatToolCallStart, turnId: 'turn-1', toolCallId: 'tc-bg', toolName: 'task', displayName: 'Task', contributor: undefined, _meta: { toolKind: undefined, language: undefined } } });
+			agent.fireProgress({ kind: 'action', resource: URI.parse(defaultChatUri), action: { type: ActionType.ChatToolCallReady, turnId: 'turn-1', toolCallId: 'tc-bg', invocationMessage: 'Delegating...', toolInput: undefined, confirmed: ToolCallConfirmationReason.NotNeeded } });
+			agent.fireProgress({ kind: 'subagent_started', chat: URI.parse(defaultChatUri), toolCallId: 'tc-bg', agentName: 'helper', agentDisplayName: 'Helper', agentDescription: 'Helps' });
+			agent.fireProgress({ kind: 'subagent_completed', chat: URI.parse(defaultChatUri), toolCallId: 'tc-bg' });
+
+			sideEffects.handleAction(defaultChatUri, {
+				type: ActionType.ChatTurnCancelled,
+				turnId: 'turn-1',
+				duration: 1000,
+			});
+
+			startTurn('turn-2', defaultChatUri);
+			agent.fireProgress({
+				kind: 'subagent_resumed',
+				chat: URI.parse(defaultChatUri),
+				toolCallId: 'tc-bg',
+				message: { text: 'Continue', origin: { kind: MessageKind.User } },
+			});
+
+			const subagentUri = buildSubagentChatUri(sessionUri.toString(), 'tc-bg');
+			assert.ok(stateManager.getActiveTurnId(subagentUri), 'resumed child must have an active turn');
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-bg',
+				action: {
+					type: ActionType.ChatToolCallStart, turnId: 'turn-2',
+					toolCallId: 'inner-shell', toolName: 'shell', displayName: 'Shell', contributor: undefined,
+					_meta: { toolKind: undefined, language: undefined },
+				},
+			});
+			agent.fireProgress({
+				kind: 'pending_confirmation',
+				chat: URI.parse(defaultChatUri),
+				parentToolCallId: 'tc-bg',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'inner-shell', toolName: 'shell', displayName: 'Shell',
+					invocationMessage: 'Package artifacts', toolInput: undefined,
+					confirmationTitle: 'Run command',
+				},
+			});
+
+			const childState = await waitForState(stateManager, () => {
+				const s = stateManager.getSessionState(subagentUri);
+				const p = s?.activeTurn?.responseParts.find(rp => rp.kind === ResponsePartKind.ToolCall && rp.toolCall.toolCallId === 'inner-shell');
+				return p?.kind === ResponsePartKind.ToolCall && p.toolCall.status === ToolCallStatus.PendingConfirmation ? s : undefined;
+			});
+			assert.ok(childState?.activeTurn, 'approval must land on the resumed child chat');
+			assert.deepStrictEqual(agent.respondToPermissionCalls, [], 'must not auto-deny a routable resumed child permission');
+
+			const childTurnId = stateManager.getActiveTurnId(subagentUri);
+			assert.ok(childTurnId);
+			sideEffects.handleAction(subagentUri, {
+				type: ActionType.ChatToolCallConfirmed,
+				turnId: childTurnId,
+				toolCallId: 'inner-shell',
+				approved: true,
+				confirmed: 'user-action' as const,
+			} as ChatAction);
+			assert.deepStrictEqual(agent.respondToPermissionCalls, [
+				{ requestId: 'inner-shell', approved: true },
+			]);
+		});
+
+		test('subagent_resumed reconstructs routing when the child was never started in this host', async () => {
+			setupSession();
+			startTurn('turn-1');
+			disposables.add(sideEffects.registerProgressListener(agent));
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-reuse',
+				action: {
+					type: ActionType.ChatToolCallStart, turnId: 'turn-1',
+					toolCallId: 'inner-1', toolName: 'read', displayName: 'Read', contributor: undefined,
+					_meta: { toolKind: undefined, language: undefined },
+				},
+			});
+			agent.fireProgress({
+				kind: 'subagent_resumed',
+				chat: URI.parse(defaultChatUri),
+				toolCallId: 'tc-reuse',
+				message: { text: 'Follow up', origin: { kind: MessageKind.User } },
+			});
+
+			const subagentUri = buildSubagentChatUri(sessionUri.toString(), 'tc-reuse');
+			const subState = stateManager.getSessionState(subagentUri);
+			assert.ok(subState?.activeTurn, 'reconstructed child must have an active turn');
+			const innerTool = subState!.activeTurn!.responseParts.find(
+				rp => rp.kind === ResponsePartKind.ToolCall && rp.toolCall.toolCallId === 'inner-1'
+			);
+			assert.ok(innerTool, 'events buffered before resume must drain onto the reconstructed child');
+
+			agent.fireProgress({
+				kind: 'pending_confirmation',
+				chat: URI.parse(defaultChatUri),
+				parentToolCallId: 'tc-reuse',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'inner-1', toolName: 'read', displayName: 'Read',
+					invocationMessage: 'Read file', toolInput: undefined,
+					confirmationTitle: 'Read file',
+				},
+			});
+
+			await waitForState(stateManager, () => {
+				const s = stateManager.getSessionState(subagentUri);
+				const p = s?.activeTurn?.responseParts.find(rp => rp.kind === ResponsePartKind.ToolCall && rp.toolCall.toolCallId === 'inner-1');
+				return p?.kind === ResponsePartKind.ToolCall && p.toolCall.status === ToolCallStatus.PendingConfirmation ? true : undefined;
+			});
+			assert.deepStrictEqual(agent.respondToPermissionCalls, []);
+		});
+
+		test('failed resume denies buffered and later permissions instead of hanging', () => {
+			disposables.add(sideEffects.registerProgressListener(agent));
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-orphan',
+				action: {
+					type: ActionType.ChatToolCallStart, turnId: 'turn-1',
+					toolCallId: 'buffered-shell', toolName: 'shell', displayName: 'Shell', contributor: undefined,
+					_meta: { toolKind: undefined, language: undefined },
+				},
+			});
+			agent.fireProgress({
+				kind: 'pending_confirmation',
+				chat: URI.parse(defaultChatUri),
+				parentToolCallId: 'tc-orphan',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'buffered-shell', toolName: 'shell', displayName: 'Shell',
+					invocationMessage: 'Run command',
+				},
+			});
+			agent.fireProgress({
+				kind: 'subagent_resumed',
+				chat: URI.parse(defaultChatUri),
+				toolCallId: 'tc-orphan',
+			});
+			agent.fireProgress({
+				kind: 'pending_confirmation',
+				chat: URI.parse(defaultChatUri),
+				parentToolCallId: 'tc-orphan',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'later-shell', toolName: 'shell', displayName: 'Shell',
+					invocationMessage: 'Run command',
+				},
+			});
+
+			assert.deepStrictEqual(agent.respondToPermissionCalls, [
+				{ requestId: 'buffered-shell', approved: false },
+				{ requestId: 'later-shell', approved: false },
+			]);
+		});
+
+		test('canceling a parent turn still does not resume the cancelled child work', () => {
+			setupSession();
+			startTurn('turn-1', defaultChatUri);
+			disposables.add(sideEffects.registerProgressListener(agent));
+
+			agent.fireProgress({ kind: 'subagent_started', chat: URI.parse(defaultChatUri), toolCallId: 'tc-live', agentName: 'helper', agentDisplayName: 'Helper' });
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-live',
+				action: { type: ActionType.ChatResponsePart, turnId: 'turn-1', part: { kind: ResponsePartKind.Markdown, id: 'pre-cancel', content: 'working' } },
+			});
+
+			sideEffects.handleAction(defaultChatUri, {
+				type: ActionType.ChatTurnCancelled,
+				turnId: 'turn-1',
+				duration: 1000,
+			});
+
+			const subagentUri = buildSubagentChatUri(sessionUri.toString(), 'tc-live');
+			assert.strictEqual(stateManager.getActiveTurnId(subagentUri), undefined, 'cancelled child must stay idle until an explicit resume');
+
+			agent.fireProgress({
+				kind: 'action', resource: URI.parse(defaultChatUri), parentToolCallId: 'tc-live',
+				action: { type: ActionType.ChatResponsePart, turnId: 'turn-1', part: { kind: ResponsePartKind.Markdown, id: 'post-cancel', content: 'stale' } },
+			});
+			agent.fireProgress({
+				kind: 'pending_confirmation',
+				chat: URI.parse(defaultChatUri),
+				parentToolCallId: 'tc-live',
+				state: {
+					status: ToolCallStatus.PendingConfirmation,
+					toolCallId: 'stale-shell', toolName: 'shell', displayName: 'Shell',
+					invocationMessage: 'Run command',
+				},
+			});
+
+			const subState = stateManager.getSessionState(subagentUri);
+			assert.strictEqual(subState?.activeTurn, undefined);
+			assert.strictEqual(subState?.turns.at(-1)?.responseParts.some(rp => rp.kind === ResponsePartKind.Markdown && rp.id === 'post-cancel'), false);
+			assert.deepStrictEqual(agent.respondToPermissionCalls, [
+				{ requestId: 'stale-shell', approved: false },
+			]);
+		});
+
 		test('removeSubagentSessions removes all subagent chats from state', () => {
 			setupSession();
 			startTurn('turn-1');

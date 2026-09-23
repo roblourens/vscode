@@ -36,6 +36,8 @@ import type { CustomizationEnablement } from '../common/state/protocol/channels-
 import { ActionType, isChatAction, StateAction, type ChatDeltaAction, type ChatReasoningAction, type ChatResponsePartAction, type ChatToolCallCompleteAction, type ChatToolCallStartAction, type ChatTurnStartedAction } from '../common/state/sessionActions.js';
 import {
 	buildSubagentChatUri,
+	ChatInteractivity,
+	ChatOriginKind,
 	createErrorResponsePart,
 	getErrorResponsePart,
 	getToolFileEdits,
@@ -206,6 +208,8 @@ export class AgentSideEffects extends Disposable {
 	private readonly _permissionManager: SessionPermissionManager;
 
 	private readonly _subagentChats = new NKeyMap<ISubagentSessionRef, [ProtocolURI, string]>();
+	/** Children whose resume could not be reconstructed; later events fail closed instead of buffering forever. */
+	private readonly _unresumableSubagents = new NKeyMap<true, [ProtocolURI, string]>();
 	private readonly _cancelledTurnIds = new Map<ProtocolURI, Set<string>>();
 	/** Serializes refreshes per session so state-based deduplication observes the preceding dispatch. */
 	private readonly _pendingSessionCustomizationPublishes = new Map<ProtocolURI, Promise<void>>();
@@ -214,12 +218,13 @@ export class AgentSideEffects extends Disposable {
 
 	/**
 	 * Buffers signals whose `parentToolCallId` references a subagent
-	 * whose `subagent_started` signal has not yet been processed. The SDK is
-	 * not strict about ordering: an inner `tool_start` can arrive before the
-	 * `subagent_started` that creates the child session. Without buffering,
-	 * those signals would be dispatched against the parent session and the
-	 * UI would render the inner tool calls flat at the top level rather than
-	 * grouping them under the subagent. Drained by `_handleSubagentStarted`.
+	 * whose `subagent_started` or `subagent_resumed` signal has not yet been
+	 * processed. The SDK is not strict about ordering: an inner `tool_start`
+	 * can arrive before the `subagent_started` that creates the child session.
+	 * Without buffering, those signals would be dispatched against the parent
+	 * session and the UI would render the inner tool calls flat at the top
+	 * level rather than grouping them under the subagent. Drained after start
+	 * or a successful resume.
 	 *
 	 */
 	private readonly _pendingSubagentSignals = new NKeyMap<IPendingSubagentSignal[], [ProtocolURI, string]>();
@@ -592,9 +597,10 @@ export class AgentSideEffects extends Disposable {
 	 *
 	 * Action signals with a `parentToolCallId` are routed to the matching
 	 * subagent session. If the subagent session does not exist yet (the SDK
-	 * can emit an inner `tool_start` before its `subagent_started`), the
-	 * signal is buffered in {@link _pendingSubagentSignals} and replayed
-	 * once the `subagent_started` arrives.
+	 * can emit an inner `tool_start` before its `subagent_started` or
+	 * `subagent_resumed`), the signal is buffered in
+	 * {@link _pendingSubagentSignals} and replayed once start or resume
+	 * succeeds. A failed resume fails closed instead of buffering forever.
 	 */
 	private _handleAgentSignal(agent: IAgent, signal: AgentSignal): void {
 		if (signal.kind === 'subagent_started') {
@@ -604,7 +610,12 @@ export class AgentSideEffects extends Disposable {
 		}
 
 		if (signal.kind === 'subagent_resumed') {
-			this._resumeSubagentSession(signal.chat.toString(), signal.toolCallId, signal.message);
+			const parentChatURI = signal.chat.toString();
+			if (this._resumeSubagentSession(parentChatURI, signal.toolCallId, signal.message)) {
+				this._drainPendingSubagentSignals(parentChatURI, signal.toolCallId);
+			} else {
+				this._failClosedUnknownSubagent(parentChatURI, signal.toolCallId);
+			}
 			return;
 		}
 
@@ -656,6 +667,14 @@ export class AgentSideEffects extends Disposable {
 				return;
 			}
 
+			if (this._unresumableSubagents.get(sessionKey, parentToolCallId)) {
+				this._logService.error(`[AgentSideEffects] Dropping ${this._describeSignal(signal)} for unresumable subagent ${sessionKey}/${parentToolCallId}`);
+				if (signal.kind === 'pending_confirmation') {
+					agent.respondToPermissionRequest(signal.state.toolCallId, false);
+				}
+				return;
+			}
+
 			const pendingSignals = this._pendingSubagentSignals.get(sessionKey, parentToolCallId);
 			if (signal.kind === 'pending_confirmation' && !pendingSignals) {
 				this._logService.error(`[AgentSideEffects] Denying permission for unroutable subagent ${sessionKey}/${parentToolCallId}: toolCallId=${signal.state.toolCallId}`);
@@ -664,7 +683,7 @@ export class AgentSideEffects extends Disposable {
 			}
 
 			// Subagent session does not exist yet — buffer the signal so we can
-			// replay it after `subagent_started` arrives.
+			// replay it after `subagent_started` or `subagent_resumed` arrives.
 			this._logService.trace(`[AgentSideEffects] Buffering ${this._describeSignal(signal)} for pending subagent ${sessionKey}/${parentToolCallId}`);
 			let buffer = pendingSignals;
 			if (!buffer) {
@@ -1013,8 +1032,8 @@ export class AgentSideEffects extends Disposable {
 
 	/**
 	 * Replays any signals that were buffered while waiting for
-	 * `subagent_started` to create the subagent session. Called immediately
-	 * after `_handleSubagentStarted`.
+	 * `subagent_started` or `subagent_resumed` to create the subagent
+	 * session. Called immediately after a successful start or resume.
 	 */
 	private _drainPendingSubagentSignals(parentChatURI: ProtocolURI, parentToolCallId: string): void {
 		const buffer = this._pendingSubagentSignals.get(parentChatURI, parentToolCallId);
@@ -1066,10 +1085,12 @@ export class AgentSideEffects extends Disposable {
 
 		const existing = this._subagentChats.get(chatURI, toolCallId);
 		if (existing) {
+			this._unresumableSubagents.delete(chatURI, toolCallId);
 			this._resumeSubagentSession(chatURI, toolCallId, taskPrompt ? { text: taskPrompt, origin: { kind: MessageKind.User } } : undefined, immediateParentChatUri);
 			return;
 		}
 
+		this._unresumableSubagents.delete(chatURI, toolCallId);
 		this._logService.info(`[AgentSideEffects] Starting subagent turn: ${subagentChatUri} (parent=${chatURI}, toolCallId=${toolCallId})`);
 
 		// Seed the subagent's opening request with the delegated task prompt,
@@ -1138,14 +1159,19 @@ export class AgentSideEffects extends Disposable {
 		return typeof elapsed === 'number' && Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
 	}
 
-	private _resumeSubagentSession(parentChatURI: ProtocolURI, toolCallId: string, message: Message | undefined, immediateParentChatURI?: ProtocolURI): void {
-		const subagent = this._subagentChats.get(parentChatURI, toolCallId);
+	private _resumeSubagentSession(parentChatURI: ProtocolURI, toolCallId: string, message: Message | undefined, immediateParentChatURI?: ProtocolURI): boolean {
+		let subagent = this._subagentChats.get(parentChatURI, toolCallId);
 		if (!subagent) {
-			this._logService.error(`[AgentSideEffects] Cannot resume unknown subagent ${parentChatURI}/${toolCallId}`);
-			return;
+			subagent = this._reconstructSubagentSession(parentChatURI, toolCallId, immediateParentChatURI);
+			if (!subagent) {
+				this._logService.error(`[AgentSideEffects] Cannot resume unknown subagent ${parentChatURI}/${toolCallId}`);
+				return false;
+			}
+			this._logService.info(`[AgentSideEffects] Reconstructed subagent routing: ${subagent.chatUri} (parent=${parentChatURI}, toolCallId=${toolCallId})`);
 		}
+		this._unresumableSubagents.delete(parentChatURI, toolCallId);
 		if (this._stateManager.getActiveTurnId(subagent.chatUri)) {
-			return;
+			return true;
 		}
 
 		const turnId = generateUuid();
@@ -1166,6 +1192,77 @@ export class AgentSideEffects extends Disposable {
 			this._turnTracker.setCurrentStage(subagent.chatUri, turnId, 'provider');
 		}
 		this._subagentChats.set({ ...subagent, immediateParentChatUri: correlatedParentChatUri, turnStopWatch: StopWatch.create(false) }, parentChatURI, toolCallId);
+		return true;
+	}
+
+	/**
+	 * Rebuilds host routing for an SDK child that is still alive after its
+	 * registration was dropped (typically parent cancellation). The child
+	 * chat URI is stable ({@link buildSubagentChatUri}); catalog membership
+	 * is restored so the new turn and later permission requests have a
+	 * destination. Returns `undefined` when the parent session is gone.
+	 */
+	private _reconstructSubagentSession(parentChatURI: ProtocolURI, toolCallId: string, immediateParentChatURI?: ProtocolURI): ISubagentSessionRef | undefined {
+		let parentSessionUri: ProtocolURI;
+		try {
+			parentSessionUri = parseRequiredSessionUriFromChatUri(parentChatURI);
+		} catch {
+			return undefined;
+		}
+		if (!this._stateManager.getSessionState(parentSessionUri)) {
+			return undefined;
+		}
+		const chatUri = buildSubagentChatUri(parentSessionUri, toolCallId);
+		this._stateManager.addChat(parentSessionUri, chatUri, {
+			origin: { kind: ChatOriginKind.Tool, chat: parentChatURI, toolCallId },
+			interactivity: ChatInteractivity.ReadOnly,
+		});
+		const subagent: ISubagentSessionRef = {
+			parentChatUri: parentChatURI,
+			immediateParentChatUri: immediateParentChatURI,
+			toolCallId,
+			sessionUri: parentSessionUri,
+			chatUri,
+			turnStopWatch: StopWatch.create(false),
+			taskModelSource: undefined,
+		};
+		this._subagentChats.set(subagent, parentChatURI, toolCallId);
+		return subagent;
+	}
+
+	/**
+	 * Settles outstanding child requests and refuses later routing for a
+	 * child that cannot be resumed. Buffer existence alone is not treated as
+	 * evidence that a start will arrive.
+	 */
+	private _failClosedUnknownSubagent(parentChatURI: ProtocolURI, toolCallId: string): void {
+		this._unresumableSubagents.set(true, parentChatURI, toolCallId);
+		this._denyPendingSubagentSignals(parentChatURI, toolCallId);
+	}
+
+	private _denyPendingSubagentSignals(parentChatURI: ProtocolURI, toolCallId?: string): void {
+		if (toolCallId !== undefined) {
+			const buffer = this._pendingSubagentSignals.get(parentChatURI, toolCallId);
+			this._pendingSubagentSignals.delete(parentChatURI, toolCallId);
+			this._denyBufferedPermissionRequests(buffer);
+			return;
+		}
+		for (const buffer of this._pendingSubagentSignals.getAll(parentChatURI)) {
+			this._denyBufferedPermissionRequests(buffer);
+		}
+		this._pendingSubagentSignals.deleteAll(parentChatURI);
+	}
+
+	private _denyBufferedPermissionRequests(buffer: readonly IPendingSubagentSignal[] | undefined): void {
+		if (!buffer) {
+			return;
+		}
+		for (const { signal, agent } of buffer) {
+			if (signal.kind === 'pending_confirmation') {
+				this._logService.error(`[AgentSideEffects] Denying permission for unroutable subagent: toolCallId=${signal.state.toolCallId}`);
+				agent.respondToPermissionRequest(signal.state.toolCallId, false);
+			}
+		}
 	}
 
 	private _getSubagentParentTurnTelemetryContext(immediateParentChatUri: ProtocolURI | undefined, fallbackParentChatUri: ProtocolURI): ISubagentParentTurnTelemetryContext {
@@ -1185,7 +1282,12 @@ export class AgentSideEffects extends Disposable {
 	}
 
 	/**
-	 * Cancels all active subagent sessions for a given parent session.
+	 * Cancels all active subagent turns for a given parent chat.
+	 *
+	 * Routing registrations stay so a later SDK `subagent_resumed` can start
+	 * a new child turn. Buffered events from the cancelled work are dropped
+	 * and any buffered permission requests are denied. Preserving identity
+	 * does not resume cancelled work on its own.
 	 */
 	cancelSubagentSessions(parentChatURI: ProtocolURI): void {
 		for (const subagent of this._subagentChats.getAll(parentChatURI)) {
@@ -1201,9 +1303,8 @@ export class AgentSideEffects extends Disposable {
 			this._toolCallTracker.clearSession(subagent.chatUri);
 			this._turnTracker.clearSession(subagent.chatUri);
 		}
-		this._subagentChats.deleteAll(parentChatURI);
-		// Drop any buffered events targeted at subagents that never started.
-		this._pendingSubagentSignals.deleteAll(parentChatURI);
+		this._unresumableSubagents.deleteAll(parentChatURI);
+		this._denyPendingSubagentSignals(parentChatURI);
 	}
 
 	/**
@@ -1255,7 +1356,8 @@ export class AgentSideEffects extends Disposable {
 		}
 		for (const parentChatURI of parentChatURIs) {
 			this._subagentChats.deleteAll(parentChatURI);
-			this._pendingSubagentSignals.deleteAll(parentChatURI);
+			this._unresumableSubagents.deleteAll(parentChatURI);
+			this._denyPendingSubagentSignals(parentChatURI);
 		}
 	}
 
