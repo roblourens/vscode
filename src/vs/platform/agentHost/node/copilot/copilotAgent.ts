@@ -44,7 +44,7 @@ import { CopilotCliConfigKey, CopilotCliVSCodeAssignmentContextKey, copilotCliCo
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostByokModelsEnabledConfigKey, AgentHostMcpServersConfigKey, AgentHostGitHubMcpServerEnabledConfigKey, AgentHostCopilotMultiRootEnabledConfigKey, AgentHostSessionSyncEnabledConfigKey, AgentHostSystemProxyEnabledConfigKey, AgentHostMigrateLegacyCopilotCliEnabledConfigKey, AgentHostProxyConfigKey, agentHostProxyConfigSchema, AutoApproveLevel, SessionMode, migrateLegacyAutopilotConfig, platformRootSchema, platformSessionSchema, type AgentHostMcpServers } from '../../common/agentHostSchema.js';
 import { IAgentPluginManager, ISyncedCustomization } from '../../common/agentPluginManager.js';
 import { decodeProviderData, encodeProviderData, type IPersistedChat } from '../agentChatBackings.js';
-import { AgentChatOperationContext, AgentSession, AgentSignal, AuthenticateParams, IActiveClient, IAgent, IAgentChatAdoptionResult, type IAgentAdoptedWorktree, IAgentChatConfigCompletionsParams, IAgentChatContext, IAgentChatDataChange, IAgentChatMetadata, IAgentChats, IAgentLegacyChat, IAgentCreateChatOptions, IAgentCreateChatResult, IAgentDescriptor, IAgentDiscoveredChat, IAgentHostManagedSettingsSnapshot, IAgentHostNetworkEndpoint, IAgentKnownSessionsFilter, IAgentMaterializeChatEvent, IAgentModelInfo, type IAgentPendingMessageSender, IAgentResolveChatConfigParams, IAgentSessionProjectInfo, IAgentSpawnChatEvent, IMcpNotification, SubagentChatSignal, resolveAgentChatContext, resolveAgentHostCustomizations, resolveAgentHostInstructions, resolveSubagentChatParent, type IAgentTurnDiagnosticSnapshot, type IAgentTurnTokenUsage } from '../../common/agent.js';
+import { AgentChatMigrationDeferred, AgentChatOperationContext, AgentSession, AgentSignal, AuthenticateParams, IActiveClient, IAgent, IAgentChatAdoptionResult, type IAgentAdoptedWorktree, IAgentChatConfigCompletionsParams, IAgentChatContext, IAgentChatDataChange, IAgentChatMetadata, IAgentChats, IAgentLegacyChat, IAgentCreateChatOptions, IAgentCreateChatResult, IAgentDescriptor, IAgentDiscoveredChat, IAgentHostManagedSettingsSnapshot, IAgentHostNetworkEndpoint, IAgentKnownSessionsFilter, IAgentMaterializeChatEvent, IAgentModelInfo, type IAgentPendingMessageSender, IAgentResolveChatConfigParams, IAgentSessionProjectInfo, IAgentSpawnChatEvent, IMcpNotification, SubagentChatSignal, resolveAgentChatContext, resolveAgentHostCustomizations, resolveAgentHostInstructions, resolveSubagentChatParent, type AgentChatMigrationResult, type IAgentTurnDiagnosticSnapshot, type IAgentTurnTokenUsage } from '../../common/agent.js';
 import { getReasoningEffortDescription, getReasoningEffortLabel, resolveDefaultReasoningEffort } from '../../common/reasoningEffort.js';
 import { autoModeTiers, defaultAutoModeTier, getAutoModeTierDescription, getAutoModeTierLabel } from '../../common/autoModeTiers.js';
 import { isAutoModel } from './modelIdentifiers.js';
@@ -846,6 +846,15 @@ export class CopilotAgent extends Disposable implements IAgent {
 
 	private _client: CopilotClient | undefined;
 	private _clientStarting: Promise<CopilotClient> | undefined;
+	/** Avoid repeating the same deferral log on every catalog pass while the runtime is idle. */
+	private _loggedDeferredCopilotRuntime = false;
+	/**
+	 * Set when a user-facing path actually asks for the Copilot stdio runtime.
+	 * After the first request, later catalog/model work (including a refresh that
+	 * follows `_stopClient`) may start it again; background work at Agent Host
+	 * process start must not.
+	 */
+	private _copilotRuntimeRequested = false;
 	/**
 	 * Coalesces the whole acquire-and-self-heal sequence in `_ensureClient` so
 	 * that all concurrent callers share a single, global retry budget for
@@ -2138,6 +2147,9 @@ export class CopilotAgent extends Disposable implements IAgent {
 			this._publishModels();
 			return;
 		}
+		if (this._deferUntilCopilotRuntime('model catalog refresh')) {
+			return;
+		}
 		try {
 			const models = await this._listModels(tokenAtRefreshStart);
 			if (this._githubCredentials.token === tokenAtRefreshStart && this._modelCatalogGeneration === generation) {
@@ -2289,6 +2301,26 @@ export class CopilotAgent extends Disposable implements IAgent {
 	}
 
 	/**
+	 * Whether the Copilot stdio runtime (`copilot-runtime` / `copilot-runtime.exe`)
+	 * is already running, starting, or has been requested by a user-facing path.
+	 * Background catalog work at Agent Host process start must not spawn it.
+	 */
+	private _hasCopilotRuntime(): boolean {
+		return this._copilotRuntimeRequested || !!(this._client || this._clientStarting);
+	}
+
+	private _deferUntilCopilotRuntime(action: string): boolean {
+		if (this._hasCopilotRuntime()) {
+			return false;
+		}
+		if (!this._loggedDeferredCopilotRuntime) {
+			this._loggedDeferredCopilotRuntime = true;
+			this._logService.info(`[Copilot] Copilot runtime is not started; deferring ${action} until Copilot is used`);
+		}
+		return true;
+	}
+
+	/**
 	 * Acquires the SDK client, transparently self-healing a single cold-start
 	 * abort caused by a startup-config change (`CopilotClientStartupConfigChangedError`).
 	 * That abort is transient: the superseded client was built with now-stale
@@ -2303,6 +2335,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 	 * unchanged.
 	 */
 	private _ensureClient(): Promise<CopilotClient> {
+		this._copilotRuntimeRequested = true;
 		if (this._ensureClientHealing) {
 			return this._ensureClientHealing;
 		}
@@ -2479,6 +2512,9 @@ export class CopilotAgent extends Disposable implements IAgent {
 			this._logService.info('[Copilot] CopilotClient started successfully');
 			this._client = client;
 			this._clientStarting = undefined;
+			this._loggedDeferredCopilotRuntime = false;
+			this._restartCopilotChatDiscovery();
+			void this._scheduleModelRefresh();
 			return client;
 		};
 		const clientStarting = (async () => {
@@ -2662,7 +2698,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 		return undefined;
 	}
 
-	async listChatsToMigrate(): Promise<IAgentChatMetadata[] | undefined> {
+	async listChatsToMigrate(): Promise<AgentChatMigrationResult> {
+		if (this._deferUntilCopilotRuntime('the migratable chat list')) {
+			return AgentChatMigrationDeferred;
+		}
 		const sessions = await this._listSdkSessions('chats to migrate', client => client.listSessions());
 		if (!sessions) {
 			return undefined;
@@ -2740,6 +2779,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 	}
 
 	private _copilotChatDiscovery: Promise<void> | undefined;
+	private _copilotChatDiscoveryRequested = false;
 	private readonly _copilotChatDiscoverySequencer = new Sequencer();
 	private readonly _discoveredChats = new Map<string, { readonly signature: string; readonly external: boolean }>();
 
@@ -2750,6 +2790,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 	}
 
 	startChatDiscovery(): Promise<void> {
+		this._copilotChatDiscoveryRequested = true;
 		return this._startCopilotChatDiscovery();
 	}
 
@@ -2759,12 +2800,29 @@ export class CopilotAgent extends Disposable implements IAgent {
 	 * attaches, and {@link _listSdkSessions} reports that as "cannot enumerate
 	 * yet" rather than an authoritative empty catalog, so the attempt is
 	 * retried before giving up until the next explicit trigger.
+	 *
+	 * Discovery never starts the Copilot runtime on its own: Agent Host
+	 * prewarm would otherwise spawn `copilot-runtime` at window restore even
+	 * when Copilot is unused. A requested pass is retried from
+	 * {@link _restartCopilotChatDiscovery} after the runtime actually starts.
 	 */
 	private _startCopilotChatDiscovery(): Promise<void> {
+		if (this._deferUntilCopilotRuntime('chat discovery')) {
+			return Promise.resolve();
+		}
 		if (!this._copilotChatDiscovery) {
 			this._copilotChatDiscovery = this._runCopilotChatDiscovery();
 		}
 		return this._copilotChatDiscovery;
+	}
+
+	/** Runs discovery again after the runtime starts, if a caller already asked. */
+	private _restartCopilotChatDiscovery(): void {
+		if (!this._copilotChatDiscoveryRequested || this._shutdownPromise) {
+			return;
+		}
+		this._copilotChatDiscovery = undefined;
+		void this._startCopilotChatDiscovery();
 	}
 
 	private _runCopilotChatDiscovery(): Promise<void> {
@@ -3003,6 +3061,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 		// One bulk read replaces N per-session `getSessionMetadata` round-trips
 		// during the metadata phase. Best-effort: when the client cannot enumerate
 		// (SDK not ready), callers transparently fall back to per-session reads.
+		// Do not spawn the Copilot runtime just to prewarm a session list.
+		if (this._deferUntilCopilotRuntime('session metadata prewarm')) {
+			return Disposable.None;
+		}
 		const sessions = await this._listSdkSessions('prewarm session metadata', client => client.listSessions());
 		if (!sessions) {
 			return Disposable.None;
