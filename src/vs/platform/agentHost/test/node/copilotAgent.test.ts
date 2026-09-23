@@ -1148,6 +1148,12 @@ async function startCopilotRuntime(agent: CopilotAgent): Promise<void> {
 	await (agent as unknown as { _ensureClient(): Promise<unknown> })._ensureClient();
 }
 
+function migratedChats(catalog: Awaited<ReturnType<CopilotAgent['listChatsToMigrate']>>): readonly IAgentChatMetadata[] {
+	assert.notStrictEqual(catalog, AgentChatMigrationDeferred);
+	assert.ok(Array.isArray(catalog));
+	return catalog;
+}
+
 function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService; proxyResolver?: IAgentHostProxyResolver; byokBridgeRegistry?: IByokLmBridgeRegistry; otelService?: IAgentHostOTelService; customizationEnablementService?: ICustomizationEnablementService; worktreeIsolation?: IAgentHostWorktreeIsolation; rootConfig?: Record<string, unknown>; now?: () => number }): { agent: CopilotAgent; instantiationService: IInstantiationService; authenticationService: AgentHostAuthenticationService; configurationService: IAgentConfigurationService; worktreeIsolation: IAgentHostWorktreeIsolation; managedSettingsService: IAgentHostManagedSettingsService; fileService: FileService; stateManager: AgentHostStateManager } {
 	const services = new ServiceCollection();
 	const logService = options?.logService ?? new NullLogService();
@@ -2917,7 +2923,7 @@ suite('CopilotAgent', () => {
 			const catalog = await agent.listChatsToMigrate();
 			assert.deepStrictEqual({
 				models: agent.models.get(),
-				sessions: catalog?.map(session => sessionIdOfChat(session.chat)),
+				sessions: migratedChats(catalog).map(session => sessionIdOfChat(session.chat)),
 				starts: client.startCallCount,
 				listCalls: client.listSessionCallCount,
 			}, {
@@ -3520,7 +3526,7 @@ suite('CopilotAgent', () => {
 				modelNames: ['GPT-4o'],
 				startCount: 2,
 				stopCount: 1,
-				requestCount: 2,
+				requestCount: 3,
 				failure: {
 					clientFailureId: 'string',
 					failureKind: 'connectionClosed',
@@ -3553,10 +3559,8 @@ suite('CopilotAgent', () => {
 		client.startGate = startGate.p;
 		const telemetryService = new RecordingTelemetryService();
 		const agent = createTestAgent(disposables, { copilotClient: client, telemetryService });
-		await startCopilotRuntime(agent);
-		const first = agent.listChatsToMigrate();
-		await startCopilotRuntime(agent);
-		const second = agent.listChatsToMigrate();
+		const first = startCopilotRuntime(agent).then(() => agent.listChatsToMigrate());
+		const second = startCopilotRuntime(agent).then(() => agent.listChatsToMigrate());
 		try {
 			await client.startCalled.p;
 			startGate.complete();
@@ -3595,28 +3599,26 @@ suite('CopilotAgent', () => {
 		client.startError = new Error('Connection is closed.');
 		const telemetryService = new RecordingTelemetryService();
 		const agent = createTestAgent(disposables, { copilotClient: client, telemetryService });
-		await startCopilotRuntime(agent);
-		const first = agent.listChatsToMigrate();
-		await startCopilotRuntime(agent);
-		const second = agent.listChatsToMigrate();
+		const first = startCopilotRuntime(agent);
+		const second = startCopilotRuntime(agent);
 		try {
 			await client.startCalled.p;
 			startGate.complete();
-			const results = await Promise.all([first, second]);
+			const results = await Promise.allSettled([first, second]);
 			const startupEvents = telemetryService.events.map(event => {
 				const data = event.data as Record<string, unknown>;
 				return { eventName: event.eventName, ...data, durationMs: typeof data.durationMs };
 			});
 
 			assert.deepStrictEqual({
-				results,
+				results: results.map(result => result.status),
 				startCallCount: client.startCallCount,
 				stopCallCount: client.stopCallCount,
 				listSessionCallCount: client.listSessionCallCount,
 				startupEvents,
 				errorEvents: telemetryService.errorEvents,
 			}, {
-				results: [undefined, undefined],
+				results: ['rejected', 'rejected'],
 				startCallCount: 1,
 				stopCallCount: 0,
 				listSessionCallCount: 0,
@@ -4186,9 +4188,9 @@ suite('CopilotAgent', () => {
 		const telemetryService = new RecordingTelemetryService();
 		const agent = createTestAgent(disposables, { copilotClient: client, telemetryService });
 		try {
-			await startCopilotRuntime(agent);
-			const listPromise = agent.listChatsToMigrate();
+			const startPromise = startCopilotRuntime(agent);
 			await client.startCalled.p;
+			const listPromise = agent.listChatsToMigrate();
 			const shutdownPromise = agent.shutdown();
 			startGate.complete();
 
@@ -4197,6 +4199,7 @@ suite('CopilotAgent', () => {
 			// reports unavailable rather than rejecting with the
 			// `CancellationError` that `_ensureClient` itself throws.
 			assert.strictEqual(await listPromise, undefined);
+			await Promise.allSettled([startPromise]);
 			await shutdownPromise;
 
 			assert.deepStrictEqual({
@@ -4342,7 +4345,7 @@ suite('CopilotAgent', () => {
 				await agent.authenticate(GITHUB_COPILOT_PROTECTED_RESOURCE.resource, 'token');
 				await startCopilotRuntime(agent);
 				const catalog = await agent.listChatsToMigrate();
-				const listed = catalog?.find(s => sessionIdOfChat(s.chat) === sessionId);
+				const listed = migratedChats(catalog).find(s => sessionIdOfChat(s.chat) === sessionId);
 				const chat = defaultChatUri(session);
 				const meta = await agent.getChatMetadata(chat, exactChatContext(session, chat, session));
 				return {
@@ -5464,6 +5467,7 @@ suite('CopilotAgent', () => {
 				await agent.authenticate(GITHUB_COPILOT_PROTECTED_RESOURCE.resource, 'token');
 				const read = (session: URI) => agent.getChatMetadata(defaultChatUri(session), exactChatContext(session, defaultChatUri(session), session));
 
+				await startCopilotRuntime(agent);
 				const warm = await agent.prewarmSessionMetadata();
 				// One bulk list warmed the cache; a hit is served without a per-session RPC.
 				await read(sessionA);
@@ -5533,14 +5537,14 @@ suite('CopilotAgent', () => {
 			client.stopError = new Error('stop failed');
 			const telemetryService = new RecordingTelemetryService();
 			const { agent, configurationService } = createTestAgentContext(disposables, { copilotClient: client, telemetryService });
-			await startCopilotRuntime(agent);
-			const startup = agent.listChatsToMigrate();
+			const startup = startCopilotRuntime(agent);
 			try {
 				await client.startCalled.p;
 				configurationService.updateRootConfig({ [CopilotCliConfigKey.RubberDuck]: false });
 				startGate.complete();
 
-				const catalog = await startup;
+				await startup;
+				const catalog = await agent.listChatsToMigrate();
 				const startupEvents = telemetryService.events.map(event => {
 					const data = event.data as Record<string, unknown>;
 					return {
@@ -5583,7 +5587,7 @@ suite('CopilotAgent', () => {
 			} finally {
 				client.stopError = undefined;
 				startGate.complete();
-				await startup;
+				await Promise.allSettled([startup]);
 				await disposeAgent(agent);
 			}
 		});
@@ -5612,7 +5616,7 @@ suite('CopilotAgent', () => {
 					.filter(event => event.eventName === 'agentHost.copilotClientStartup')
 					.map(event => (event.data as Record<string, unknown>).outcome);
 				assert.deepStrictEqual({
-					sessions: catalog?.map(session => sessionIdOfChat(session.chat)),
+					sessions: migratedChats(catalog).map(session => sessionIdOfChat(session.chat)),
 					startCallCount: client.startCallCount,
 					stopCallCount: client.stopCallCount,
 					startupOutcomes,
@@ -5673,13 +5677,10 @@ suite('CopilotAgent', () => {
 				configurationService.updateRootConfig({ [CopilotCliConfigKey.RubberDuck]: client.startCallCount % 2 === 0 });
 			};
 			try {
-				await startCopilotRuntime(agent);
-				const result = await agent.listChatsToMigrate();
+				await assert.rejects(() => startCopilotRuntime(agent));
 				assert.deepStrictEqual({
-					result,
 					startCallCount: client.startCallCount,
 				}, {
-					result: undefined,
 					startCallCount: 2,
 				});
 			} finally {
@@ -6000,8 +6001,7 @@ suite('CopilotAgent', () => {
 				_resolvedProxy: string | undefined;
 				_refreshProxy(): void;
 			};
-			await startCopilotRuntime(agent);
-			const startup = agent.listChatsToMigrate();
+			const startup = startCopilotRuntime(agent);
 			try {
 				for (let i = 0; i < 20 && client.startCallCount < 1; i++) {
 					await timeout(0);
@@ -6675,6 +6675,7 @@ suite('CopilotAgent', () => {
 			});
 			try {
 				await agent.authenticate('https://api.github.com', 'token');
+				await startCopilotRuntime(agent);
 				await agent.refreshModels();
 
 				assert.deepStrictEqual(agent.models.get().map(model => model.id), ['hydrafusion']);
@@ -6729,7 +6730,7 @@ suite('CopilotAgent', () => {
 			const { agent: enabledAgent } = createTestAgentContext(disposables, { copilotClient: enabledClient });
 			const previousEnvValue = process.env['COPILOT_ENABLE_BUILTIN_GITHUB_MCP'];
 			try {
-				await startCopilotRuntime(agent);
+				await startCopilotRuntime(enabledAgent);
 				await enabledAgent.listChatsToMigrate();
 				process.env['COPILOT_ENABLE_BUILTIN_GITHUB_MCP'] = 'true';
 
@@ -6739,7 +6740,7 @@ suite('CopilotAgent', () => {
 					rootConfig: { [AgentHostGitHubMcpServerEnabledConfigKey]: false },
 				});
 				try {
-					await startCopilotRuntime(agent);
+					await startCopilotRuntime(disabledAgent);
 					await disabledAgent.listChatsToMigrate();
 					assert.deepStrictEqual([
 						getCreatedClientOptions(enabledAgent).at(-1)?.env?.['COPILOT_ENABLE_BUILTIN_GITHUB_MCP'],
@@ -6911,13 +6912,12 @@ suite('CopilotAgent', () => {
 				client.stopGate = stopGate.p;
 
 				configurationService.updateRootConfig({ [CopilotCliConfigKey.RubberDuck]: false });
-				await startCopilotRuntime(agent);
-				const listPromise = agent.listChatsToMigrate();
+				const replacement = startCopilotRuntime(agent);
 				await timeout(10);
 				assert.strictEqual(client.startCallCount, 1, 'replacement client must wait for the old client to stop');
 
 				stopGate.complete();
-				await listPromise;
+				await replacement;
 				assert.deepStrictEqual({
 					starts: client.startCallCount,
 					stops: client.stopCount,
@@ -8134,7 +8134,7 @@ suite('CopilotAgent', () => {
 
 			await startCopilotRuntime(agent);
 			const catalog = await agent.listChatsToMigrate();
-			assert.deepStrictEqual(catalog?.map(s => sessionIdOfChat(s.chat)), ['owned']);
+			assert.deepStrictEqual(migratedChats(catalog).map(s => sessionIdOfChat(s.chat)), ['owned']);
 		} finally {
 			await disposeAgent(agent);
 		}
@@ -8153,7 +8153,7 @@ suite('CopilotAgent', () => {
 
 			await startCopilotRuntime(agent);
 			const catalog = await agent.listChatsToMigrate();
-			assert.deepStrictEqual(catalog?.map(withoutUndefinedProperties), [{
+			assert.deepStrictEqual(migratedChats(catalog).map(withoutUndefinedProperties), [{
 				chat: defaultChatUri(legacySession),
 				startTime: 1000,
 				modifiedTime: 2000,
@@ -8183,7 +8183,7 @@ suite('CopilotAgent', () => {
 
 			await startCopilotRuntime(agent);
 			const catalog = await agent.listChatsToMigrate();
-			assert.deepStrictEqual(catalog?.map(withoutUndefinedProperties), [{
+			assert.deepStrictEqual(migratedChats(catalog).map(withoutUndefinedProperties), [{
 				chat: defaultChatUri(session),
 				startTime: 1000,
 				modifiedTime: 2000,
@@ -8311,6 +8311,7 @@ suite('CopilotAgent', () => {
 			const discoveredChats: Array<readonly IAgentChatMetadata[]> = [];
 			const listener = agent.onDidDiscoverChats(chats => discoveredChats.push(chats));
 			try {
+				await startCopilotRuntime(agent);
 				void agent.startChatDiscovery();
 				for (let i = 0; i < 50 && discoveredChats.length === 0; i++) {
 					await timeout(0);
@@ -8342,6 +8343,7 @@ suite('CopilotAgent', () => {
 			const discoveredChats: Array<readonly IAgentChatMetadata[]> = [];
 			const listener = agent.onDidDiscoverChats(chats => discoveredChats.push(chats));
 			try {
+				await startCopilotRuntime(agent);
 				void agent.startChatDiscovery();
 				await listStarted.p;
 				// The gate was snapshotted as enabled at startup, so disabling it mid
@@ -8514,7 +8516,7 @@ suite('CopilotAgent', () => {
 				await startCopilotRuntime(agent);
 				const catalog = await agent.listChatsToMigrate();
 				assert.deepStrictEqual(
-					catalog?.map(s => ({ id: sessionIdOfChat(s.chat), adoptable: readSessionEhcliAdoptable(s._meta) })),
+					migratedChats(catalog).map(s => ({ id: sessionIdOfChat(s.chat), adoptable: readSessionEhcliAdoptable(s._meta) })),
 					[{ id: sessionId, adoptable: false }],
 				);
 			} finally {
@@ -8752,6 +8754,7 @@ suite('CopilotAgent', () => {
 			const discovered: IAgentDiscoveredChat[] = [];
 			const listener = agent.onDidDiscoverChats(chats => discovered.push(...chats));
 			try {
+				await startCopilotRuntime(agent);
 				await agent.startChatDiscovery();
 				return discovered.map(chat => ({
 					id: sessionIdOfChat(chat.chat),

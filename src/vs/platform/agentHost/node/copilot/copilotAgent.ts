@@ -2147,7 +2147,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 			this._publishModels();
 			return;
 		}
-		if (this._deferUntilCopilotRuntime('model catalog refresh')) {
+		if (this._deferUntilCopilotRuntime('model catalog refresh', true)) {
 			return;
 		}
 		try {
@@ -2302,15 +2302,15 @@ export class CopilotAgent extends Disposable implements IAgent {
 
 	/**
 	 * Whether the Copilot stdio runtime (`copilot-runtime` / `copilot-runtime.exe`)
-	 * is already running, starting, or has been requested by a user-facing path.
+	 * is already running or a user-facing path is currently starting it.
 	 * Background catalog work at Agent Host process start must not spawn it.
 	 */
 	private _hasCopilotRuntime(): boolean {
-		return this._copilotRuntimeRequested || !!(this._client || this._clientStarting);
+		return !!(this._client || this._clientStarting);
 	}
 
-	private _deferUntilCopilotRuntime(action: string): boolean {
-		if (this._hasCopilotRuntime()) {
+	private _deferUntilCopilotRuntime(action: string, allowAfterRequest = false): boolean {
+		if (this._hasCopilotRuntime() || (allowAfterRequest && this._copilotRuntimeRequested)) {
 			return false;
 		}
 		if (!this._loggedDeferredCopilotRuntime) {
@@ -2514,7 +2514,12 @@ export class CopilotAgent extends Disposable implements IAgent {
 			this._clientStarting = undefined;
 			this._loggedDeferredCopilotRuntime = false;
 			this._restartCopilotChatDiscovery();
-			void this._scheduleModelRefresh();
+			// Authenticate-at-restore may already have a refresh scheduled; if it
+			// deferred before this start, kick one now. Do not stack a second list
+			// on top of a refresh that is already waiting on this client.
+			if (!this._scheduledModelRefresh && !this._modelRefreshInFlight) {
+				void this._scheduleModelRefresh();
+			}
 			return client;
 		};
 		const clientStarting = (async () => {
