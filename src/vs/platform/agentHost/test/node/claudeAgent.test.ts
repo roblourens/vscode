@@ -929,6 +929,7 @@ class FakeQuery implements AsyncGenerator<SDKMessage, void> {
 			error_count: 0,
 		}) as never;
 	}
+	reloadOutputStyles(): never { throw new Error('FakeQuery: reloadOutputStyles not modeled'); }
 	accountInfo(): Promise<AccountInfo> {
 		this._sdk.accountInfoCallCount++;
 		return Promise.resolve(this._sdk.accountInfoResult);
@@ -952,6 +953,7 @@ class FakeQuery implements AsyncGenerator<SDKMessage, void> {
 		})() as never;
 	}
 	setMcpServers(): never { throw new Error('FakeQuery: setMcpServers not modeled'); }
+	readMcpResource(): never { throw new Error('FakeQuery: readMcpResource not modeled'); }
 	streamInput(): never { throw new Error('FakeQuery: streamInput not modeled'); }
 	stopTask(): never { throw new Error('FakeQuery: stopTask not modeled'); }
 	reloadSkills(): never { throw new Error('FakeQuery: reloadSkills not modeled'); }

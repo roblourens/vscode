@@ -78,6 +78,7 @@ class ImmediatelyDoneQuery implements Query {
 	getContextUsage(): never { throw new Error('not modeled'); }
 	usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(): never { throw new Error('not modeled'); }
 	reloadPlugins(): never { throw new Error('not modeled'); }
+	reloadOutputStyles(): never { throw new Error('not modeled'); }
 	accountInfo(): never { throw new Error('not modeled'); }
 	rewindFiles(): never { throw new Error('not modeled'); }
 	readFile(): never { throw new Error('not modeled'); }
