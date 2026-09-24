@@ -50,7 +50,7 @@ import { buildModelEnumerationOptions } from './claudeSdkOptions.js';
 import { isClaudeAccountSetUp, resolveClaudeTransportMode, type ClaudeTransportMode } from './claudeTransportMode.js';
 import { mergeClaudeModelCatalogs, resolveClaudeSessionTransport } from './claudeModelSelection.js';
 import { mapSessionMessagesToTurns, resolveForkAnchorUuid } from './claudeReplayMapper.js';
-import { CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, getSubagentTranscript } from './claudeSubagentResolver.js';
+import { CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, getSubagentTranscript, readSessionMessagesCapped } from './claudeSubagentResolver.js';
 import { SubagentRegistry } from './claudeSubagentRegistry.js';
 import { ClaudeAgentSession } from './claudeAgentSession.js';
 import { handleCanUseTool } from './claudeCanUseTool.js';
@@ -2007,7 +2007,7 @@ export class ClaudeAgent extends Disposable implements IAgent {
 	private async _reconstructTurns(sdkSessionId: string, routingUri: URI, subagents: SubagentRegistry | undefined): Promise<readonly Turn[]> {
 		let messages;
 		try {
-			messages = await this._sdkService.getSessionMessages(sdkSessionId, { includeSystemMessages: true });
+			messages = await readSessionMessagesCapped(this._sdkService, sdkSessionId, this._logService);
 		} catch (err) {
 			this._logService.warn(`[Claude] getSessionMessages SDK fetch failed for ${sdkSessionId}`, err);
 			return [];

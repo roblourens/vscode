@@ -31,6 +31,17 @@ export const CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS = 32;
 /** Max children PromptMatch/ResultMatch may open. */
 export const CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT = 32;
 
+/** Page size for SDK `getSessionMessages` during parent restore. */
+export const CLAUDE_PARENT_RESTORE_PAGE_SIZE = 32;
+/** Cap on parent transcript messages kept on restore. */
+export const CLAUDE_PARENT_RESTORE_MAX_MESSAGES = 2048;
+/**
+ * Cap on decoded parent-transcript payload kept on restore. A 268 MB JSONL
+ * inflates ~12× in V8 once mapped to protocol turns and published; stay
+ * well under the ~3.2 GB heap ceiling and fail that one session instead.
+ */
+export const CLAUDE_PARENT_RESTORE_MAX_BYTES = 16 * 1024 * 1024;
+
 const restoreBytesBySession = new Map<string, number>();
 const restoreTranscriptsBySession = new Map<string, number>();
 
@@ -50,8 +61,8 @@ function noteRestoreTranscript(sessionId: string): void {
 	restoreTranscriptsBySession.set(sessionId, restoreTranscriptCount(sessionId) + 1);
 }
 
-function estimateJsonBytes(value: unknown, used = 0): number {
-	if (used > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+function estimateJsonBytes(value: unknown, used = 0, abortAfter = CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES): number {
+	if (used > abortAfter) {
 		return used;
 	}
 	if (typeof value === 'string') {
@@ -63,8 +74,8 @@ function estimateJsonBytes(value: unknown, used = 0): number {
 	if (Array.isArray(value)) {
 		let next = used;
 		for (const item of value) {
-			next = estimateJsonBytes(item, next);
-			if (next > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+			next = estimateJsonBytes(item, next, abortAfter);
+			if (next > abortAfter) {
 				return next;
 			}
 		}
@@ -72,8 +83,8 @@ function estimateJsonBytes(value: unknown, used = 0): number {
 	}
 	let next = used;
 	for (const item of Object.values(value as Record<string, unknown>)) {
-		next = estimateJsonBytes(item, next);
-		if (next > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+		next = estimateJsonBytes(item, next, abortAfter);
+		if (next > abortAfter) {
 			return next;
 		}
 	}
@@ -129,6 +140,60 @@ async function readSubagentMessagesCapped(
 		offset += page.length;
 	}
 	noteRestoreTranscript(sessionId);
+	return messages;
+}
+
+/**
+ * Page a parent SDK transcript and stop before the decoded payload can
+ * take down the agent host. Byte overflow discards everything and returns
+ * `[]` so restore fails that one session instead of publishing GB-sized
+ * turns. SDK failures are rethrown for the caller to handle.
+ */
+export async function readSessionMessagesCapped(
+	sdk: IClaudeAgentSdkService,
+	sessionId: string,
+	logService: ILogService,
+	limits: { readonly pageSize: number; readonly maxMessages: number; readonly maxBytes: number } = {
+		pageSize: CLAUDE_PARENT_RESTORE_PAGE_SIZE,
+		maxMessages: CLAUDE_PARENT_RESTORE_MAX_MESSAGES,
+		maxBytes: CLAUDE_PARENT_RESTORE_MAX_BYTES,
+	},
+): Promise<readonly SessionMessage[]> {
+	const messages: SessionMessage[] = [];
+	let offset = 0;
+	let bytes = 0;
+	let overflow = false;
+	while (messages.length < limits.maxMessages && !overflow) {
+		const remaining = Math.min(limits.pageSize, limits.maxMessages - messages.length);
+		const page = await sdk.getSessionMessages(sessionId, {
+			includeSystemMessages: true,
+			limit: remaining,
+			offset,
+		});
+		if (page.length === 0) {
+			break;
+		}
+		for (const message of page) {
+			if (messages.length >= limits.maxMessages) {
+				break;
+			}
+			const size = estimateJsonBytes(message, 0, limits.maxBytes);
+			if (bytes + size > limits.maxBytes) {
+				overflow = true;
+				break;
+			}
+			messages.push(message);
+			bytes += size;
+		}
+		if (overflow || messages.length >= limits.maxMessages || page.length < remaining) {
+			break;
+		}
+		offset += page.length;
+	}
+	if (overflow) {
+		logService.warn(`[Claude] restore: parent transcript ${sessionId} exceeds cap (${bytes} bytes, ${messages.length} message(s)); failing this session`);
+		return [];
+	}
 	return messages;
 }
 
@@ -192,7 +257,10 @@ export async function fetchParentTurns(
 		return ctx.parentTranscript;
 	}
 	try {
-		const messages = await sdk.getSessionMessages(ctx.parentSessionId, { includeSystemMessages: true });
+		const messages = await readSessionMessagesCapped(sdk, ctx.parentSessionId, logService);
+		if (messages.length === 0) {
+			return [];
+		}
 		return mapSessionMessagesToTurns(messages, ctx.parentUri, logService);
 	} catch (err) {
 		logService.warn(`[claudeSubagentResolver] ${strategyLabel}: parent transcript fetch failed: ${err}`);

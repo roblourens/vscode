@@ -79,7 +79,7 @@ import { createClaudeInternalMcpServerCustomization } from '../../node/claude/cu
 import { ClaudeSessionMetadataStore } from '../../node/claude/claudeSessionMetadataStore.js';
 import { ClaudeSessionConfigKey } from '../../common/claudeSessionConfigKeys.js';
 import { ClaudeAgentSdkService, IClaudeAgentSdkService, IClaudeSdkBindings } from '../../node/claude/claudeAgentSdkService.js';
-import { CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE } from '../../node/claude/claudeSubagentResolver.js';
+import { CLAUDE_PARENT_RESTORE_PAGE_SIZE, CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE } from '../../node/claude/claudeSubagentResolver.js';
 import { AGENT_SDK_SETUP_DOWNLOAD_REQUEST_KEY, AGENT_SDK_SETUP_RELOAD_REQUEST_KEY, readAgentSdkSetupInfos } from '../../common/agentSdkSetup.js';
 import { IAgentSdkDownloader } from '../../node/agentSdkDownloader.js';
 import { RecordingAgentSdkDownloader } from './testAgentSdkDownloader.js';
@@ -614,7 +614,10 @@ class FakeClaudeAgentSdkService implements IClaudeAgentSdkService {
 			const err = this.getSessionMessagesRejection;
 			throw err;
 		}
-		return this.sessionMessagesById.get(sessionId) ?? [];
+		const all = this.sessionMessagesById.get(sessionId) ?? [];
+		const offset = options?.offset ?? 0;
+		const sliced = all.slice(offset);
+		return options?.limit === undefined ? sliced : sliced.slice(0, options.limit);
 	}
 
 	/**
@@ -5369,7 +5372,7 @@ suite('ClaudeAgent', () => {
 			restoredSummary: 'Materialized Session',
 			messageCount: 2,
 			getSessionInfoCalls: ['materialized'],
-			getSessionMessagesCalls: [{ sessionId: 'materialized', options: { includeSystemMessages: true } }],
+			getSessionMessagesCalls: [{ sessionId: 'materialized', options: { includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 } }],
 			availabilityRequests: 1,
 			discoveredChats: [],
 		});
@@ -8383,7 +8386,7 @@ suite('ClaudeAgent (Phase 13 — transcript reconstruction)', () => {
 		assert.strictEqual(sdk.getSessionMessagesCalls.length, 1);
 		assert.deepStrictEqual(sdk.getSessionMessagesCalls[0], {
 			sessionId,
-			options: { includeSystemMessages: true },
+			options: { includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 },
 		});
 	});
 
@@ -8453,7 +8456,7 @@ suite('ClaudeAgent (Phase 13 — transcript reconstruction)', () => {
 			}],
 			parentCalls: [{
 				sessionId: parentSessionId,
-				options: { includeSystemMessages: true },
+				options: { includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 },
 			}],
 			subagentCalls: [{
 				sessionId: parentSessionId,
@@ -8486,6 +8489,33 @@ suite('ClaudeAgent (Phase 13 — transcript reconstruction)', () => {
 		assert.deepStrictEqual(turns, []);
 		assert.ok(log.warns.some(w => w.includes('getSessionMessages SDK fetch failed')),
 			`expected warn-log; got: ${log.warns.join(' | ')}`);
+	});
+
+	test('getMessages pages parent history and does not request the unbounded transcript', async () => {
+		const { agent, sdk } = createTestContext(disposables);
+		const sessionId = 'phase13-paged';
+		const messages: SessionMessage[] = [];
+		for (let i = 0; i < CLAUDE_PARENT_RESTORE_PAGE_SIZE + 4; i++) {
+			messages.push(makeUserSessionMessage(`u${i}`, `hi${i}`));
+			messages.push(makeAssistantSessionMessage(`a${i}`, `hello${i}`));
+		}
+		sdk.sessionMessagesById.set(sessionId, messages);
+
+		const sessionUri = AgentSession.uri(agent.id, sessionId);
+		await bindDefaultChat(agent, sessionUri);
+		const turns = await agent.chats.getMessages(defaultChatUri(sessionUri), chatContext(defaultChatUri(sessionUri)));
+
+		assert.deepStrictEqual({
+			turnCount: turns.length,
+			pages: sdk.getSessionMessagesCalls.map(call => call.options),
+		}, {
+			turnCount: CLAUDE_PARENT_RESTORE_PAGE_SIZE + 4,
+			pages: [
+				{ includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 },
+				{ includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: CLAUDE_PARENT_RESTORE_PAGE_SIZE },
+				{ includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: CLAUDE_PARENT_RESTORE_PAGE_SIZE * 2 },
+			],
+		});
 	});
 
 	// Note: Phase 12 step 8 priming used to be tested here against a
@@ -10837,7 +10867,7 @@ suite('ClaudeAgent — Phase 11 customizations', () => {
 			startupSessionId: sessionId,
 			resume: undefined,
 			turns: [],
-			transcriptRead: { sessionId, options: { includeSystemMessages: true } },
+			transcriptRead: { sessionId, options: { includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 } },
 		});
 	});
 

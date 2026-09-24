@@ -14,6 +14,7 @@ import { buildSubagentSessionUri } from '../../common/state/sessionState.js';
 import { IClaudeAgentSdkService } from '../../node/claude/claudeAgentSdkService.js';
 import { scanTranscriptForAgentIds, SUBAGENT_ID_SUFFIX_REGEX, SubagentRegistry } from '../../node/claude/claudeSubagentRegistry.js';
 import {
+	CLAUDE_PARENT_RESTORE_PAGE_SIZE,
 	CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT,
 	CLAUDE_SUBAGENT_RESTORE_MAX_MESSAGES,
 	CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS,
@@ -22,6 +23,7 @@ import {
 	extractCompletedResultTextFromTranscript,
 	fetchParentTurns,
 	getSubagentTranscript,
+	readSessionMessagesCapped,
 	type ISubagentLookupContext,
 	type ISubagentLookupStrategy,
 	NativeStrategy,
@@ -56,7 +58,10 @@ class FakeSdkService implements IClaudeAgentSdkService {
 	async getSessionMessages(sessionId: string, options?: GetSessionMessagesOptions): Promise<readonly SessionMessage[]> {
 		this.getSessionMessagesCalls.push({ sessionId, options });
 		if (this.getSessionMessagesRejection) { throw this.getSessionMessagesRejection; }
-		return this.sessionMessages.get(sessionId) ?? [];
+		const all = this.sessionMessages.get(sessionId) ?? [];
+		const offset = options?.offset ?? 0;
+		const sliced = all.slice(offset);
+		return options?.limit === undefined ? sliced : sliced.slice(0, options.limit);
 	}
 	async listSubagents(sessionId: string, _options?: ListSubagentsOptions): Promise<readonly string[]> {
 		this.listSubagentsCalls.push(sessionId);
@@ -603,6 +608,67 @@ suite('claudeSubagentResolver — fetchParentTurns', () => {
 			fromSdkIsArray: true,
 			onError: undefined,
 			totalSdkCalls: 2,
+		});
+	});
+});
+
+suite('claudeSubagentResolver — readSessionMessagesCapped', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	function makeMessage(id: string, text: string): SessionMessage {
+		return {
+			type: 'user',
+			uuid: id,
+			session_id: 'parent-sid',
+			parent_tool_use_id: null,
+			parent_agent_id: null,
+			message: { role: 'user', content: [{ type: 'text', text }] },
+		} as SessionMessage;
+	}
+
+	test('pages getSessionMessages with limit/offset', async () => {
+		const sdk = new FakeSdkService();
+		const log = new NullLogService();
+		sdk.sessionMessages.set('parent-sid', Array.from({ length: CLAUDE_PARENT_RESTORE_PAGE_SIZE + 4 }, (_, i) => makeMessage(`u${i}`, `m${i}`)));
+
+		const messages = await readSessionMessagesCapped(sdk, 'parent-sid', log);
+
+		assert.deepStrictEqual({
+			count: messages.length,
+			pages: sdk.getSessionMessagesCalls.map(call => call.options),
+		}, {
+			count: CLAUDE_PARENT_RESTORE_PAGE_SIZE + 4,
+			pages: [
+				{ includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: 0 },
+				{ includeSystemMessages: true, limit: CLAUDE_PARENT_RESTORE_PAGE_SIZE, offset: CLAUDE_PARENT_RESTORE_PAGE_SIZE },
+			],
+		});
+	});
+
+	test('fails the parent session when decoded payload exceeds the restore cap', async () => {
+		const sdk = new FakeSdkService();
+		class WarnLog extends NullLogService {
+			readonly warns: string[] = [];
+			override warn(message: string, ..._args: unknown[]): void { this.warns.push(message); }
+		}
+		const log = new WarnLog();
+		sdk.sessionMessages.set('huge-sid', [
+			makeMessage('u0', 'ok'),
+			makeMessage('u1', 'x'.repeat(200)),
+		]);
+
+		const messages = await readSessionMessagesCapped(sdk, 'huge-sid', log, {
+			pageSize: 8,
+			maxMessages: 32,
+			maxBytes: 50,
+		});
+
+		assert.deepStrictEqual({
+			messages: messages.length,
+			overflow: log.warns.some(w => w.includes('huge-sid') && w.includes('exceeds cap')),
+		}, {
+			messages: 0,
+			overflow: true,
 		});
 	});
 });
