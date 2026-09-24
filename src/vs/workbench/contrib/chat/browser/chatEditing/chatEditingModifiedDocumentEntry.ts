@@ -117,7 +117,10 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 				createTextBufferFactoryFromSnapshot(initialContent ? stringToSnapshot(initialContent) : this.modifiedModel.createSnapshot()),
 				languageService.createById(this.modifiedModel.getLanguageId()),
 				this.originalURI,
-				false
+				// Do not sync this virtual document to the extension host. Language
+				// services would otherwise compute diagnostics (and other features) against
+				// a chat-editing snapshot instead of the live working buffer (#337576).
+				true
 			)
 		);
 
@@ -157,6 +160,8 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 				this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 			}
 		}));
+
+		this._register(markerService.installResourceFilter(this.originalURI, localize('chatEditingOriginal', "Chat editing snapshot")));
 
 		const resourceFilter = this._register(new MutableDisposable());
 		this._register(autorun(r => {
@@ -202,7 +207,10 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 
 	async restoreFromSnapshot(snapshot: ISnapshotEntry, restoreToDisk = true) {
 		this._stateObs.set(snapshot.state, undefined);
-		await this._textModelChangeService.resetDocumentValues(snapshot.original, restoreToDisk ? snapshot.current : undefined);
+		// Hydrate the modified-file-entry virtual document from currentHash, not a
+		// superseded originalHash snapshot. Serving originalHash caused phantom
+		// Problems and attached mangled text as the user's file (#337576).
+		await this._textModelChangeService.resetDocumentValues(snapshot.current, restoreToDisk ? snapshot.current : undefined);
 	}
 
 	async resetToInitialContent() {

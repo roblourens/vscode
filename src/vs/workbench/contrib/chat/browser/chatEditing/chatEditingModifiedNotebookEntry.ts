@@ -952,7 +952,8 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 	override async restoreFromSnapshot(snapshot: ISnapshotEntry, restoreToDisk = true): Promise<void> {
 		this.updateCellDiffInfo([], undefined);
 		this._stateObs.set(snapshot.state, undefined);
-		restoreSnapshot(this.originalModel, snapshot.original);
+		// Hydrate from currentHash, not a superseded originalHash snapshot (#337576).
+		restoreSnapshot(this.originalModel, snapshot.current);
 		if (restoreToDisk) {
 			this.restoreSnapshotInModifiedModel(snapshot.current);
 		}

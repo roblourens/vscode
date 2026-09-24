@@ -209,6 +209,8 @@ export class ChatImplicitContextContribution extends Disposable implements IWork
 
 		const uri = newValue instanceof URI ? newValue : newValue?.uri;
 		if (uri && (
+			uri.scheme === Schemas.chatEditingSnapshotScheme ||
+			uri.scheme === Schemas.chatEditingModel ||
 			await this.ignoredFilesService.fileIsIgnored(uri, cancelTokenSource.token) ||
 			uri.path.endsWith('.copilotmd'))
 		) {

@@ -273,7 +273,9 @@ export class ChatEditingSession extends Disposable implements IChatEditingSessio
 		}
 
 		const contentStr = typeof content === 'string' ? content : content.toString();
-		const model = this._modelService.createModel(contentStr, this._languageService.createByFilepathOrFirstLine(snapshotUri), snapshotUri, false);
+		// isForSimpleWidget: do not sync snapshot URIs to the extension host, so
+		// language services compute diagnostics only on the live working buffer (#337576).
+		const model = this._modelService.createModel(contentStr, this._languageService.createByFilepathOrFirstLine(snapshotUri), snapshotUri, true);
 
 		const store = new DisposableStore();
 		store.add(model.onWillDispose(() => store.dispose()));

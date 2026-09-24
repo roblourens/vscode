@@ -43,6 +43,13 @@ export class ChatEditingTextModelContentProvider implements ITextModelContentPro
 			return null;
 		}
 
+		// Prefer the live working copy (currentHash) over the originalURI/originalHash
+		// baseline so hydration never serves a superseded snapshot (#337576).
+		const current = this._modelService.getModel(entry.modifiedURI);
+		if (current && !current.isDisposed()) {
+			return this._modelService.createModel(current.getValue(), null, resource, true);
+		}
+
 		return this._modelService.getModel(entry.originalURI);
 	}
 }

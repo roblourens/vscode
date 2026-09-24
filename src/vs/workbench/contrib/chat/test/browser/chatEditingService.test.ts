@@ -31,6 +31,7 @@ import { TestMcpService } from '../../../mcp/test/common/testMcpService.js';
 import { IMultiDiffSourceResolver, IMultiDiffSourceResolverService } from '../../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { NotebookTextModel } from '../../../notebook/common/model/notebookTextModel.js';
 import { INotebookService } from '../../../notebook/common/notebookService.js';
+import { ChatEditingModifiedDocumentEntry } from '../../browser/chatEditing/chatEditingModifiedDocumentEntry.js';
 import { ChatEditingService } from '../../browser/chatEditing/chatEditingServiceImpl.js';
 import { ChatSessionsService } from '../../browser/chatSessions.contribution.js';
 import { ChatAgentService, IChatAgentData, IChatAgentImplementation, IChatAgentService } from '../../common/chatAgents.js';
@@ -300,6 +301,85 @@ suite('ChatEditingService', function () {
 
 		assert.ok(modified.getValue().includes('FooBar'));
 		assert.ok(original.getValue().includes('FooBar'));
+	});
+
+	test('modified-file-entry virtual document is not synced for diagnostics', async function () {
+		assert.ok(editingService);
+
+		const uri = URI.from({ scheme: 'test', path: 'abc\n' });
+
+		const model = store.add(chatService.startSession(ChatAgentLocation.Chat, CancellationToken.None));
+		const session = await model.editingSessionObs?.promise;
+		assertType(session, 'session not created');
+
+		const entry = await idleAfterEdit(session, model, uri, [{ range: new Range(1, 1, 1, 1), text: 'FarBoo\n' }]);
+		const original = store.add(await textModelService.createModelReference(entry.originalURI)).object.textEditorModel;
+
+		assert.strictEqual(original.uri.scheme, 'chat-editing-text-model');
+		assert.strictEqual(original.isForSimpleWidget, true);
+	});
+
+	test('restoreFromSnapshot hydrates modified-file-entry from currentHash', async function () {
+		assert.ok(editingService);
+
+		const uri = URI.from({ scheme: 'test', path: 'profile.ps1' });
+
+		const model = store.add(chatService.startSession(ChatAgentLocation.Chat, CancellationToken.None));
+		const session = await model.editingSessionObs?.promise;
+		assertType(session, 'session not created');
+
+		const entry = await idleAfterEdit(session, model, uri, [{ range: new Range(1, 1, 1, 1), text: 'clean final\n' }]);
+		assert.ok(entry instanceof ChatEditingModifiedDocumentEntry);
+
+		const original = store.add(await textModelService.createModelReference(entry.originalURI)).object.textEditorModel;
+		const modified = store.add(await textModelService.createModelReference(entry.modifiedURI)).object.textEditorModel;
+
+		const mangledOriginalHash = 'New-Alias -Name "Halp" -Value "Get-Help" -ForcI. (script)))))))}';
+		const currentHash = 'New-Alias -Name "Halp" -Value "Get-Help" -Force\n. (script)';
+
+		await entry.restoreFromSnapshot({
+			resource: uri,
+			languageId: original.getLanguageId(),
+			snapshotUri: entry.originalURI,
+			original: mangledOriginalHash,
+			current: currentHash,
+			state: ModifiedFileEntryState.Modified,
+			telemetryInfo: entry.telemetryInfo,
+		});
+
+		assert.strictEqual(original.getValue(), currentHash, 'modified-file-entry must hydrate from currentHash, not originalHash');
+		assert.strictEqual(modified.getValue(), currentHash);
+		assert.ok(!original.getValue().includes('ForcI.'), 'must not serve the superseded originalHash snapshot');
+	});
+
+	test('snapshot models are not synced for diagnostics', async function () {
+		assert.ok(editingService);
+
+		const uri = URI.from({ scheme: 'test', path: 'profile.ps1' });
+
+		const model = store.add(chatService.startSession(ChatAgentLocation.Chat, CancellationToken.None));
+		const session = await model.editingSessionObs?.promise;
+		assertType(session, 'session not created');
+
+		const chatRequest = model.addRequest({ text: '', parts: [] }, { variables: [] }, 0);
+		assertType(chatRequest.response);
+
+		const isStreaming = waitForState(session.state.map(s => s === ChatEditingSessionState.StreamingEdits), Boolean);
+		chatRequest.response.updateContent({ kind: 'textEdit', uri, edits: [{ range: new Range(1, 1, 1, 1), text: 'FarBoo\n' }], done: true });
+		await waitForState(session.entries.map(value => value.find(a => isEqual(a.modifiedURI, uri))));
+		chatRequest.response.complete();
+		await isStreaming;
+		await waitForState(session.state.map(s => s === ChatEditingSessionState.Idle), Boolean);
+
+		const snapshotUri = session.getSnapshotUri(chatRequest.id, uri, undefined);
+		assertType(snapshotUri);
+		assert.strictEqual(snapshotUri.scheme, 'chat-editing-snapshot-text-model');
+
+		const snapshotModel = await session.getSnapshotModel(chatRequest.id, undefined, snapshotUri);
+		if (snapshotModel) {
+			store.add(snapshotModel);
+			assert.strictEqual(snapshotModel.isForSimpleWidget, true);
+		}
 	});
 
 });
