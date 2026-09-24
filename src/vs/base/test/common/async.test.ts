@@ -629,6 +629,27 @@ suite('Async', () => {
 				assert.deepStrictEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], res);
 			});
 		});
+
+		test('consume yields so macrotasks can run', async function () {
+			const limiter = new async.Limiter<void>(1000);
+			let macrotaskRan = false;
+			setTimeout(() => { macrotaskRan = true; }, 0);
+
+			let observedMacrotaskDuringQueue = false;
+			const promises: Promise<void>[] = [];
+			const count = async.Limiter.CONSUME_YIELD_EVERY * 6;
+			for (let n = 0; n < count; n++) {
+				promises.push(limiter.queue(async () => {
+					if (macrotaskRan) {
+						observedMacrotaskDuringQueue = true;
+					}
+				}));
+			}
+
+			await Promise.all(promises);
+			limiter.dispose();
+			assert.ok(observedMacrotaskDuringQueue);
+		});
 	});
 
 

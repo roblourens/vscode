@@ -708,12 +708,23 @@ export interface ILimiter<T> {
  */
 export class Limiter<T> implements ILimiter<T> {
 
+	/**
+	 * Start at most this many queued factories before yielding. A large workspace can enqueue
+	 * hundreds of thousands of tasks; draining them in one `consume` turn busy-loops the
+	 * extension host so remote heartbeats time out (#337664).
+	 */
+	static readonly CONSUME_YIELD_EVERY = 32;
+
 	private _size = 0;
 	private _isDisposed = false;
 	private runningPromises: number;
 	private readonly maxDegreeOfParalellism: number;
 	private readonly outstandingPromises: ILimitedTaskFactory<T>[];
+	/** Index of the next queued factory; avoids O(n) `Array#shift` on huge queues. */
+	private outstandingHead = 0;
 	private readonly _onDrained: Emitter<void>;
+	private _consumeScheduled = false;
+	private _consumeBudget = 0;
 
 	constructor(maxDegreeOfParalellism: number) {
 		this.maxDegreeOfParalellism = maxDegreeOfParalellism;
@@ -754,13 +765,51 @@ export class Limiter<T> implements ILimiter<T> {
 	}
 
 	private consume(): void {
-		while (this.outstandingPromises.length && this.runningPromises < this.maxDegreeOfParalellism) {
-			const iLimitedTask = this.outstandingPromises.shift()!;
+		if (this._isDisposed || this._consumeScheduled) {
+			return;
+		}
+
+		while (this.outstandingHead < this.outstandingPromises.length && this.runningPromises < this.maxDegreeOfParalellism) {
+			if (this._consumeBudget >= Limiter.CONSUME_YIELD_EVERY) {
+				this.compactOutstanding();
+				this.scheduleConsume();
+				return;
+			}
+			this._consumeBudget++;
+
+			const iLimitedTask = this.outstandingPromises[this.outstandingHead++]!;
 			this.runningPromises++;
 
 			const promise = iLimitedTask.factory();
 			promise.then(iLimitedTask.c, iLimitedTask.e);
 			promise.then(() => this.consumed(), () => this.consumed());
+		}
+
+		this.compactOutstanding();
+	}
+
+	private scheduleConsume(): void {
+		if (this._consumeScheduled || this._isDisposed) {
+			return;
+		}
+		this._consumeScheduled = true;
+		this._consumeBudget = 0;
+		setTimeout0(() => {
+			this._consumeScheduled = false;
+			this.consume();
+		});
+	}
+
+	private compactOutstanding(): void {
+		if (this.outstandingHead === 0) {
+			return;
+		}
+		if (this.outstandingHead >= this.outstandingPromises.length) {
+			this.outstandingPromises.length = 0;
+			this.outstandingHead = 0;
+		} else if (this.outstandingHead > 256 && this.outstandingHead * 2 >= this.outstandingPromises.length) {
+			this.outstandingPromises.splice(0, this.outstandingHead);
+			this.outstandingHead = 0;
 		}
 	}
 
@@ -773,7 +822,7 @@ export class Limiter<T> implements ILimiter<T> {
 			this._onDrained.fire();
 		}
 
-		if (this.outstandingPromises.length > 0) {
+		if (this.outstandingHead < this.outstandingPromises.length) {
 			this.consume();
 		}
 	}
@@ -783,12 +832,14 @@ export class Limiter<T> implements ILimiter<T> {
 			throw new Error('Object has been disposed');
 		}
 		this.outstandingPromises.length = 0;
+		this.outstandingHead = 0;
 		this._size = this.runningPromises;
 	}
 
 	dispose(): void {
 		this._isDisposed = true;
 		this.outstandingPromises.length = 0; // stop further processing
+		this.outstandingHead = 0;
 		this._size = 0;
 		this._onDrained.dispose();
 	}
