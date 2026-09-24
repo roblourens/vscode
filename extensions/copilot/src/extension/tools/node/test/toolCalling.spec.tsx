@@ -275,3 +275,63 @@ suite('ChatToolCalls thinking handling', () => {
 		expect(hasThinkingPart(result)).toBe(true);
 	});
 });
+
+suite('ChatToolCalls denied historical tools', () => {
+	let accessor: ITestingServicesAccessor;
+
+	beforeEach(async () => {
+		const testingServiceCollection = createExtensionUnitTestingServices();
+		accessor = testingServiceCollection.createTestingAccessor();
+	});
+
+	test('keeps denied historical tool calls as results on the Messages API #337599', async () => {
+		const endpoint = accessor.get(IInstantiationService).createInstance(MockEndpoint, undefined);
+		(endpoint as { apiType?: string }).apiType = 'messages';
+
+		const round = new ToolCallRound('calling denied mcp tool', [{ id: 'call-denied', name: 'mcp__github__list_issues', arguments: '{}' }], 0, 'round-denied');
+		const renderer = PromptRenderer.create(accessor.get(IInstantiationService), endpoint, ChatToolCallsWrapper, {
+			promptContext: {
+				tools: {
+					toolInvocationToken: '1' as never,
+					toolReferences: [],
+					availableTools: []
+				}
+			} as any as IBuildPromptContext,
+			toolCallResults: {},
+			toolCallRounds: [round],
+			isHistorical: true,
+		});
+		const result = await renderer.render();
+		const assistant = result.messages.find(m => m.role === Raw.ChatRole.Assistant) as Raw.AssistantChatMessage | undefined;
+		const toolMessages = result.messages.filter(m => m.role === Raw.ChatRole.Tool);
+		expect(assistant?.toolCalls?.map(call => call.id)).toEqual(['call-denied']);
+		expect(toolMessages.map(message => ({
+			id: (message as Raw.ToolChatMessage).toolCallId,
+			text: getTextPart(message.content),
+		}))).toEqual([{
+			id: 'call-denied',
+			text: 'The tool call was denied or its result is unavailable. The action was not performed.',
+		}]);
+	});
+
+	test('drops historical tool calls without results on non-Messages APIs', async () => {
+		const endpoint = accessor.get(IInstantiationService).createInstance(MockEndpoint, undefined);
+		(endpoint as { apiType?: string }).apiType = 'chatCompletions';
+
+		const round = new ToolCallRound('calling denied mcp tool', [{ id: 'call-denied', name: 'mcp__github__list_issues', arguments: '{}' }], 0, 'round-denied');
+		const renderer = PromptRenderer.create(accessor.get(IInstantiationService), endpoint, ChatToolCallsWrapper, {
+			promptContext: {
+				tools: {
+					toolInvocationToken: '1' as never,
+					toolReferences: [],
+					availableTools: []
+				}
+			} as any as IBuildPromptContext,
+			toolCallResults: {},
+			toolCallRounds: [round],
+			isHistorical: true,
+		});
+		const result = await renderer.render();
+		expect(result.messages.filter(m => m.role === Raw.ChatRole.Assistant || m.role === Raw.ChatRole.Tool)).toHaveLength(0);
+	});
+});

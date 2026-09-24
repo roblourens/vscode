@@ -14,7 +14,7 @@ import { IChatEndpoint, ICreateEndpointBodyOptions } from '../../../networking/c
 import { FinishedCallback, IResponseDelta } from '../../../networking/common/fetch';
 import { IToolDeferralService } from '../../../networking/common/toolDeferralService';
 import { createPlatformServices } from '../../../test/node/services';
-import { addMessagesApiCacheControl, addToolsAndSystemCacheControl, AnthropicMessagesProcessor, buildToolInputSchema, clearAllCacheControl, createMessagesRequestBody, processNonStreamingResponseFromMessagesEndpoint, processResponseFromMessagesEndpoint, rawMessagesToMessagesAPI } from '../../node/messagesApi';
+import { addMessagesApiCacheControl, addToolsAndSystemCacheControl, AnthropicMessagesProcessor, buildToolInputSchema, clearAllCacheControl, collectToolNamesReferencedInMessages, createMessagesRequestBody, processNonStreamingResponseFromMessagesEndpoint, processResponseFromMessagesEndpoint, rawMessagesToMessagesAPI } from '../../node/messagesApi';
 import { HeadersImpl, Response } from '../../../networking/common/fetcherService';
 import { TelemetryData } from '../../../telemetry/common/telemetryData';
 import { TestLogService } from '../../../testing/common/testLogService';
@@ -371,6 +371,32 @@ suite('rawMessagesToMessagesAPI', function () {
 			expect(toolResult).toBeDefined();
 			// No valid tool references, content should be undefined (empty filtered)
 			expect(toolResult!.content).toBeUndefined();
+		});
+
+		test('collects denied tool_use and tool_search names from conversation history', function () {
+			const messages = [
+				...makeToolSearchMessages(['mcp__github__list_issues', 'read_file']),
+				{
+					role: Raw.ChatRole.Assistant,
+					content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'Calling the MCP tool.' }],
+					toolCalls: [{
+						id: 'toolu_denied1',
+						type: 'function' as const,
+						function: { name: 'mcp__github__list_issues', arguments: '{}' },
+					}],
+				},
+				{
+					role: Raw.ChatRole.Tool,
+					toolCallId: 'toolu_denied1',
+					content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'denied' }],
+				},
+			];
+
+			expect([...collectToolNamesReferencedInMessages(messages)].sort()).toEqual([
+				CUSTOM_TOOL_SEARCH_NAME,
+				'mcp__github__list_issues',
+				'read_file',
+			].sort());
 		});
 
 		test('falls back to text content when validToolNames is undefined (tool search disabled)', function () {
@@ -1635,6 +1661,61 @@ describe('createMessagesRequestBody tool search deferral', () => {
 
 		const tools = body.tools as AnthropicMessagesTool[];
 		expect(tools.every(t => !t.defer_loading)).toBe(true);
+	});
+
+	test('keeps denied MCP tools referenced in history in the tools array and as tool_references #337599', () => {
+		const endpoint = createMockEndpoint(true);
+		const deniedTool = 'mcp__github__list_issues';
+		const options = createOptions([
+			makeTool('read_file'),
+			makeTool(CUSTOM_TOOL_SEARCH_NAME),
+		]);
+		options.messages = [
+			{
+				role: Raw.ChatRole.User,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'list github issues' }],
+			},
+			{
+				role: Raw.ChatRole.Assistant,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'Searching for tools.' }],
+				toolCalls: [{
+					id: 'toolu_search1',
+					type: 'function',
+					function: { name: CUSTOM_TOOL_SEARCH_NAME, arguments: '{"query":"github"}' },
+				}],
+			},
+			{
+				role: Raw.ChatRole.Tool,
+				toolCallId: 'toolu_search1',
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: JSON.stringify([deniedTool]) }],
+			},
+			{
+				role: Raw.ChatRole.Assistant,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'Calling the tool.' }],
+				toolCalls: [{
+					id: 'toolu_denied1',
+					type: 'function',
+					function: { name: deniedTool, arguments: '{}' },
+				}],
+			},
+			{
+				role: Raw.ChatRole.Tool,
+				toolCallId: 'toolu_denied1',
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: `Tool ${deniedTool} is currently disabled by the user, and cannot be called.` }],
+			},
+		];
+
+		const body = instantiationService.invokeFunction(createMessagesRequestBody, options, endpoint.model, endpoint);
+		const tools = body.tools as AnthropicMessagesTool[];
+		expect(tools.find(t => t.name === deniedTool)).toEqual(expect.objectContaining({
+			name: deniedTool,
+			defer_loading: true,
+		}));
+
+		const toolResult = (body.messages as MessageParam[])
+			.flatMap(message => Array.isArray(message.content) ? message.content : [])
+			.find((block): block is ToolResultBlockParam => block.type === 'tool_result' && block.tool_use_id === 'toolu_search1');
+		expect(toolResult?.content).toEqual([{ type: 'tool_reference', tool_name: deniedTool }]);
 	});
 });
 

@@ -191,6 +191,27 @@ export function createMessagesRequestBody(accessor: ServicesAccessor, options: I
 		}
 	}
 
+	// Denied / agent-spec-rejected tools may be dropped from the enabled tool
+	// list while history still contains their tool_use or a tool_search
+	// tool_reference. Anthropic then 400s with "Tool reference not found in
+	// available tools". Keep those names in the request so the denied tool
+	// result can be delivered and the model can continue. #337599
+	const presentToolNames = new Set([...nonDeferredTools, ...deferredTools].map(tool => tool.name));
+	for (const name of collectToolNamesReferencedInMessages(options.messages)) {
+		if (!name || presentToolNames.has(name)) {
+			continue;
+		}
+		const isDeferred = options.modelCapabilities?.enableToolSearch && toolSearchEnabled && !toolDeferralService.isNonDeferredTool(name);
+		const referencedTool: AnthropicMessagesTool = {
+			name,
+			description: '',
+			input_schema: buildToolInputSchema(undefined),
+			...(isDeferred ? { defer_loading: true } : {}),
+		};
+		(isDeferred ? deferredTools : nonDeferredTools).push(referencedTool);
+		presentToolNames.add(name);
+	}
+
 	// Build final tools array. The client-side search_tools tool is already in the
 	// anthropicTools array (registered as a model-specific VS Code tool) and will handle
 	// tool search client-side. Deferred tools still have defer_loading: true so the model
@@ -247,9 +268,9 @@ export function createMessagesRequestBody(accessor: ServicesAccessor, options: I
 		: undefined;
 
 	const telemetryService = accessor.get(ITelemetryService);
-	// TODO: Ideally the custom tool_search tool should filter results itself, but it doesn't
-	// have access to the enabled tools for the request. For now, filter tool_reference blocks
-	// here against the actual tools sent to Anthropic to avoid 400 errors from unknown tool names.
+	// Filter tool_reference blocks against the tools actually sent, which now
+	// includes conversation-referenced denied/rejected tools so those
+	// references stay valid instead of 400ing. #337599
 	const validToolNames = finalTools.length > 0 ? new Set(finalTools.map(t => t.name)) : undefined;
 	const messagesResult = rawMessagesToMessagesAPI(options.messages, toolSearchEnabled ? validToolNames : undefined);
 
@@ -310,6 +331,58 @@ export function createMessagesRequestBody(accessor: ServicesAccessor, options: I
 		...(effort ? { output_config: { effort } } : {}),
 		...(contextManagement ? { context_management: contextManagement } : {}),
 	};
+}
+
+/**
+ * Tool names the conversation still refers to: assistant `tool_use` names and
+ * names returned by the custom tool-search tool. Used to keep denied/rejected
+ * tools in the Anthropic tools array so Copilot API does not 400 with
+ * "Tool reference not found in available tools".
+ */
+export function collectToolNamesReferencedInMessages(messages: readonly Raw.ChatMessage[], toolSearchName: string = CUSTOM_TOOL_SEARCH_NAME): Set<string> {
+	const names = new Set<string>();
+	const searchCallIds = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== Raw.ChatRole.Assistant) {
+			continue;
+		}
+		for (const toolCall of message.toolCalls ?? []) {
+			const name = toolCall.function.name;
+			if (name) {
+				names.add(name);
+			}
+			if (name === toolSearchName) {
+				searchCallIds.add(toolCall.id);
+			}
+		}
+	}
+	if (searchCallIds.size === 0) {
+		return names;
+	}
+	for (const message of messages) {
+		if (message.role !== Raw.ChatRole.Tool || !message.toolCallId || !searchCallIds.has(message.toolCallId)) {
+			continue;
+		}
+		for (const part of message.content) {
+			if (part.type !== Raw.ChatCompletionContentPartKind.Text) {
+				continue;
+			}
+			try {
+				const parsed: unknown = JSON.parse(part.text);
+				if (!Array.isArray(parsed)) {
+					continue;
+				}
+				for (const item of parsed) {
+					if (typeof item === 'string' && item.length > 0) {
+						names.add(item);
+					}
+				}
+			} catch {
+				// Not a tool-search JSON payload.
+			}
+		}
+	}
+	return names;
 }
 
 export function rawMessagesToMessagesAPI(messages: readonly Raw.ChatMessage[], validToolNames?: Set<string>): { messages: MessageParam[]; system?: TextBlockParam[] } {

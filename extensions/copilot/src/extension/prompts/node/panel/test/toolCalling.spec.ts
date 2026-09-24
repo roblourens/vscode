@@ -559,6 +559,67 @@ describe('ChatToolCalls (toolCalling.tsx)', () => {
 		});
 	});
 
+	test('keeps denied historical tool calls as results on the Messages API #337599', async () => {
+		const toolName = 'mcp__github__list_issues';
+		const deniedCallId = 'call-denied';
+		const toolInfo: vscode.LanguageModelToolInformation = {
+			name: toolName,
+			description: 'mcp tool',
+			source: undefined,
+			inputSchema: undefined,
+			tags: [],
+		};
+
+		const testingServiceCollection = createExtensionUnitTestingServices();
+		testingServiceCollection.define(IToolsService, new CapturingToolsService(toolInfo));
+
+		const accessor = testingServiceCollection.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const endpointProvider = accessor.get(IEndpointProvider);
+		const endpoint = await endpointProvider.getChatEndpoint('copilot-utility');
+		const messagesEndpoint = Object.create(endpoint) as IChatEndpoint;
+		Object.defineProperty(messagesEndpoint, 'apiType', { value: 'messages' });
+
+		const round: IToolCallRound = {
+			id: 'round-denied',
+			response: 'calling denied tool',
+			toolInputRetry: 0,
+			toolCalls: [{ name: toolName, arguments: '{}', id: deniedCallId }],
+		};
+		const promptContext: IBuildPromptContext = {
+			query: 'continue',
+			history: [],
+			chatVariables: new ChatVariablesCollection(),
+			conversation: { sessionId: 'session-denied' } as unknown as Conversation,
+			request: {} as vscode.ChatRequest,
+			tools: {
+				toolReferences: [],
+				toolInvocationToken: {} as vscode.ChatParticipantToolToken,
+				availableTools: [],
+			},
+		};
+
+		const { messages } = await renderPromptElement(instantiationService, messagesEndpoint, ChatToolCalls, {
+			promptContext,
+			toolCallRounds: [round],
+			toolCallResults: {},
+			isHistorical: true,
+		});
+		const assistantMessage = messages.find((message): message is Raw.AssistantChatMessage => message.role === Raw.ChatRole.Assistant);
+		const toolMessages = messages.filter((message): message is Raw.ToolChatMessage => message.role === Raw.ChatRole.Tool);
+		expect(assistantMessage?.toolCalls?.map(call => call.id)).toEqual([deniedCallId]);
+		expect(toolMessages.map(message => ({
+			id: message.toolCallId,
+			text: message.content
+				.filter((part): part is Raw.ChatCompletionContentPartText => part.type === Raw.ChatCompletionContentPartKind.Text)
+				.map(part => part.text)
+				.join(''),
+		}))).toEqual([{
+			id: deniedCallId,
+			text: 'The tool call was denied or its result is unavailable. The action was not performed.',
+		}]);
+	});
+
 	test('replaces images with placeholders for historical turns', async () => {
 		const toolName = 'viewImage';
 		const toolCallId = 'call-img-1';

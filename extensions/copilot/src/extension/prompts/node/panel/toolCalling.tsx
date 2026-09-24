@@ -57,6 +57,13 @@ export interface ChatToolCallsProps extends BasePromptElementProps {
 const MAX_INPUT_VALIDATION_RETRIES = 5;
 
 /**
+ * Historical Anthropic Messages rounds must keep denied/rejected tool calls as
+ * tool results. Dropping the reference causes Copilot API 400
+ * "Tool reference not found in available tools". #337599
+ */
+const DENIED_OR_UNAVAILABLE_TOOL_RESULT = 'The tool call was denied or its result is unavailable. The action was not performed.';
+
+/**
  * Render one round of the assistant response's tool calls.
  * One assistant response "turn" which contains multiple rounds of assistant message text, tool calls, and tool results.
  */
@@ -106,9 +113,15 @@ export class ChatToolCalls extends PromptElement<ChatToolCallsProps, void> {
 		let fixedNameToolCalls = round.toolCalls.map(tc => ({ ...tc, name: this.toolsService.validateToolName(tc.name) ?? tc.name }));
 		// A Responses marker retains every function call server-side. Close calls whose local
 		// results were lost so the next request can safely reuse previous_response_id.
+		// Anthropic Messages API requires every tool_use — including denied/rejected
+		// MCP or agent-spec tools — to remain as a tool result rather than dropping
+		// the reference, otherwise Copilot API 400s with "Tool reference not found
+		// in available tools". #337599
 		const shouldSynthesizeMissingToolResults = this.props.isHistorical
-			&& this.promptEndpoint.apiType === 'responses'
-			&& !!round.statefulMarker;
+			&& (
+				(this.promptEndpoint.apiType === 'responses' && !!round.statefulMarker)
+				|| this.promptEndpoint.apiType === 'messages'
+			);
 		if (this.props.isHistorical) {
 			fixedNameToolCalls = fixedNameToolCalls.filter(tc => tc.id && (this.props.toolCallResults?.[tc.id] || shouldSynthesizeMissingToolResults));
 		}
@@ -168,7 +181,9 @@ export class ChatToolCalls extends PromptElement<ChatToolCallsProps, void> {
 						toolCall: toolCall,
 						toolInvocationToken: this.props.promptContext.tools!.toolInvocationToken,
 						toolCallResult: this.props.toolCallResults?.[toolCall.id!]
-							?? (shouldSynthesizeMissingToolResults ? textToolResult(MISSING_STATEFUL_TOOL_RESULT) : undefined),
+							?? (shouldSynthesizeMissingToolResults
+								? textToolResult(this.promptEndpoint.apiType === 'messages' ? DENIED_OR_UNAVAILABLE_TOOL_RESULT : MISSING_STATEFUL_TOOL_RESULT)
+								: undefined),
 						allowInvokingTool: !this.props.isHistorical,
 						validateInput: round.toolInputRetry < MAX_INPUT_VALIDATION_RETRIES,
 						requestId: this.props.promptContext.requestId,

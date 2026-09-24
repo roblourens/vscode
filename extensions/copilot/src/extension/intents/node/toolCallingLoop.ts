@@ -15,6 +15,7 @@ import { IHistoricalTurn, ISessionTranscriptService, ToolRequest } from '../../.
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { isAnthropicFamily, isGeminiFamily } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
+import { collectToolNamesReferencedInMessages } from '../../../platform/endpoint/node/messagesApi';
 import { rawPartAsThinkingData } from '../../../platform/endpoint/common/thinkingDataContainer';
 import { IFileSystemService } from '../../../platform/filesystem/common/fileSystemService';
 import { IGitService } from '../../../platform/git/common/gitService';
@@ -982,6 +983,40 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 	}
 
 	/**
+	 * Tools dropped from the enabled set (agent-spec restriction, assisted
+	 * permission rejection, allow-all rejection) can still appear in
+	 * conversation history as tool_use or tool_search references. Keep them in
+	 * the request tools array so the denied result can be delivered.
+	 */
+	protected ensureToolsReferencedInMessages(availableTools: LanguageModelToolInformation[], messages: readonly Raw.ChatMessage[]): LanguageModelToolInformation[] {
+		const referencedNames = collectToolNamesReferencedInMessages(messages);
+		if (referencedNames.size === 0) {
+			return availableTools;
+		}
+		const present = new Set(availableTools.map(tool => tool.name));
+		const extras: LanguageModelToolInformation[] = [];
+		const toolsService = this._instantiationService.invokeFunction(accessor => accessor.get(IToolsService));
+		for (const name of referencedNames) {
+			if (!name || present.has(name)) {
+				continue;
+			}
+			present.add(name);
+			extras.push(toolsService.getTool(name) ?? {
+				name,
+				description: '',
+				inputSchema: undefined,
+				tags: [],
+				source: undefined,
+			});
+		}
+		if (extras.length === 0) {
+			return availableTools;
+		}
+		this._logService.debug(`[ToolCallingLoop] Keeping ${extras.length} conversation-referenced tool(s) in the request: ${extras.map(tool => tool.name).join(', ')}`);
+		return [...availableTools, ...extras];
+	}
+
+	/**
 	 * Whether the loop should auto-retry after a failed fetch in auto-approve/autopilot mode.
 	 * Does not retry rate-limited, quota-exceeded, or cancellation errors.
 	 */
@@ -1787,6 +1822,10 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 
 		// Ensure task_complete is available in autopilot mode so the model can signal completion
 		availableTools = this.ensureVoiceProgressTool(this.ensureAutopilotTools(availableTools));
+		// Keep denied/rejected tools that still appear as tool_use or tool_search
+		// references so Anthropic/Copilot API can resolve them as tool results
+		// instead of 400ing with "Tool reference not found in available tools". #337599
+		availableTools = this.ensureToolsReferencedInMessages(availableTools, effectiveBuildPromptResult.messages);
 
 		const isToolInputFailure = effectiveBuildPromptResult.metadata.get(ToolFailureEncountered);
 		if (isToolInputFailure) {
