@@ -174,7 +174,9 @@ export function fromSdkModelInfo(m: ModelInfo, provider: AgentProvider): IAgentM
 		// ids are SDK format end to end; `toSdkModelId` is identity at this seam.
 		id: m.value,
 		name: m.displayName,
-		supportsVision: false,
+		// SDK ModelInfo has no vision flag. Current Claude families all accept
+		// images; Copilot-routed rows already read this from CAPI capabilities.
+		supportsVision: true,
 		...(configSchema ? { configSchema } : {}),
 	};
 }
