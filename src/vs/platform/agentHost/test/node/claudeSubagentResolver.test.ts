@@ -14,6 +14,10 @@ import { buildSubagentSessionUri } from '../../common/state/sessionState.js';
 import { IClaudeAgentSdkService } from '../../node/claude/claudeAgentSdkService.js';
 import { scanTranscriptForAgentIds, SUBAGENT_ID_SUFFIX_REGEX, SubagentRegistry } from '../../node/claude/claudeSubagentRegistry.js';
 import {
+	CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT,
+	CLAUDE_SUBAGENT_RESTORE_MAX_MESSAGES,
+	CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS,
+	CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE,
 	extractSpawningPromptFromTranscript,
 	extractCompletedResultTextFromTranscript,
 	fetchParentTurns,
@@ -41,7 +45,7 @@ class FakeSdkService implements IClaudeAgentSdkService {
 
 	getSessionMessagesCalls: { sessionId: string; options: unknown }[] = [];
 	listSubagentsCalls: string[] = [];
-	getSubagentMessagesCalls: { sessionId: string; agentId: string }[] = [];
+	getSubagentMessagesCalls: { sessionId: string; agentId: string; options: GetSubagentMessagesOptions | undefined }[] = [];
 
 	async listSessions(): Promise<readonly SDKSessionInfo[]> { return []; }
 	async canLoadWithoutDownload(): Promise<boolean> { return true; }
@@ -59,10 +63,13 @@ class FakeSdkService implements IClaudeAgentSdkService {
 		if (this.listSubagentsRejection) { throw this.listSubagentsRejection; }
 		return this.subagentIds.get(sessionId) ?? [];
 	}
-	async getSubagentMessages(sessionId: string, agentId: string, _options?: GetSubagentMessagesOptions): Promise<readonly SessionMessage[]> {
-		this.getSubagentMessagesCalls.push({ sessionId, agentId });
+	async getSubagentMessages(sessionId: string, agentId: string, options?: GetSubagentMessagesOptions): Promise<readonly SessionMessage[]> {
+		this.getSubagentMessagesCalls.push({ sessionId, agentId, options });
 		if (this.getSubagentMessagesRejection) { throw this.getSubagentMessagesRejection; }
-		return this.subagentMessages.get(`${sessionId}::${agentId}`) ?? [];
+		const all = this.subagentMessages.get(`${sessionId}::${agentId}`) ?? [];
+		const offset = options?.offset ?? 0;
+		const sliced = all.slice(offset);
+		return options?.limit === undefined ? sliced : sliced.slice(0, options.limit);
 	}
 	async forkSession(): Promise<never> { throw new Error('not implemented in test fake'); }
 	async deleteSession(): Promise<void> { throw new Error('not implemented in test fake'); }
@@ -179,10 +186,12 @@ suite('claudeSubagentResolver — PromptMatchStrategy', () => {
 			matched: await strat.lookup('toolu_target', ctx),
 			malformed: await strat.lookup('toolu_malformed', ctx),
 			unknownToolCall: await strat.lookup('toolu_does_not_exist', ctx),
+			limits: sdk.getSubagentMessagesCalls.map(c => c.options),
 		}, {
 			matched: 'agenttarget',
 			malformed: undefined,
 			unknownToolCall: undefined,
+			limits: [{ limit: 1 }, { limit: 1 }],
 		});
 
 		suite('claudeSubagentResolver — ResultMatchStrategy', () => {
@@ -332,6 +341,97 @@ suite('claudeSubagentResolver — getSubagentTranscript', () => {
 			noResolve: [],
 			onError: [],
 			fetchAttempts: ['agent-x'], // only the cached-hit attempted
+		});
+	});
+
+	test('PromptMatch does not open every subagent transcript when the parent has too many children', async () => {
+		const sdk = new FakeSdkService();
+		const agentIds = Array.from({ length: CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT + 1 }, (_, i) => `agent${i}`);
+		sdk.subagentIds.set('scan-limit-sid', agentIds);
+		for (const agentId of agentIds) {
+			sdk.subagentMessages.set(`scan-limit-sid::${agentId}`, [{
+				type: 'user',
+				message: { content: 'do the thing' },
+			} as unknown as SessionMessage]);
+		}
+		const strat = new PromptMatchStrategy(sdk, new NullLogService());
+		const matched = await strat.lookup('toolu_target', {
+			parentUri: URI.parse('claude:/scan-limit-sid'),
+			parentSessionId: 'scan-limit-sid',
+			parentTranscript: [makeAgentToolCallTurn('toolu_target', { prompt: 'do the thing' })],
+			token: CancellationToken.None,
+		});
+		assert.deepStrictEqual({
+			matched,
+			fetched: sdk.getSubagentMessagesCalls.length,
+		}, {
+			matched: undefined,
+			fetched: 0,
+		});
+	});
+
+	test('getSubagentTranscript pages subagent history and stops at the restore cap', async () => {
+		const sdk = new FakeSdkService();
+		const log = new NullLogService();
+		const parentUri = URI.parse('claude:/page-sid');
+		const registry = disposables.add(new SubagentRegistry());
+		registry.recordSpawn('toolu_page', { agentId: 'agent-page' });
+		sdk.subagentMessages.set('page-sid::agent-page', Array.from({ length: CLAUDE_SUBAGENT_RESTORE_MAX_MESSAGES + CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE }, (_, i) => ({
+			type: 'user',
+			uuid: `u${i}`,
+			session_id: 'page-sid',
+			parent_tool_use_id: 'toolu_page',
+			parent_agent_id: 'agent-page',
+			message: { role: 'user', content: [{ type: 'text', text: `m${i}` }] },
+		} as unknown as SessionMessage)));
+
+		await getSubagentTranscript(
+			URI.parse(buildSubagentSessionUri(parentUri, 'toolu_page')),
+			parentUri, 'page-sid', 'toolu_page', registry, sdk, log, CancellationToken.None,
+		);
+
+		assert.deepStrictEqual({
+			pages: sdk.getSubagentMessagesCalls.map(c => c.options),
+			fetched: sdk.getSubagentMessagesCalls.length,
+		}, {
+			pages: [
+				{ limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE, offset: 0 },
+				{ limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE, offset: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE },
+				{ limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE, offset: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE * 2 },
+				{ limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE, offset: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE * 3 },
+			],
+			fetched: 4,
+		});
+	});
+
+	test('getSubagentTranscript fails extra children once the per-session restore cap is reached', async () => {
+		const sdk = new FakeSdkService();
+		const log = new NullLogService();
+		const parentUri = URI.parse('claude:/cap-sid');
+		const registry = disposables.add(new SubagentRegistry());
+		for (let i = 0; i < CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS + 1; i++) {
+			registry.recordSpawn(`toolu_${i}`, { agentId: `agent-${i}` });
+			sdk.subagentMessages.set(`cap-sid::agent-${i}`, [{
+				type: 'user',
+				uuid: `u${i}`,
+				session_id: 'cap-sid',
+				parent_tool_use_id: `toolu_${i}`,
+				parent_agent_id: `agent-${i}`,
+				message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+			} as unknown as SessionMessage]);
+		}
+
+		for (let i = 0; i < CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS + 1; i++) {
+			await getSubagentTranscript(
+				URI.parse(buildSubagentSessionUri(parentUri, `toolu_${i}`)),
+				parentUri, 'cap-sid', `toolu_${i}`, registry, sdk, log, CancellationToken.None,
+			);
+		}
+
+		assert.deepStrictEqual({
+			fetchedAgents: sdk.getSubagentMessagesCalls.map(c => c.agentId),
+		}, {
+			fetchedAgents: Array.from({ length: CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS }, (_, i) => `agent-${i}`),
 		});
 	});
 });

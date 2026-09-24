@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type Anthropic from '@anthropic-ai/sdk';
-import type { AccountInfo, AgentInfo, ForkSessionOptions, ForkSessionResult, GetSessionMessagesOptions, McpSdkServerConfigWithInstance, McpServerStatus, ModelInfo, Options, PermissionMode, Query, SDKControlInterruptResponse, SDKMessage, SDKSessionInfo, SDKUserMessage, SdkMcpToolDefinition, SessionMessage, SessionMutationOptions, Settings, SlashCommand, WarmQuery } from '@anthropic-ai/claude-agent-sdk';
+import type { AccountInfo, AgentInfo, ForkSessionOptions, ForkSessionResult, GetSessionMessagesOptions, GetSubagentMessagesOptions, McpSdkServerConfigWithInstance, McpServerStatus, ModelInfo, Options, PermissionMode, Query, SDKControlInterruptResponse, SDKMessage, SDKSessionInfo, SDKUserMessage, SdkMcpToolDefinition, SessionMessage, SessionMutationOptions, Settings, SlashCommand, WarmQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { CCAModel } from '@vscode/copilot-api';
 
@@ -79,6 +79,7 @@ import { createClaudeInternalMcpServerCustomization } from '../../node/claude/cu
 import { ClaudeSessionMetadataStore } from '../../node/claude/claudeSessionMetadataStore.js';
 import { ClaudeSessionConfigKey } from '../../common/claudeSessionConfigKeys.js';
 import { ClaudeAgentSdkService, IClaudeAgentSdkService, IClaudeSdkBindings } from '../../node/claude/claudeAgentSdkService.js';
+import { CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE } from '../../node/claude/claudeSubagentResolver.js';
 import { AGENT_SDK_SETUP_DOWNLOAD_REQUEST_KEY, AGENT_SDK_SETUP_RELOAD_REQUEST_KEY, readAgentSdkSetupInfos } from '../../common/agentSdkSetup.js';
 import { IAgentSdkDownloader } from '../../node/agentSdkDownloader.js';
 import { RecordingAgentSdkDownloader } from './testAgentSdkDownloader.js';
@@ -642,12 +643,15 @@ class FakeClaudeAgentSdkService implements IClaudeAgentSdkService {
 	getSubagentMessagesCalls: { sessionId: string; agentId: string; options: unknown }[] = [];
 	getSubagentMessagesRejection: Error | undefined;
 
-	async getSubagentMessages(sessionId: string, agentId: string, options?: unknown): Promise<readonly SessionMessage[]> {
+	async getSubagentMessages(sessionId: string, agentId: string, options?: GetSubagentMessagesOptions): Promise<readonly SessionMessage[]> {
 		this.getSubagentMessagesCalls.push({ sessionId, agentId, options });
 		if (this.getSubagentMessagesRejection) {
 			throw this.getSubagentMessagesRejection;
 		}
-		return this.subagentMessagesByKey.get(`${sessionId}::${agentId}`) ?? [];
+		const all = this.subagentMessagesByKey.get(`${sessionId}::${agentId}`) ?? [];
+		const offset = options?.offset ?? 0;
+		const sliced = all.slice(offset);
+		return options?.limit === undefined ? sliced : sliced.slice(0, options.limit);
 	}
 
 	/**
@@ -5297,6 +5301,26 @@ suite('ClaudeAgent', () => {
 		});
 	});
 
+	test('restore metadata does not call getSessionInfo when a session has too many subagent transcripts', async () => {
+		const { agent, sdk } = createTestContext(disposables);
+		sdk.sessionList = [{ sessionId: 'sdk-huge', summary: 'Huge', lastModified: 10, cwd: '/work' }];
+		sdk.subagentsBySessionId.set('sdk-huge', Array.from({ length: CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS + 1 }, (_, i) => `agent-${i}`));
+
+		const session = AgentSession.uri(agent.id, 'ah-huge');
+		const chat = defaultChatUri(session);
+		const metadata = await agent.getChatMetadata(chat, chatContext(chat), JSON.stringify({ sdkSessionId: 'sdk-huge' }), { activation: 'restore' });
+
+		assert.deepStrictEqual({
+			summary: metadata?.summary,
+			getSessionInfoCalls: sdk.getSessionInfoCalls,
+			listSubagentsCalls: sdk.listSubagentsCalls.length,
+		}, {
+			summary: 'Huge',
+			getSessionInfoCalls: [],
+			listSubagentsCalls: 1,
+		});
+	});
+
 	test('restoring chat history downloads a cold SDK while passive metadata and discovery stay cold', async () => {
 		const sdk = new FakeClaudeAgentSdkService();
 		sdk.canLoadWithoutDownloadResult = false;
@@ -8434,7 +8458,7 @@ suite('ClaudeAgent (Phase 13 — transcript reconstruction)', () => {
 			subagentCalls: [{
 				sessionId: parentSessionId,
 				agentId,
-				options: undefined,
+				options: { limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE, offset: 0 },
 			}],
 		});
 	});

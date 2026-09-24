@@ -50,7 +50,7 @@ import { buildModelEnumerationOptions } from './claudeSdkOptions.js';
 import { isClaudeAccountSetUp, resolveClaudeTransportMode, type ClaudeTransportMode } from './claudeTransportMode.js';
 import { mergeClaudeModelCatalogs, resolveClaudeSessionTransport } from './claudeModelSelection.js';
 import { mapSessionMessagesToTurns, resolveForkAnchorUuid } from './claudeReplayMapper.js';
-import { getSubagentTranscript } from './claudeSubagentResolver.js';
+import { CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS, getSubagentTranscript } from './claudeSubagentResolver.js';
 import { SubagentRegistry } from './claudeSubagentRegistry.js';
 import { ClaudeAgentSession } from './claudeAgentSession.js';
 import { handleCanUseTool } from './claudeCanUseTool.js';
@@ -2163,11 +2163,24 @@ export class ClaudeAgent extends Disposable implements IAgent {
 		if (!sessionId) {
 			return undefined;
 		}
-		const sdkInfo = await this._sdkService.getSessionInfo(sessionId);
+		const sdkInfo = await this._getSdkSessionInfo(sessionId, options?.activation === 'restore');
 		if (!sdkInfo) {
 			return undefined;
 		}
 		return this._withPersistedWorkingDirectories(configurationResource, { chat, ...this._metadataStore.project(sdkInfo) });
+	}
+
+	/** Prefer catalog metadata on restore when a session has too many subagent transcripts to probe safely. */
+	private async _getSdkSessionInfo(sessionId: string, restoring: boolean): Promise<SDKSessionInfo | undefined> {
+		if (restoring) {
+			const subagentCount = await this._sdkService.listSubagents(sessionId).then(ids => ids.length, () => 0);
+			if (subagentCount > CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS) {
+				this._logService.warn(`[Claude] restore: skipping getSessionInfo for ${sessionId} (${subagentCount} subagent transcripts)`);
+				const listed = await this._sdkService.listSessions().catch(() => []);
+				return listed.find(entry => entry.sessionId === sessionId);
+			}
+		}
+		return this._sdkService.getSessionInfo(sessionId);
 	}
 
 	/**

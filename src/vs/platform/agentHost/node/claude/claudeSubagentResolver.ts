@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { SessionMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { CancellationToken } from '../../../../base/common/cancellation.js';
 import { URI } from '../../../../base/common/uri.js';
 import { vObjAny, vString as vStringValidator } from '../../../../base/common/validation.js';
@@ -16,6 +17,120 @@ import {
 import { IClaudeAgentSdkService } from './claudeAgentSdkService.js';
 import { mapSessionMessagesToTurns } from './claudeReplayMapper.js';
 import { scanTranscriptForAgentIds, SUBAGENT_TOOL_NAMES, type SubagentRegistry } from './claudeSubagentRegistry.js';
+
+/** Page size for SDK `getSubagentMessages` during restore. */
+export const CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE = 32;
+/** Cap on messages kept from one subagent transcript on restore. */
+export const CLAUDE_SUBAGENT_RESTORE_MAX_MESSAGES = 128;
+/** Cap on decoded payload size kept from one subagent transcript on restore. */
+export const CLAUDE_SUBAGENT_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
+/** Shared cap across every subagent transcript loaded for one parent session. */
+export const CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+/** Cap on full subagent transcripts reconstructed for one parent. */
+export const CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS = 32;
+/** Max children PromptMatch/ResultMatch may open. */
+export const CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT = 32;
+
+const restoreBytesBySession = new Map<string, number>();
+const restoreTranscriptsBySession = new Map<string, number>();
+
+function restoreBudgetUsed(sessionId: string): number {
+	return restoreBytesBySession.get(sessionId) ?? 0;
+}
+
+function restoreTranscriptCount(sessionId: string): number {
+	return restoreTranscriptsBySession.get(sessionId) ?? 0;
+}
+
+function consumeRestoreBudget(sessionId: string, bytes: number): void {
+	restoreBytesBySession.set(sessionId, restoreBudgetUsed(sessionId) + bytes);
+}
+
+function noteRestoreTranscript(sessionId: string): void {
+	restoreTranscriptsBySession.set(sessionId, restoreTranscriptCount(sessionId) + 1);
+}
+
+function estimateJsonBytes(value: unknown, used = 0): number {
+	if (used > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+		return used;
+	}
+	if (typeof value === 'string') {
+		return used + value.length;
+	}
+	if (value === null || typeof value !== 'object') {
+		return used + 8;
+	}
+	if (Array.isArray(value)) {
+		let next = used;
+		for (const item of value) {
+			next = estimateJsonBytes(item, next);
+			if (next > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+				return next;
+			}
+		}
+		return next;
+	}
+	let next = used;
+	for (const item of Object.values(value as Record<string, unknown>)) {
+		next = estimateJsonBytes(item, next);
+		if (next > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+			return next;
+		}
+	}
+	return next;
+}
+
+async function readSubagentMessagesCapped(
+	sdk: IClaudeAgentSdkService,
+	sessionId: string,
+	agentId: string,
+	logService: ILogService,
+	limits: { readonly pageSize: number; readonly maxMessages: number; readonly maxBytes: number },
+): Promise<readonly SessionMessage[]> {
+	if (restoreTranscriptCount(sessionId) >= CLAUDE_SUBAGENT_RESTORE_MAX_TRANSCRIPTS
+		|| restoreBudgetUsed(sessionId) >= CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+		logService.warn(`[getSubagentTranscript] skipping ${agentId}: restore cap reached for ${sessionId}`);
+		return [];
+	}
+
+	const messages: SessionMessage[] = [];
+	let offset = 0;
+	let bytes = 0;
+	while (messages.length < limits.maxMessages && bytes < limits.maxBytes) {
+		const remaining = Math.min(limits.pageSize, limits.maxMessages - messages.length);
+		let page: readonly SessionMessage[];
+		try {
+			page = await sdk.getSubagentMessages(sessionId, agentId, { limit: remaining, offset });
+		} catch (err) {
+			logService.warn(`[getSubagentTranscript] getSubagentMessages(${agentId}) failed: ${err}`);
+			return messages;
+		}
+		if (page.length === 0) {
+			break;
+		}
+		let consumed = 0;
+		for (const message of page) {
+			if (messages.length >= limits.maxMessages) {
+				break;
+			}
+			const size = estimateJsonBytes(message);
+			if (bytes + size > limits.maxBytes || restoreBudgetUsed(sessionId) + size > CLAUDE_SUBAGENT_RESTORE_MAX_TOTAL_BYTES) {
+				logService.warn(`[getSubagentTranscript] truncating ${agentId} after ${messages.length} message(s)`);
+				break;
+			}
+			messages.push(message);
+			bytes += size;
+			consumeRestoreBudget(sessionId, size);
+			consumed++;
+		}
+		if (consumed < page.length || page.length < remaining) {
+			break;
+		}
+		offset += page.length;
+	}
+	noteRestoreTranscript(sessionId);
+	return messages;
+}
 
 /**
  * One link in the resolver chain. Each strategy consults a different
@@ -137,13 +252,17 @@ export class PromptMatchStrategy implements ISubagentLookupStrategy {
 			this._logService.warn(`[claudeSubagentResolver] PromptMatch: listSubagents failed: ${err}`);
 			return undefined;
 		}
+		if (agentIds.length > CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT) {
+			this._logService.warn(`[claudeSubagentResolver] PromptMatch: skipping ${agentIds.length} subagent transcripts`);
+			return undefined;
+		}
 		for (const agentId of agentIds) {
 			if (ctx.token.isCancellationRequested) {
 				return undefined;
 			}
 			let messages;
 			try {
-				messages = await this._sdk.getSubagentMessages(ctx.parentSessionId, agentId);
+				messages = await this._sdk.getSubagentMessages(ctx.parentSessionId, agentId, { limit: 1 });
 			} catch (err) {
 				this._logService.warn(`[claudeSubagentResolver] PromptMatch: getSubagentMessages(${agentId}) failed: ${err}`);
 				continue;
@@ -231,13 +350,17 @@ export class ResultMatchStrategy implements ISubagentLookupStrategy {
 			this._logService.warn(`[claudeSubagentResolver] ResultMatch: listSubagents failed: ${err}`);
 			return undefined;
 		}
+		if (agentIds.length > CLAUDE_SUBAGENT_LOOKUP_SCAN_LIMIT) {
+			this._logService.warn(`[claudeSubagentResolver] ResultMatch: skipping ${agentIds.length} subagent transcripts`);
+			return undefined;
+		}
 		let matchedAgentId: string | undefined;
 		for (const agentId of agentIds) {
 			if (ctx.token.isCancellationRequested) {
 				return undefined;
 			}
 			try {
-				const messages = await this._sdk.getSubagentMessages(ctx.parentSessionId, agentId);
+				const messages = await this._sdk.getSubagentMessages(ctx.parentSessionId, agentId, { limit: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE });
 				if (extractLastAssistantText(messages)?.trim() === expected.trim()) {
 					if (matchedAgentId) {
 						return undefined;
@@ -428,11 +551,12 @@ export async function getSubagentTranscript(
 	if (!agentId) {
 		return [];
 	}
-	let messages;
-	try {
-		messages = await sdk.getSubagentMessages(parentSessionId, agentId);
-	} catch (err) {
-		logService.warn(`[getSubagentTranscript] getSubagentMessages(${agentId}) failed: ${err}`);
+	const messages = await readSubagentMessagesCapped(sdk, parentSessionId, agentId, logService, {
+		pageSize: CLAUDE_SUBAGENT_RESTORE_PAGE_SIZE,
+		maxMessages: CLAUDE_SUBAGENT_RESTORE_MAX_MESSAGES,
+		maxBytes: CLAUDE_SUBAGENT_RESTORE_MAX_BYTES,
+	});
+	if (messages.length === 0) {
 		return [];
 	}
 	return mapSessionMessagesToTurns(messages, subagentUri, logService);
