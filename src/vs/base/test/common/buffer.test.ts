@@ -592,6 +592,21 @@ suite('Buffer', () => {
 			}
 		});
 
+		test('decodes url-safe and unpadded base64', () => {
+			assert.deepStrictEqual(new Uint8Array(decodeBase64('YDaCTy-z').buffer), new Uint8Array([96, 54, 130, 79, 47, 179]));
+			assert.deepStrictEqual(new Uint8Array(decodeBase64('TQ').buffer), new Uint8Array([77]));
+			assert.deepStrictEqual(new Uint8Array(decodeBase64('5oo').buffer), new Uint8Array([230, 138]));
+		});
+
+		test('decodes a large payload without depending on a JS char loop', () => {
+			const bytes = new Uint8Array(64 * 1024);
+			for (let i = 0; i < bytes.length; i++) {
+				bytes[i] = i & 0xff;
+			}
+			const encoded = encodeBase64(VSBuffer.wrap(bytes));
+			assert.deepStrictEqual(new Uint8Array(decodeBase64(encoded).buffer), bytes);
+		});
+
 		test('encodes hex', () => {
 			for (const [bytes, , expected] of testCases) {
 				assert.strictEqual(encodeHex(VSBuffer.wrap(bytes)), expected);

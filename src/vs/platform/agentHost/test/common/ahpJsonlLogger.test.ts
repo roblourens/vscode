@@ -242,6 +242,11 @@ suite('AhpJsonlLogger', () => {
 		assert.ok(lines[1].length < 1024 * 1024);
 	});
 
+	test('getAhpLogByteLength uses the wire string length', () => {
+		const text = '{"jsonrpc":"2.0","result":{"data":"AQID"}}';
+		assert.strictEqual(getAhpLogByteLength(text), text.length);
+	});
+
 	suite('stringifyAhpLogEntry', () => {
 
 		test('serialises a top-level URI as its string form', () => {

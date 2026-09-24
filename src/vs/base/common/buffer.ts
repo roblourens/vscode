@@ -10,7 +10,11 @@ interface NodeBuffer {
 	allocUnsafe(size: number): Uint8Array;
 	isBuffer(obj: unknown): obj is NodeBuffer;
 	from(arrayBuffer: ArrayBufferLike, byteOffset?: number, length?: number): Uint8Array;
-	from(data: string): Uint8Array;
+	from(data: string, encoding?: string): Uint8Array;
+}
+
+interface Uint8ArrayBase64 {
+	fromBase64?(data: string, options?: { alphabet?: 'base64' | 'base64url' }): Uint8Array;
 }
 
 declare const Buffer: NodeBuffer;
@@ -362,8 +366,54 @@ export function prefixedBufferStream(prefix: VSBuffer, stream: VSBufferReadableS
 	return streams.prefixedStream(prefix, stream, chunks => VSBuffer.concat(chunks));
 }
 
+const INVALID_BASE64 = /[^A-Za-z0-9+/_=-]/;
+
 /** Decodes base64 to a uint8 array. URL-encoded and unpadded base64 is allowed. */
 export function decodeBase64(encoded: string) {
+	const native = tryDecodeBase64Native(encoded);
+	if (native !== undefined) {
+		return native;
+	}
+	return decodeBase64Manual(encoded);
+}
+
+/**
+ * Native decoders are dramatically faster than a JS loop on multi-MB Agent Host
+ * file responses (renderer main thread). `Uint8Array.fromBase64` is preferred
+ * when present (Chromium 140+); Node's `Buffer.from(..., 'base64')` is next.
+ */
+function tryDecodeBase64Native(encoded: string): VSBuffer | undefined {
+	const fromBase64 = (Uint8Array as Uint8ArrayConstructor & Uint8ArrayBase64).fromBase64;
+	if (typeof fromBase64 === 'function') {
+		try {
+			return VSBuffer.wrap(fromBase64(encoded, { alphabet: 'base64' }));
+		} catch {
+			if (encoded.indexOf('-') !== -1 || encoded.indexOf('_') !== -1) {
+				try {
+					return VSBuffer.wrap(fromBase64(encoded, { alphabet: 'base64url' }));
+				} catch {
+					// Invalid input should still throw SyntaxError via the paths below.
+				}
+			}
+		}
+	}
+
+	if (hasBuffer) {
+		const invalid = INVALID_BASE64.exec(encoded);
+		if (invalid) {
+			throw new SyntaxError(`Unexpected base64 character ${invalid[0]}`);
+		}
+		let normalized = encoded;
+		if (encoded.indexOf('-') !== -1 || encoded.indexOf('_') !== -1) {
+			normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+		}
+		return VSBuffer.wrap(Buffer.from(normalized, 'base64'));
+	}
+
+	return undefined;
+}
+
+function decodeBase64Manual(encoded: string) {
 	let building = 0;
 	let remainder = 0;
 	let bufi = 0;
@@ -420,8 +470,8 @@ export function decodeBase64(encoded: string) {
 		append(0);
 	}
 
-	// slice is needed to account for overestimation due to padding
-	return VSBuffer.wrap(buffer).slice(0, unpadded);
+	// subarray avoids allocating a second VSBuffer wrapper around the oversized buffer
+	return VSBuffer.wrap(unpadded === buffer.byteLength ? buffer : buffer.subarray(0, unpadded));
 }
 
 const base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';

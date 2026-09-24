@@ -16,7 +16,7 @@ import { Emitter } from '../../../base/common/event.js';
 import { Disposable, DisposableStore } from '../../../base/common/lifecycle.js';
 import { IntervalTimer, disposableTimeout } from '../../../base/common/async.js';
 import { AgentHostClientConnectionKind } from '../common/agentHostTelemetry.js';
-import { AhpJsonlLogger, getAhpLogByteLength } from '../common/ahpJsonlLogger.js';
+import { AhpJsonlLogger } from '../common/ahpJsonlLogger.js';
 import type { AhpServerNotification, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, ProtocolMessage } from '../common/state/sessionProtocol.js';
 import type { IClientTransport } from '../common/state/sessionTransport.js';
 import { Reassembler } from '../common/webPubSub/chunking.js';
@@ -268,7 +268,7 @@ export class WebPubSubRelayTransport extends Disposable implements IClientTransp
 		}
 		if (result.kind === 'payload') {
 			const payload = result.payload as ProtocolMessage;
-			this._options.ahpLogger?.log(payload, 's2c', getAhpLogByteLength(JSON.stringify(payload)));
+			this._options.ahpLogger?.log(payload, 's2c');
 			this._onMessage.fire(payload);
 		}
 	}
@@ -287,7 +287,7 @@ export class WebPubSubRelayTransport extends Disposable implements IClientTransp
 		}
 		// Logged before chunking, so the transcript carries whole AHP messages rather than the
 		// relay frames they were split into.
-		this._options.ahpLogger?.log(message, 'c2s', getAhpLogByteLength(JSON.stringify(message)));
+		this._options.ahpLogger?.log(message, 'c2s');
 		const frames = buildPublish({
 			group: this._options.toHostGroup,
 			nextAckId: () => ++this._ackId,

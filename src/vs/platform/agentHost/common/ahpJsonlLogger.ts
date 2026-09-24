@@ -100,16 +100,20 @@ export class AhpJsonlLogger extends Disposable {
 			...(typeof byteLength === 'number' ? { byteLength } : {}),
 		};
 		const entry = { ...message, _ahpLog: meta };
-		// Fast path: serialize once. The vast majority of messages are small, so
-		// we only pay a single stringify and use its length to decide whether the
-		// rare oversized-message path below is needed.
-		let body = stringifyAhpLogEntry(entry);
-		if (body.length > MAX_LOG_LINE_LENGTH) {
-			// Slow path (rare): a single message carried very large payloads. Walk
-			// the object via a replacer that elides long string values, keeping the
-			// line valid JSONL instead of writing/holding the full multi-MB payload.
+		// A `resourceRead` file response can carry multi-MB base64. Serializing
+		// that in full (then throwing it away to truncate) freezes the renderer.
+		// If any string already exceeds the line cap, skip straight to the
+		// truncating replacer. Small messages still stringify once.
+		let body: string;
+		if (ahpLogEntryHasOversizedString(entry, MAX_LOG_LINE_LENGTH)) {
 			meta.truncated = true;
 			body = stringifyAhpLogEntryTruncated(entry, MAX_LOGGED_STRING_LENGTH);
+		} else {
+			body = stringifyAhpLogEntry(entry);
+			if (body.length > MAX_LOG_LINE_LENGTH) {
+				meta.truncated = true;
+				body = stringifyAhpLogEntryTruncated(entry, MAX_LOGGED_STRING_LENGTH);
+			}
 		}
 		const line = `${body}\n`;
 		this._pending.push(VSBuffer.fromString(line));
@@ -214,7 +218,10 @@ export class AhpJsonlLogger extends Disposable {
 }
 
 export function getAhpLogByteLength(text: string): number {
-	return VSBuffer.fromString(text).byteLength;
+	// Don't allocate a UTF-8 VSBuffer copy of large JSON-RPC frames (e.g. a
+	// base64 `resourceRead` result) just to read `byteLength`. Wire text is
+	// overwhelmingly ASCII, so the JS string length is the size the log needs.
+	return text.length;
 }
 
 /** Tests whether a JSONL filename belongs to the given logical Agent Host connection. */
@@ -240,6 +247,33 @@ function stringifyAhpLogEntryTruncated(value: unknown, maxStringLength: number):
 		}
 		return revived;
 	});
+}
+
+/**
+ * Cheap pre-check: `string.length` is O(1), so walking the message for a
+ * multi-MB payload is far cheaper than `JSON.stringify` of that payload.
+ */
+function ahpLogEntryHasOversizedString(value: unknown, maxStringLength: number): boolean {
+	if (typeof value === 'string') {
+		return value.length > maxStringLength;
+	}
+	if (!value || typeof value !== 'object') {
+		return false;
+	}
+	if (Array.isArray(value)) {
+		for (let i = 0, len = value.length; i < len; i++) {
+			if (ahpLogEntryHasOversizedString(value[i], maxStringLength)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	for (const key of Object.keys(value)) {
+		if (ahpLogEntryHasOversizedString((value as Record<string, unknown>)[key], maxStringLength)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
