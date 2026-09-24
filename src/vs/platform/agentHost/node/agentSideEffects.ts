@@ -25,15 +25,17 @@ import { AgentHostLaunchKind, createUnknownAgentHostClientTelemetryContext, type
 import { AgentSession, AgentSignal, IAgent, IAgentChatContext, IAgentToolPendingConfirmationSignal, type AgentSubagentTaskModelSource, type IAgentModelCallCompletedSignal, type IAgentModelCallFinishedSignal } from '../common/agent.js';
 import { isPresentationOnlyToolCall, readToolCallMeta, toToolCallMeta } from '../common/meta/agentToolCallMeta.js';
 import { isAgentMergeMessage } from '../common/meta/agentMergeMessageMeta.js';
+import { isChatInputRequestWithPlanReview } from '../common/agentHostPlanReview.js';
+import { ChatInputRequestPurpose, readChatInputRequestPurpose } from '../common/meta/agentChatInputRequestMeta.js';
 
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { ISessionDataService } from '../common/sessionDataService.js';
 import { SessionConfigKey } from '../common/sessionConfigKeys.js';
 import { resolveChatAttachment } from '../common/state/chatAttachmentContext.js';
 import { buildOpenSessionLinkForChatResource } from '../common/openSessionLink.js';
-import { McpServerStatus, ToolCallContributorKind, type AgentInfo, type SessionActiveClient } from '../common/state/protocol/state.js';
+import { ChatInputResponseKind, McpServerStatus, ToolCallContributorKind, type AgentInfo, type SessionActiveClient } from '../common/state/protocol/state.js';
 import type { CustomizationEnablement } from '../common/state/protocol/channels-session/state.js';
-import { ActionType, isChatAction, StateAction, type ChatDeltaAction, type ChatReasoningAction, type ChatResponsePartAction, type ChatToolCallCompleteAction, type ChatToolCallStartAction, type ChatTurnStartedAction } from '../common/state/sessionActions.js';
+import { ActionType, isChatAction, StateAction, type ChatDeltaAction, type ChatInputCompletedAction, type ChatReasoningAction, type ChatResponsePartAction, type ChatToolCallCompleteAction, type ChatToolCallStartAction, type ChatTurnStartedAction } from '../common/state/sessionActions.js';
 import {
 	buildSubagentChatUri,
 	createErrorResponsePart,
@@ -66,6 +68,7 @@ import {
 	type ToolResultContent,
 	type Turn,
 	type UsageInfo,
+	type ChatInputRequest,
 	type Customization,
 	type McpServerCustomization,
 	type PluginCustomization
@@ -395,6 +398,46 @@ export class AgentSideEffects extends Disposable {
 				...(envelope.rejectionReason !== undefined ? { rejectionReason: envelope.rejectionReason } : {}),
 			});
 		}));
+	}
+
+	/**
+	 * Completes a blocked chat input request. Plan-review approval continues
+	 * the same Copilot SDK turn rather than starting a new send, so the picker
+	 * model is applied from the chat draft before the provider resumes.
+	 */
+	private _respondToCompletedInput(
+		chatChannel: ProtocolURI,
+		sessionChannel: ProtocolURI,
+		action: ChatInputCompletedAction,
+		clientContext: IAgentHostClientTelemetryContext,
+	): void {
+		const agent = this._options.getAgent(sessionChannel);
+		const respond = () => agent?.respondToUserInputRequest(action.requestId, action.response, action.answers);
+		if (!agent || action.response !== ChatInputResponseKind.Accept) {
+			respond();
+			return;
+		}
+
+		const chatState = this._stateManager.getChatState(chatChannel);
+		const requestPart = chatState?.activeTurn?.responseParts.find(part => part.kind === ResponsePartKind.InputRequest && part.request.id === action.requestId);
+		const request = requestPart?.kind === ResponsePartKind.InputRequest ? requestPart.request : undefined;
+		const selectedModel = chatState?.draft?.model;
+		if (!selectedModel || !isPlanReviewInputRequest(request)) {
+			respond();
+			return;
+		}
+
+		const operationContext = {
+			...this._chatContext(sessionChannel, chatChannel),
+			clientTelemetryContext: clientContext,
+		};
+		void agent.chats.changeModel(URI.parse(chatChannel), selectedModel, operationContext).then(
+			() => respond(),
+			err => {
+				this._logService.error('[AgentSideEffects] changeModel failed before plan-review continuation', err);
+				respond();
+			},
+		);
 	}
 
 	private _chatContext(session: ProtocolURI, chat: ProtocolURI): IAgentChatContext {
@@ -1573,8 +1616,7 @@ export class AgentSideEffects extends Disposable {
 				if (!chatChannel) {
 					throw new Error(`ChatInputCompleted must be handled on an AHP chat channel: ${channel}`);
 				}
-				const agent = this._options.getAgent(sessionChannel);
-				agent?.respondToUserInputRequest(action.requestId, action.response, action.answers);
+				this._respondToCompletedInput(chatChannel, sessionChannel, action, clientContext);
 				break;
 			}
 			case ActionType.ChatTurnCancelled: {
@@ -2130,6 +2172,17 @@ function isSubstantiveResponsePart(part: ResponsePart): boolean {
 		case ResponsePartKind.Error:
 			return false;
 	}
+}
+
+/**
+ * Plan-review input is classified either by purpose metadata or by the
+ * `planReview` payload Copilot attaches to the request.
+ */
+function isPlanReviewInputRequest(request: ChatInputRequest | undefined): boolean {
+	return !!request && (
+		readChatInputRequestPurpose(request) === ChatInputRequestPurpose.PlanReview
+		|| isChatInputRequestWithPlanReview(request)
+	);
 }
 
 /**

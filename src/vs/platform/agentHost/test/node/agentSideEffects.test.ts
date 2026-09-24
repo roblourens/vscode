@@ -3376,6 +3376,167 @@ suite('AgentSideEffects', () => {
 		});
 	});
 
+	suite('handleAction — chat/inputCompleted plan-review model selection', () => {
+
+		function requestPlanReview(requestId = 'plan-1'): void {
+			stateManager.dispatchServerAction(defaultChatUri, {
+				type: ActionType.ChatInputRequested,
+				request: withChatInputRequestPurpose({
+					id: requestId,
+					questions: [{ kind: ChatInputQuestionKind.SingleSelect, id: 'action', message: 'How would you like to proceed?', options: [{ id: 'interactive', label: 'Implement Plan' }] }],
+				}, ChatInputRequestPurpose.PlanReview),
+			});
+		}
+
+		function setDraftModel(modelId: string): void {
+			stateManager.dispatchClientAction(defaultChatUri, {
+				type: ActionType.ChatDraftChanged,
+				draft: { text: '', origin: { kind: MessageKind.User }, model: { id: modelId } },
+			}, { clientId: 'test', clientSeq: 2 });
+		}
+
+		function completePlanReview(requestId = 'plan-1', response: ChatInputResponseKind = ChatInputResponseKind.Accept): void {
+			sideEffects.handleAction(defaultChatUri, {
+				type: ActionType.ChatInputCompleted,
+				requestId,
+				response,
+				...(response === ChatInputResponseKind.Accept ? {
+					answers: {
+						action: {
+							state: ChatInputAnswerState.Submitted,
+							value: { kind: ChatInputAnswerValueKind.Selected, value: 'interactive' },
+						},
+					},
+				} : {}),
+			});
+		}
+
+		test('applies the draft model before continuing a plan-review implementation', async () => {
+			setupSession();
+			startTurn('turn-1');
+			requestPlanReview();
+			setDraftModel('gpt-6-luna');
+
+			completePlanReview();
+			await new Promise(r => setTimeout(r, 10));
+
+			assert.deepStrictEqual({
+				changeModelCalls: agent.changeModelCalls.map(call => ({
+					session: call.session.toString(),
+					model: call.model,
+					chat: call.chat?.toString(),
+				})),
+				respondToUserInputCalls: agent.respondToUserInputCalls,
+			}, {
+				changeModelCalls: [{ session: sessionUri.toString(), model: { id: 'gpt-6-luna' }, chat: defaultChatUri }],
+				respondToUserInputCalls: [{
+					requestId: 'plan-1',
+					response: ChatInputResponseKind.Accept,
+					answers: {
+						action: {
+							state: ChatInputAnswerState.Submitted,
+							value: { kind: ChatInputAnswerValueKind.Selected, value: 'interactive' },
+						},
+					},
+				}],
+			});
+		});
+
+		test('waits for model selection before responding to plan-review', async () => {
+			setupSession();
+			startTurn('turn-1');
+			requestPlanReview();
+			setDraftModel('gpt-6-luna');
+
+			let resolveChangeModel!: () => void;
+			const changeModelSettled = new Promise<void>(resolve => { resolveChangeModel = resolve; });
+			agent.changeModel = async (session, model, chat) => {
+				agent.changeModelCalls.push({ session, model, chat });
+				await changeModelSettled;
+			};
+
+			completePlanReview();
+			await Promise.resolve();
+
+			assert.deepStrictEqual({
+				changeModelCalls: agent.changeModelCalls.map(call => call.model),
+				respondToUserInputCalls: agent.respondToUserInputCalls,
+			}, {
+				changeModelCalls: [{ id: 'gpt-6-luna' }],
+				respondToUserInputCalls: [],
+			});
+
+			resolveChangeModel();
+			await new Promise(r => setTimeout(r, 10));
+
+			assert.strictEqual(agent.respondToUserInputCalls.length, 1);
+			assert.strictEqual(agent.respondToUserInputCalls[0].requestId, 'plan-1');
+		});
+
+		test('does not change the model for a declined plan-review', async () => {
+			setupSession();
+			startTurn('turn-1');
+			requestPlanReview();
+			setDraftModel('gpt-6-luna');
+
+			completePlanReview('plan-1', ChatInputResponseKind.Decline);
+			await new Promise(r => setTimeout(r, 10));
+
+			assert.deepStrictEqual({
+				changeModelCalls: agent.changeModelCalls,
+				respondToUserInputCalls: agent.respondToUserInputCalls.map(call => ({ requestId: call.requestId, response: call.response })),
+			}, {
+				changeModelCalls: [],
+				respondToUserInputCalls: [{ requestId: 'plan-1', response: ChatInputResponseKind.Decline }],
+			});
+		});
+
+		test('does not change the model for non-plan-review input', async () => {
+			setupSession();
+			startTurn('turn-1');
+			stateManager.dispatchServerAction(defaultChatUri, {
+				type: ActionType.ChatInputRequested,
+				request: withChatInputRequestPurpose({
+					id: 'ask-1',
+					questions: [{ kind: ChatInputQuestionKind.Text, id: 'question-1', message: 'Which value?' }],
+				}, ChatInputRequestPurpose.AskUser),
+			});
+			setDraftModel('gpt-6-luna');
+
+			sideEffects.handleAction(defaultChatUri, {
+				type: ActionType.ChatInputCompleted,
+				requestId: 'ask-1',
+				response: ChatInputResponseKind.Accept,
+			});
+			await new Promise(r => setTimeout(r, 10));
+
+			assert.deepStrictEqual({
+				changeModelCalls: agent.changeModelCalls,
+				respondToUserInputCalls: agent.respondToUserInputCalls.map(call => call.requestId),
+			}, {
+				changeModelCalls: [],
+				respondToUserInputCalls: ['ask-1'],
+			});
+		});
+
+		test('continues plan-review without a draft model', async () => {
+			setupSession();
+			startTurn('turn-1');
+			requestPlanReview();
+
+			completePlanReview();
+			await new Promise(r => setTimeout(r, 10));
+
+			assert.deepStrictEqual({
+				changeModelCalls: agent.changeModelCalls,
+				respondToUserInputCalls: agent.respondToUserInputCalls.map(call => call.requestId),
+			}, {
+				changeModelCalls: [],
+				respondToUserInputCalls: ['plan-1'],
+			});
+		});
+	});
+
 	// ---- handleAction: chat/turnStarted agent selection --------------------
 
 	suite('handleAction — chat/turnStarted agent selection', () => {

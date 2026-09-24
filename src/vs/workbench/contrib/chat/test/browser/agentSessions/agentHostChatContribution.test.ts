@@ -6294,6 +6294,71 @@ suite('AgentHostChatContribution', () => {
 			await turnPromise;
 		}));
 
+		test('plan-review approval flushes the currently selected model onto the chat draft', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
+			const modelMetadata = upcastPartial<ILanguageModelChatMetadata>({ id: 'gpt-6-luna', name: 'GPT-6-Luna' });
+			const { sessionHandler, agentHostService, chatAgentService, chatService } = createContribution(disposables, {
+				languageModels: new Map([['agent-host-copilot:gpt-6-luna', modelMetadata]]),
+			});
+			const sessionResource = URI.from({ scheme: 'agent-host-copilot', path: '/new-turntest' });
+			const inputState = observableValue<IChatModelInputState | undefined>('test.inputState', {
+				attachments: [],
+				mode: { id: 'agent', kind: ChatModeKind.Agent },
+				selectedModel: { identifier: 'agent-host-copilot:gpt-6-luna', metadata: modelMetadata },
+				inputText: '',
+				selections: [],
+				contrib: {},
+			});
+			const { turnPromise, collected, turnId, fire } = await startTurn(sessionHandler, agentHostService, chatAgentService, disposables, { sessionResource });
+			chatService.setSession(sessionResource, upcastPartial<IChatModel>({
+				sessionResource,
+				inputModel: upcastPartial<IInputModel>({
+					state: inputState,
+					setState(): void { /* unused */ },
+					clearState(): void { /* unused */ },
+					toJSON: () => undefined,
+				}),
+				onDidChangePendingRequests: Event.None,
+				getPendingRequests: () => [],
+			}));
+
+			const request: ChatInputRequestWithPlanReview = {
+				id: 'plan-1',
+				planReview: {
+					title: 'Review Plan',
+					content: 'Plan',
+					canProvideFeedback: true,
+					answerQuestionId: 'action',
+					actions: [{ id: 'interactive', label: 'Implement Plan', default: true }],
+				},
+				questions: [{ kind: ChatInputQuestionKind.SingleSelect, id: 'action', message: 'How?', options: [{ id: 'interactive', label: 'Implement Plan' }] }],
+			};
+			fire({ type: ActionType.ChatInputRequested, request } as ChatAction);
+			await timeout(10);
+
+			const review = collected.flat().find(part => part.kind === 'planReview') as ChatPlanReviewData;
+			assert.ok(review);
+			agentHostService.dispatchedActions.length = 0;
+			review.completion.complete({ rejected: false, action: 'Implement Plan', actionId: 'interactive' });
+			await timeout(10);
+
+			assert.deepStrictEqual(agentHostService.dispatchedActions.map(d => d.action.type), [
+				ActionType.ChatDraftChanged,
+				ActionType.ChatInputCompleted,
+			]);
+			const draftAction = agentHostService.dispatchedActions.find(d => d.action.type === ActionType.ChatDraftChanged)?.action;
+			assert.deepStrictEqual(draftAction, {
+				type: ActionType.ChatDraftChanged,
+				draft: {
+					text: '',
+					origin: { kind: MessageKind.User },
+					model: { id: 'gpt-6-luna' },
+				},
+			});
+
+			fire({ type: ActionType.ChatTurnComplete, turnId, endedAt: '2025-01-01T00:00:00.000Z' } as ChatAction);
+			await turnPromise;
+		}));
+
 		test('plan-review feedback dispatches accepted text answer for revision', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 			const { sessionHandler, agentHostService, chatAgentService } = createContribution(disposables);
 			const { turnPromise, collected, turnId, fire } = await startTurn(sessionHandler, agentHostService, chatAgentService, disposables);

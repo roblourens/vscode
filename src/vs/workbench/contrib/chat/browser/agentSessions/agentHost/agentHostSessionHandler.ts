@@ -4757,6 +4757,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			const completion = result
 				? convertPlanReviewResult(planReview, result)
 				: { response: ChatInputResponseKind.Cancel };
+			this._flushSelectedModelDraft(opts.sessionResource, opts.chatURI);
 			this._config.connection.dispatch(opts.chatURI, {
 				type: ActionType.ChatInputCompleted,
 				requestId: inputReq.id,
@@ -5872,6 +5873,24 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 		} finally {
 			waitStore.dispose();
 		}
+	}
+
+	/**
+	 * Publishes the currently selected picker model onto the chat draft before
+	 * plan-review completion. Draft sync is debounced, so a picker change
+	 * immediately before proceeding with implementation would otherwise not
+	 * reach the session in time for the continuation turn.
+	 */
+	private _flushSelectedModelDraft(sessionResource: URI, chatURI: string): void {
+		const inputState = this._chatService.getSession(sessionResource)?.inputModel?.state.get();
+		const draft = this._inputStateToDraft(sessionResource, inputState);
+		if (!draft?.model) {
+			return;
+		}
+		this._config.connection.dispatch(chatURI, {
+			type: ActionType.ChatDraftChanged,
+			draft,
+		});
 	}
 
 	private _installDraftSync(sessionResource: URI, chatModel: IChatModel, backendSession: URI, chatKey: string, store: DisposableStore): void {
