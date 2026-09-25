@@ -8,7 +8,7 @@ import { Event } from '../../../../../../base/common/event.js';
 import type { IChannel } from '../../../../../../base/parts/ipc/common/ipc.js';
 import { mock } from '../../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
-import { IRemoteAgentHostConnectionFactory, IRemoteAgentHostService, RemoteAgentHostsEnabledSettingId } from '../../../../../../platform/agentHost/common/remoteAgentHostService.js';
+import { IRemoteAgentHostConnectionFactory, IRemoteAgentHostEntry, IRemoteAgentHostService, RemoteAgentHostEntryType, RemoteAgentHostsEnabledSettingId } from '../../../../../../platform/agentHost/common/remoteAgentHostService.js';
 import { IRemoteAgentHostLocationPreferenceService } from '../../../../../../platform/agentHost/common/remoteAgentHostLocationPreference.js';
 import { ITunnelGatewayInventory } from '../../../../../../platform/agentHost/common/tunnelAgentHost.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
@@ -44,7 +44,14 @@ const secondStandaloneEndpoint = { type: 'standalone', pid: 333, instanceId: 'st
 suite('TunnelAgentHostService discovery', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function createService(getSessions: (provider: string) => readonly AuthenticationSession[], channel: IChannel = new class extends mock<IChannel>() { }()): TunnelAgentHostService {
+	function createService(
+		getSessions: (provider: string) => readonly AuthenticationSession[],
+		channel: IChannel = new class extends mock<IChannel>() { }(),
+		extras: {
+			createSession?: (providerId: string) => Promise<AuthenticationSession>;
+			onFactory?: (factory: IRemoteAgentHostConnectionFactory) => void;
+		} = {},
+	): TunnelAgentHostService {
 		const instantiationService = store.add(new TestInstantiationService());
 		instantiationService.stub(ISharedProcessService, new class extends mock<ISharedProcessService>() {
 			override getChannel(): IChannel {
@@ -53,7 +60,8 @@ suite('TunnelAgentHostService discovery', () => {
 		}());
 		instantiationService.stub(IRemoteAgentHostService, new class extends mock<IRemoteAgentHostService>() {
 			override readonly onDidChangeConnections = Event.None;
-			override registerConnectionFactory(_factory: IRemoteAgentHostConnectionFactory) {
+			override registerConnectionFactory(factory: IRemoteAgentHostConnectionFactory) {
+				extras.onFactory?.(factory);
 				return { dispose() { } };
 			}
 		}());
@@ -62,6 +70,12 @@ suite('TunnelAgentHostService discovery', () => {
 		instantiationService.stub(IAuthenticationService, new class extends mock<IAuthenticationService>() {
 			override async getSessions(provider: string): Promise<readonly AuthenticationSession[]> {
 				return getSessions(provider);
+			}
+			override async createSession(providerId: string): Promise<AuthenticationSession> {
+				if (!extras.createSession) {
+					throw new Error(`Unexpected interactive createSession for ${providerId}`);
+				}
+				return extras.createSession(providerId);
 			}
 		}());
 		instantiationService.stub(IProductService, {
@@ -74,7 +88,11 @@ suite('TunnelAgentHostService discovery', () => {
 		});
 		instantiationService.stub(IStorageService, store.add(new InMemoryStorageService()));
 		instantiationService.stub(IEnvironmentService, new class extends mock<IEnvironmentService>() { }());
-		instantiationService.stub(IRemoteAgentHostLocationPreferenceService, new class extends mock<IRemoteAgentHostLocationPreferenceService>() { }());
+		instantiationService.stub(IRemoteAgentHostLocationPreferenceService, new class extends mock<IRemoteAgentHostLocationPreferenceService>() {
+			override getPreference() {
+				return undefined;
+			}
+		}());
 		instantiationService.stub(IDialogService, new class extends mock<IDialogService>() { }());
 		instantiationService.stub(INotificationService, new class extends mock<INotificationService>() { }());
 		return store.add(instantiationService.createInstance(TunnelAgentHostService));
@@ -122,6 +140,67 @@ suite('TunnelAgentHostService discovery', () => {
 		await service.getAuthProvider({ silent: true });
 
 		await assert.rejects(service.listTunnels({ silent: true, authProvider: 'github' }), /No authentication is available to enumerate tunnels/);
+	});
+
+	test('keeps authentication silent when reconciling a prompt-mode cached tunnel', async () => {
+		const createdSessions: string[] = [];
+		let factory: IRemoteAgentHostConnectionFactory | undefined;
+		const service = createService(() => [], new class extends mock<IChannel>() { }(), {
+			createSession: async providerId => {
+				createdSessions.push(providerId);
+				return { id: providerId, accessToken: `${providerId}-token`, scopes: ['tunnel'], account: { id: providerId, label: providerId } };
+			},
+			onFactory: registered => { factory = registered; },
+		});
+		const tunnel = { tunnelId: 'cached-1', clusterId: 'cluster', name: 'Cached', tags: [], protocolVersion: 6, hostConnectionCount: 0 };
+		service.cacheTunnel(tunnel, 'github');
+		assert.strictEqual(service.getAutoConnectMode(tunnel), 'prompt');
+		assert.ok(factory);
+
+		const entry: IRemoteAgentHostEntry = {
+			name: tunnel.name,
+			connection: {
+				type: RemoteAgentHostEntryType.Tunnel,
+				tunnelId: tunnel.tunnelId,
+				clusterId: tunnel.clusterId,
+				label: tunnel.name,
+				authProvider: 'github',
+			},
+		};
+		await assert.rejects(factory.createConnection(entry, { userInitiated: false }), /No cached authentication available to connect the tunnel/);
+		assert.deepStrictEqual(createdSessions, []);
+	});
+
+	test('prompts for authentication on an explicit user connect when no session is cached', async () => {
+		const createdSessions: string[] = [];
+		let factory: IRemoteAgentHostConnectionFactory | undefined;
+		const service = createService(() => [], new class extends mock<IChannel>() {
+			override async call(): Promise<never> {
+				throw new Error('tunnel IPC is not stubbed');
+			}
+		}(), {
+			createSession: async providerId => {
+				createdSessions.push(providerId);
+				return { id: providerId, accessToken: `${providerId}-token`, scopes: ['tunnel'], account: { id: providerId, label: providerId } };
+			},
+			onFactory: registered => { factory = registered; },
+		});
+		const tunnel = { tunnelId: 'cached-2', clusterId: 'cluster', name: 'Cached', tags: [], protocolVersion: 6, hostConnectionCount: 0 };
+		service.cacheTunnel(tunnel, 'github');
+		assert.ok(factory);
+
+		const entry: IRemoteAgentHostEntry = {
+			name: tunnel.name,
+			connection: {
+				type: RemoteAgentHostEntryType.Tunnel,
+				tunnelId: tunnel.tunnelId,
+				clusterId: tunnel.clusterId,
+				label: tunnel.name,
+				authProvider: 'github',
+			},
+		};
+		await assert.rejects(factory.createConnection(entry, { userInitiated: true }));
+		assert.deepStrictEqual(createdSessions, ['github']);
 	});
 });
 

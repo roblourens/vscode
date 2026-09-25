@@ -264,12 +264,14 @@ export class TunnelAgentHostService extends Disposable implements ITunnelAgentHo
 			protocolVersion: cachedTunnel?.protocolVersion ?? TUNNEL_MIN_PROTOCOL_VERSION,
 			hostConnectionCount: 0,
 		};
+		// Gateway selection may prompt when no location preference is saved, but
+		// authentication stays silent unless this connect was user-initiated.
 		const connectOptions = this.getAutoConnectMode(tunnel) === 'prompt'
 			? { ...options, userInitiated: true }
 			: options;
 		const auth = authProvider
-			? await this._getTokenForProvider(authProvider, !connectOptions.userInitiated)
-			: await this._getToken(!connectOptions.userInitiated);
+			? await this._getTokenForProvider(authProvider, !options.userInitiated)
+			: await this._getToken(!options.userInitiated);
 		if (!auth) {
 			throw new NonReconnectableTransportError('No cached authentication available to connect the tunnel.');
 		}
