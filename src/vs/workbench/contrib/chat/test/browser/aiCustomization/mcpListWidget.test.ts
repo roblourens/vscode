@@ -662,6 +662,29 @@ suite('mcpListWidget', () => {
 		]);
 	});
 
+	test('lifecycle start follows the current row server instead of a captured slack-github target', async () => {
+		const starts: string[] = [];
+		const slack = createAgentHostServer({
+			id: 'slack-github',
+			name: 'Slack',
+			status: McpServerStatus.Stopped,
+			start: () => { starts.push('slack-github'); return Promise.resolve(); },
+		});
+		const figma = createAgentHostServer({
+			id: 'figma',
+			name: 'Figma',
+			status: McpServerStatus.Stopped,
+			start: () => { starts.push('figma'); return Promise.resolve(); },
+		});
+		let current: AgentHostMcpServer | undefined = slack;
+		const action = getActiveSessionServerLifecycleAction(slack, () => current);
+		assert.ok(action);
+		disposables.add(action);
+		current = figma;
+		await action.run();
+		assert.deepStrictEqual(starts, ['figma']);
+	});
+
 	test('uses active-session enablement for both the row and built-in context menu', () => {
 		const sessionResource = URI.parse('vscode-agent-session:///session-1');
 		const server = createAgentHostServer({
@@ -1100,12 +1123,16 @@ suite('mcpListWidget', () => {
 			let localEnablementCalls: [string, ContributionEnablementState][] = [];
 			let menuActions: IAction[] = [];
 			const hoverContents = new Map<HTMLElement, IManagedHoverContent>();
+			const authentications: Array<{ resource: string; serverId: string }> = [];
 
 			const agentHostCustomizationService = {
 				getMcpServers: () => servers,
 				onDidChangeCustomizations: onDidChangeCustomizations.event,
 				showMcpServerLog: async (resource: URI, serverId: string) => { shownLogs.push(serverId); shownLogSessions.push(resource.toString()); },
-				authenticateMcpServer: authenticate,
+				authenticateMcpServer: async (resource: URI, serverId: string) => {
+					authentications.push({ resource: resource.toString(), serverId });
+					return authenticate(resource, serverId);
+				},
 				getWorkingDirectories: () => [],
 				setCustomizationEnablement: (...args: Parameters<IAgentHostCustomizationService['setCustomizationEnablement']>) => { hostEnablementCalls.push(args); },
 			} as unknown as IAgentHostCustomizationService;
@@ -1208,6 +1235,7 @@ suite('mcpListWidget', () => {
 				openedPlugins,
 				openedExtensions,
 				hostEnablementCalls,
+				authentications,
 				localEnablementCalls: () => localEnablementCalls,
 				menuActions: () => menuActions,
 				activeSessionResource,
@@ -1244,11 +1272,26 @@ suite('mcpListWidget', () => {
 					});
 					return widget.getMcpServerActions(entry, store);
 				},
-				render: (entry: Entry = createBuiltinActiveSessionMcpEntries([server])[0]) => {
-					renderer.renderElement(entry, 0, templateData);
+				render: (entry: Entry = createBuiltinActiveSessionMcpEntries([server])[0], template = templateData) => {
+					renderer.renderElement(entry, 0, template);
 					renderer.setFocusedRowKey(getMcpRowKey(entry));
+					if (template !== templateData) {
+						return;
+					}
 					const label = widget.getMcpEntryAriaLabel(entry);
 					ariaSubscription.value = autorun(reader => { ariaLabel = label.read(reader); });
+				},
+				addTemplate: () => {
+					const container = document.createElement('div');
+					container.style.cssText = 'width: 600px; --vscode-fontSize-body1: 13px; --vscode-fontSize-body2: 11px;';
+					const template = renderer.renderTemplate(container);
+					store.add({ dispose: () => renderer.disposeTemplate(template) });
+					return template;
+				},
+				disposeRow: (template = templateData) => {
+					if (template.currentElement) {
+						renderer.disposeElement(template.currentElement, 0, template);
+					}
 				},
 				renderInstalledRow: (parent: HTMLElement, entry: Entry) => widget.appendInstalledServerRow(parent, { entry }),
 				read: () => ({
@@ -2151,6 +2194,78 @@ suite('mcpListWidget', () => {
 			ctx.notifyUnchanged();
 
 			assert.notStrictEqual(ctx.actionNode(), button, 'the actions were not rebuilt for a changed status');
+		});
+
+		test('sign-in on a Figma row authenticates Figma after recycling a slack-github row', async () => {
+			const starts: string[] = [];
+			const authRequired = (id: string, name: string, resource: string): AgentHostMcpServer => createAgentHostServer({
+				id,
+				name,
+				status: McpServerStatus.AuthRequired,
+				state: {
+					kind: McpServerStatus.AuthRequired,
+					reason: McpAuthRequiredReason.Required,
+					resource: { resource },
+				},
+				start: () => { starts.push(id); return Promise.resolve(); },
+			});
+			const figma = authRequired('figma', 'Figma', 'https://mcp.figma.com');
+			const slackStopped = createAgentHostServer({
+				id: 'slack-github',
+				name: 'Slack',
+				status: McpServerStatus.Stopped,
+				state: { kind: McpServerStatus.Stopped },
+				start: () => { starts.push('slack-github'); return Promise.resolve(); },
+			});
+			const ctx = createRenderer(slackStopped, true, true);
+			disposables.add(ctx.store);
+			ctx.setServers([figma, slackStopped]);
+			const slackTemplate = ctx.templateData;
+			const figmaTemplate = ctx.addTemplate();
+			document.body.appendChild(slackTemplate.container);
+			document.body.appendChild(figmaTemplate.container);
+			disposables.add({ dispose: () => { slackTemplate.container.remove(); figmaTemplate.container.remove(); } });
+
+			const slackEntry: Entry = { type: 'session-server-item', server: slackStopped };
+			const figmaEntry: Entry = { type: 'session-server-item', server: figma };
+			ctx.menu(slackEntry);
+			ctx.render(slackEntry, slackTemplate);
+			ctx.render(figmaEntry, figmaTemplate);
+
+			const slackStarting = createAgentHostServer({
+				id: 'slack-github',
+				name: 'Slack',
+				status: McpServerStatus.Starting,
+				state: { kind: McpServerStatus.Starting },
+				start: slackStopped.start,
+			});
+			ctx.setServers([figma, slackStarting]);
+			ctx.notifyUnchanged();
+
+			const slackAuth = authRequired('slack-github', 'Slack', 'https://slack.example.com');
+			ctx.setServers([figma, slackAuth]);
+			ctx.notifyUnchanged();
+
+			ctx.disposeRow(slackTemplate);
+			ctx.render(figmaEntry, slackTemplate);
+			ctx.disposeRow(figmaTemplate);
+			ctx.render({ type: 'session-server-item', server: slackAuth }, figmaTemplate);
+
+			const figmaRow = [slackTemplate, figmaTemplate].find(template => template.name.textContent === 'Figma');
+			assert.ok(figmaRow, 'expected a visible Figma row');
+			const signIn = figmaRow.actions.querySelector<HTMLElement>('.mcp-server-sign-in');
+			assert.ok(signIn, 'expected Sign In on the Figma row');
+			signIn.click();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.deepStrictEqual({
+				authentications: ctx.authentications.map(call => call.serverId),
+				starts,
+			}, {
+				authentications: ['figma'],
+				starts: [],
+			});
 		});
 	});
 

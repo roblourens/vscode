@@ -490,7 +490,10 @@ export class McpServerItemRenderer extends Disposable implements IListRenderer<I
 			return;
 		}
 
-		const getEntry = () => resolveMcpEntry(currentEntry, this.agentHostCustomizationService, activeSessionResource);
+		const getEntry = () => {
+			const row = templateData.currentElement;
+			return row ? resolveMcpEntry(row, this.agentHostCustomizationService, this.customizationHarnessService.activeSessionResource.get()) : undefined;
+		};
 		if (!presentation) {
 			this._renderManagementActions(getEntry, templateData.actions, templateData.actionDisposables, () => this.updateActionsTabbability(templateData));
 			this.updateActionsTabbability(templateData);
@@ -499,7 +502,14 @@ export class McpServerItemRenderer extends Disposable implements IListRenderer<I
 
 		if (state === McpServerStatus.AuthRequired && activeSessionServer !== undefined) {
 			const signInButton = createMcpSignInButton(templateData.actions, templateData.actionDisposables, label);
-			registerMcpSignInButtonAction(templateData.actionDisposables, signInButton, label, () => authenticateMcpServer(this.agentHostCustomizationService, activeSessionResource, activeSessionServer.id), {
+			registerMcpSignInButtonAction(templateData.actionDisposables, signInButton, label, () => {
+				const current = getEntry();
+				const server = current && getActiveSessionServer(current);
+				if (!server) {
+					return Promise.resolve(false);
+				}
+				return authenticateMcpServer(this.agentHostCustomizationService, this.customizationHarnessService.activeSessionResource.get(), server.id);
+			}, {
 				updateTabbability: () => this.updateActionsTabbability(templateData),
 			});
 		}
@@ -1053,24 +1063,28 @@ export function hasSameMcpMembership(previous: string, current: string): boolean
 	return previous === current;
 }
 
-export function getActiveSessionServerLifecycleAction(server: AgentHostMcpServer): Action | undefined {
+export function getActiveSessionServerLifecycleAction(server: AgentHostMcpServer, getServer: () => AgentHostMcpServer | undefined = () => server): Action | undefined {
 	if (!getActiveSessionServerPresentation(server).enabled) {
 		return undefined;
 	}
+	const run = (op: 'start' | 'stop') => {
+		const current = getServer() ?? server;
+		return op === 'start' ? current.start() : current.stop();
+	};
 	return server.status === McpServerStatus.Stopped || server.status === McpServerStatus.Error
 		? new Action(
 			'mcpServer.activeSession.start',
 			localize('activeSessionMcpServerStart', "Start Server"),
 			undefined,
 			true,
-			() => server.start()
+			() => run('start')
 		)
 		: new Action(
 			'mcpServer.activeSession.stop',
 			localize('activeSessionMcpServerStop', "Stop Server"),
 			undefined,
 			true,
-			() => server.stop()
+			() => run('stop')
 		);
 }
 
@@ -1237,10 +1251,10 @@ export function getBuiltinMcpServerEnablementActions(mcpService: IMcpService, se
 }
 
 /** Composes lifecycle, scoped enablement, and options actions for an agent-host-only row. */
-export function getActiveSessionServerOptionsActions(commandService: ICommandService, agentHostCustomizations: IAgentHostCustomizationService, agentPluginService: IAgentPluginService, sessionResource: URI, server: AgentHostMcpServer): IAction[] {
+export function getActiveSessionServerOptionsActions(commandService: ICommandService, agentHostCustomizations: IAgentHostCustomizationService, agentPluginService: IAgentPluginService, sessionResource: URI, server: AgentHostMcpServer, getServer: () => AgentHostMcpServer | undefined = () => server): IAction[] {
 	const actions: IAction[] = [];
 
-	const lifecycleAction = getActiveSessionServerLifecycleAction(server);
+	const lifecycleAction = getActiveSessionServerLifecycleAction(server, getServer);
 	if (lifecycleAction) {
 		actions.push(lifecycleAction);
 	}
@@ -1260,7 +1274,8 @@ export function getActiveSessionServerOptionsActions(commandService: ICommandSer
 		undefined,
 		true,
 		async () => {
-			await commandService.executeCommand(McpCommandIds.AgentHostServerOptions, sessionResource, server.id);
+			const current = getServer() ?? server;
+			await commandService.executeCommand(McpCommandIds.AgentHostServerOptions, sessionResource, current.id);
 		}
 	));
 
@@ -2612,7 +2627,7 @@ export class McpListWidget extends Disposable {
 	private getInstalledEntryMembershipSignature(): string {
 		return this.installedEntries.map(({ entry }) => [
 			getMcpRowKey(entry),
-			getActiveSessionServer(entry) ? 'session' : '',
+			getActiveSessionServer(entry)?.id ?? '',
 			entry.type !== 'session-server-item' && entry.localServer ? 'local' : '',
 			getMcpEntrySourceUri(entry)?.toString() ?? '',
 		].join(':')).join('|');
@@ -2771,8 +2786,12 @@ export class McpListWidget extends Disposable {
 	}
 
 	private getMcpServerManagementActions(entry: IMcpInstalledEntry, disposables: DisposableStore): IAction[] {
+		const getServer = () => {
+			const current = resolveMcpEntry(entry, this.agentHostCustomizationService, this.customizationHarnessService.activeSessionResource.get());
+			return current ? getActiveSessionServer(current) : undefined;
+		};
 		if (entry.type === 'session-server-item') {
-			const actions = getActiveSessionServerOptionsActions(this.commandService, this.agentHostCustomizationService, this.agentPluginService, this.customizationHarnessService.activeSessionResource.get(), entry.server);
+			const actions = getActiveSessionServerOptionsActions(this.commandService, this.agentHostCustomizationService, this.agentPluginService, this.customizationHarnessService.activeSessionResource.get(), entry.server, getServer);
 			actions.forEach(action => isDisposable(action) && disposables.add(action));
 			return actions;
 		}
@@ -2783,7 +2802,7 @@ export class McpListWidget extends Disposable {
 			const plugin = pluginUriStr ? this.agentPluginService.plugins.get().find(p => p.uri.toString() === pluginUriStr) : undefined;
 
 			const actions: IAction[] = [];
-			const lifecycleAction = entry.activeSessionServer !== undefined ? getActiveSessionServerLifecycleAction(entry.activeSessionServer) : undefined;
+			const lifecycleAction = entry.activeSessionServer !== undefined ? getActiveSessionServerLifecycleAction(entry.activeSessionServer, getServer) : undefined;
 			if (lifecycleAction) {
 				actions.push(disposables.add(lifecycleAction));
 			}
@@ -2850,7 +2869,7 @@ export class McpListWidget extends Disposable {
 
 		const groups: IAction[][] = getContextMenuActions(mcpServer, false, this.instantiationService);
 		const activeSessionServer = entry.activeSessionServer;
-		const activeSessionLifecycleAction = activeSessionServer !== undefined ? getActiveSessionServerLifecycleAction(activeSessionServer) : undefined;
+		const activeSessionLifecycleAction = activeSessionServer !== undefined ? getActiveSessionServerLifecycleAction(activeSessionServer, getServer) : undefined;
 		const agentHostEnablementActions = activeSessionServer !== undefined
 			? getAgentHostMcpServerEnablementActions(this.agentHostCustomizationService, this.agentPluginService, this.customizationHarnessService.activeSessionResource.get(), activeSessionServer, ['workspace', 'session'])
 			: [];
