@@ -1239,10 +1239,9 @@ export class ClaudeAgentSession extends Disposable {
 
 	/**
 	 * Inject a steering message. Builds the `priority: 'now'`
-	 * {@link SDKUserMessage} and hands it to the pipeline; the pipeline
-	 * inherits the parent's turnId (CONTEXT.md M10) and fires
-	 * `steering_consumed` when the SDK accepts it. No-op if the pipeline
-	 * is aborted.
+	 * {@link SDKUserMessage} and hands it to the pipeline. The pipeline
+	 * inherits the parent's turnId until the SDK preempts, then promotes
+	 * the steer to its own turn. No-op if the pipeline is aborted.
 	 */
 	injectSteering(steeringMessage: PendingMessage): void {
 		const pipeline = this._requirePipeline();
@@ -1265,7 +1264,7 @@ export class ClaudeAgentSession extends Disposable {
 			// boundary is the convention for both code paths.
 			uuid: steeringMessage.id as `${string}-${string}-${string}-${string}-${string}`,
 		};
-		pipeline.injectSteering(sdkMessage, steeringMessage.id);
+		pipeline.injectSteering(sdkMessage, steeringMessage);
 	}
 
 	/** Live permission-mode change. Forwards to the pipeline; the pipeline remembers it for re-application after a rebind. */

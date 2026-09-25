@@ -8049,8 +8049,8 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		advance.complete();
 	});
 
-	test('steering_consumed fires when the iterable hands the steering message to the SDK', async () => {
-		const { ctx, sessionUri, advance } = await materialize();
+	test('the result that ends the preempted turn promotes the steering message to its own turn', async () => {
+		const { ctx, sessionUri, query, advance } = await materialize();
 		const sid = AgentSession.id(sessionUri);
 
 		const signals: AgentSignal[] = [];
@@ -8058,26 +8058,107 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 
 		const longSend = ctx.agent.chats.sendMessage(defaultChatUri(sessionUri), 'long task', undefined, undefined, 'turn-2', undefined, undefined, chatContext(defaultChatUri(sessionUri)));
 		await tick();
-
-		ctx.agent.setPendingMessages!(defaultChatUri(sessionUri), { id: 'pending-9', message: { text: 'steer', origin: { kind: MessageKind.User } } }, []);
-		// Microtask cycles let the FakeQuery's background drain pull the
-		// steering entry off `_toYield`; that drain is when our session
-		// fires `steering_consumed` (SDK ack semantics — mirrors Copilot's
-		// `sendSteering` firing right after `send({mode:'immediate'})`).
-		// Firing later (on the steering's result) would let the user
-		// reorder/delete the still-pending entry; the SDK has no hook for
-		// that, so we ack as soon as the SDK takes ownership.
+		ctx.agent.setPendingMessages!(defaultChatUri(sessionUri), { id: 'pending-9', message: { text: 'switch topic', origin: { kind: MessageKind.User } } }, []);
 		await tick();
 		await tick();
 
-		const consumed = signals.find(s => s.kind === 'steering_consumed');
-		assert.ok(consumed, `expected steering_consumed after iterable yield, got kinds: ${signals.map(s => s.kind).join(', ')}`);
-		assert.deepStrictEqual({ kind: consumed.kind, id: (consumed as { id: string }).id }, { kind: 'steering_consumed', id: 'pending-9' });
-
-		// Cleanup so longSend resolves.
-		ctx.sdk.nextQueryMessages.push(makeResultSuccess(sid));
+		const steered = query.drainedPrompts.find(p => p.priority === 'now')!;
+		assert.strictEqual(steered.uuid, 'pending-9', 'the steer is sent under its pending-message id');
+		// result#1 ends the preempted turn, result#2 ends the steering turn.
+		ctx.sdk.nextQueryMessages.push(makeResultSuccess(sid), makeResultSuccess(sid));
 		advance.complete();
 		await longSend;
+
+		const turnActions = signals
+			.filter(s => s.kind === 'action')
+			.map(s => (s as { action: { type: string; turnId: string; message?: { text: string }; queuedMessageId?: string } }).action)
+			.filter(a => a.type === ActionType.ChatTurnComplete || a.type === ActionType.ChatTurnStarted);
+		const started = turnActions.find(a => a.type === ActionType.ChatTurnStarted);
+		assert.deepStrictEqual({
+			preemptedTurnCompleted: turnActions.some(a => a.type === ActionType.ChatTurnComplete && a.turnId === 'turn-2'),
+			startedMessage: started?.message?.text,
+			clearsPendingBubble: started?.queuedMessageId,
+			startedTurnId: started?.turnId,
+			finalCompleteTargetsSteeringTurn: turnActions.at(-1)?.type === ActionType.ChatTurnComplete && turnActions.at(-1)?.turnId === started?.turnId,
+		}, {
+			preemptedTurnCompleted: true,
+			startedMessage: 'switch topic',
+			clearsPendingBubble: 'pending-9',
+			startedTurnId: 'pending-9',
+			finalCompleteTargetsSteeringTurn: true,
+		});
+	});
+
+	test('aborting after a steer was promoted cancels the promoted turn', async () => {
+		const ctx = createTestContext(disposables);
+		await ctx.agent.authenticate('https://api.github.com', 'tok');
+		await tick();
+		const created = await createSession(ctx.agent, { workingDirectories: [URI.file('/workspace')], model: { id: 'claude-opus-4.6' } });
+		const sid = created.sdkSessionId;
+
+		const signals: AgentSignal[] = [];
+		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
+
+		const advance1 = new DeferredPromise<void>();
+		const advance2 = new DeferredPromise<void>();
+		ctx.sdk.queryAdvance = async (i) => {
+			if (i === 1) { await advance1.p; }
+			if (i === 2) { await advance2.p; }
+		};
+		ctx.sdk.nextQueryMessages = [
+			makeSystemInitMessage(sid),
+			makeResultSuccess(sid),
+			makeResultSuccess(sid),
+		];
+
+		const longSend = ctx.agent.chats.sendMessage(defaultChatUri(created.session), 'long task', undefined, undefined, 'turn-2', undefined, undefined, chatContext(defaultChatUri(created.session)));
+		await tick();
+		ctx.agent.setPendingMessages!(defaultChatUri(created.session), { id: 'pending-11', message: { text: 'switch topic', origin: { kind: MessageKind.User } } }, []);
+		await tick();
+		await tick();
+
+		// Release the preempted-turn result so the steer is promoted, then abort
+		// before the steering turn's own result arrives.
+		advance1.complete();
+		await tick();
+		await tick();
+		await ctx.agent.chats.abort(defaultChatUri(created.session), chatContext(defaultChatUri(created.session)));
+		advance2.complete();
+		await longSend.catch(() => { /* cancelled */ });
+
+		const actions = signals
+			.filter(s => s.kind === 'action')
+			.map(s => (s as { action: { type: string; turnId: string } }).action);
+		const promoted = actions.find(a => a.type === ActionType.ChatTurnStarted && a.turnId !== 'turn-2');
+
+		// The client never dispatched this turn id, so only the host can close it.
+		assert.ok(promoted, 'the steer was promoted to its own turn');
+		assert.ok(
+			actions.some(a => a.type === ActionType.ChatTurnCancelled && a.turnId === promoted.turnId),
+			'the promoted turn is cancelled when the pipeline aborts',
+		);
+	});
+
+	test('a steering message the SDK never runs still clears its pending bubble', async () => {
+		const { ctx, sessionUri, advance } = await materialize();
+
+		const signals: AgentSignal[] = [];
+		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
+
+		const longSend = ctx.agent.chats.sendMessage(defaultChatUri(sessionUri), 'long task', undefined, undefined, 'turn-2', undefined, undefined, chatContext(defaultChatUri(sessionUri)));
+		await tick();
+		ctx.agent.setPendingMessages!(defaultChatUri(sessionUri), { id: 'pending-10', message: { text: 'never echoed', origin: { kind: MessageKind.User } } }, []);
+		await tick();
+		await tick();
+
+		await ctx.agent.chats.abort(defaultChatUri(sessionUri), chatContext(defaultChatUri(sessionUri)));
+		advance.complete();
+		await longSend.catch(() => { /* cancelled */ });
+
+		assert.deepStrictEqual(
+			signals.filter(s => s.kind === 'steering_consumed').map(s => (s as { id: string }).id),
+			['pending-10'],
+		);
 	});
 
 
@@ -8195,14 +8276,8 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		}, { models: ['claude-sonnet-4-6'], efforts: ['high'] });
 	});
 
-	test('intermediate result during steering does NOT complete the in-flight sendMessage or fire ChatTurnComplete', async () => {
-		// CONTEXT.md M10: when the SDK preempts via `'now'`-priority, it
-		// emits one `result` message per turn it ran (the aborted
-		// original + the steering reply). Protocol-wise this is ONE Turn,
-		// so the agent must suppress the intermediate result: do not
-		// settle the original sendMessage's deferred, do not fire
-		// ChatTurnComplete. The FINAL result (when no steering is
-		// outstanding) closes the protocol Turn.
+	test('intermediate result during steering closes the preempted turn and opens the steering turn', async () => {
+		// The intermediate result ends the interrupted turn without settling its deferred.
 		const ctx = createTestContext(disposables);
 		await ctx.agent.authenticate('https://api.github.com', 'tok');
 		await tick();
@@ -8212,7 +8287,7 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		// Stage: system_init, then PARK at index 1 so the original turn
 		// hasn't yet streamed its result. The test injects steering, then
 		// releases the gate so the SDK emits result#1 (intermediate),
-		// echoes the steering, then emits result#2 (final).
+		// then result#2 (final).
 		const advance = new DeferredPromise<void>();
 		ctx.sdk.queryAdvance = async (i) => { if (i === 1) { await advance.p; } };
 		ctx.sdk.nextQueryMessages = [makeSystemInitMessage(sid)];
@@ -8220,13 +8295,9 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		const inFlight = ctx.agent.chats.sendMessage(defaultChatUri(created.session), 'long task', undefined, undefined, 'turn-1', undefined, undefined, chatContext(defaultChatUri(created.session)));
 		await tick();
 
-		// Subscribe BEFORE injecting steering so we capture the
-		// `steering_consumed` signal that fires the moment the iterable
-		// hands the message to the SDK.
 		const signals: AgentSignal[] = [];
 		disposables.add(ctx.agent.onDidChatProgress(s => signals.push(s)));
 
-		// Inject steering and capture its uuid via the iterable's drain.
 		ctx.agent.setPendingMessages!(defaultChatUri(created.session), { id: 'pending-steer', message: { text: 'moo', origin: { kind: MessageKind.User } } }, []);
 		await tick();
 		await tick();
@@ -8234,10 +8305,6 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		const steeringPrompt = query.drainedPrompts.find(p => p.priority === 'now');
 		assert.ok(steeringPrompt && steeringPrompt.uuid, 'steering uuid captured');
 
-		// Stage the rest: result#1 (intermediate; for the aborted turn),
-		// then result#2 (final). The SDK's user-echo for steering is no
-		// longer used to fire `steering_consumed` (we fire on iterable
-		// yield); staging it would still work but isn't required.
 		ctx.sdk.nextQueryMessages.push(
 			makeResultSuccess(sid),
 			makeResultSuccess(sid),
@@ -8246,18 +8313,19 @@ suite('ClaudeAgent (Phase 9 — runtime mutation surface)', () => {
 		advance.complete();
 		await inFlight;
 
-		// Exactly one ChatTurnComplete fires (the final result), and
-		// steering_consumed fires for the echo.
-		const turnCompletes = signals.filter(s => s.kind === 'action' && s.action.type === ActionType.ChatTurnComplete);
-		const consumed = signals.filter(s => s.kind === 'steering_consumed');
+		const turnActions = signals
+			.filter(s => s.kind === 'action')
+			.map(s => (s as { action: { type: string; turnId: string; queuedMessageId?: string } }).action)
+			.filter(a => a.type === ActionType.ChatTurnComplete || a.type === ActionType.ChatTurnStarted);
 		assert.deepStrictEqual({
-			turnCompleteCount: turnCompletes.length,
-			steeringConsumedCount: consumed.length,
-			steeringConsumedId: consumed[0] && (consumed[0] as { id: string }).id,
+			sequence: turnActions.map(a => `${a.type === ActionType.ChatTurnStarted ? 'started' : 'complete'}:${a.turnId}`),
+			// The pending bubble clears with the steering turn, so no fallback signal fires.
+			steeringConsumedCount: signals.filter(s => s.kind === 'steering_consumed').length,
+			clearsPendingBubble: turnActions.find(a => a.type === ActionType.ChatTurnStarted)?.queuedMessageId,
 		}, {
-			turnCompleteCount: 1,
-			steeringConsumedCount: 1,
-			steeringConsumedId: 'pending-steer',
+			sequence: ['complete:turn-1', 'started:pending-steer', 'complete:pending-steer'],
+			steeringConsumedCount: 0,
+			clearsPendingBubble: 'pending-steer',
 		});
 	});
 
