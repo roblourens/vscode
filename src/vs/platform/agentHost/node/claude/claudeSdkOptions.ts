@@ -180,7 +180,8 @@ export async function buildOptions(
 		allowDangerouslySkipPermissions: true,
 		canUseTool: input.canUseTool,
 		onElicitation: input.onElicitation,
-		disallowedTools: ['WebSearch'],
+		// CAPI does not support WebSearch; native Anthropic-auth sessions do, so only block on the proxy.
+		...(isProxy ? { disallowedTools: ['WebSearch'] } : {}),
 		includePartialMessages: true,
 		forwardSubagentText: true,
 		enableFileCheckpointing: true,
