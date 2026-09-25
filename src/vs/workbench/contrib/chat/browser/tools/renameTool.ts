@@ -7,7 +7,7 @@ import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
-import { ResourceMap, ResourceSet } from '../../../../../base/common/map.js';
+import { ResourceMap } from '../../../../../base/common/map.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { Position } from '../../../../../editor/common/core/position.js';
@@ -22,7 +22,7 @@ import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { IChatService } from '../../common/chatService/chatService.js';
-import { ChatModel } from '../../common/model/chatModel.js';
+import { ChatModel, type ChatRequestModel } from '../../common/model/chatModel.js';
 import { CountTokensCallback, ILanguageModelToolsService, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolInvocationPreparationContext, IToolResult, ToolDataSource, ToolProgress } from '../../common/tools/languageModelToolsService.js';
 import { createToolSimpleTextResult } from '../../common/tools/builtinTools/toolHelpers.js';
 import { errorResult, findLineNumber, findSymbolColumn, isSymbolToolResourceInScope, ISymbolToolInput, resolveSymbolToolFileUri } from './toolHelpers.js';
@@ -169,60 +169,72 @@ export class RenameTool extends Disposable implements IToolImpl {
 				return errorResult(localize('tool.rename.outOfScopeEdit', 'Rename was not applied because it would modify files outside the current workspace or working directory.'));
 			}
 
-			// --- apply edits via chat response stream ---
-			if (invocation.context) {
-				const chatModel = this._chatService.getSession(invocation.context.sessionResource) as ChatModel | undefined;
-				const request = chatModel?.getRequests().at(-1);
+			const chatModel = invocation.context
+				? this._chatService.getSession(invocation.context.sessionResource) as ChatModel | undefined
+				: undefined;
+			const request = chatModel?.getRequests().at(-1);
+			const canReviewInChat = !!(chatModel && request);
 
-				if (chatModel && request) {
-					if (renameResult.edits.some(edit => !ResourceTextEdit.is(edit))) {
-						return errorResult(localize('tool.rename.unsupportedEdit', 'Rename was not applied because it produced edits that cannot be reviewed in chat.'));
+			if (canReviewInChat && renameResult.edits.some(edit => !ResourceTextEdit.is(edit))) {
+				return errorResult(localize('tool.rename.unsupportedEdit', 'Rename was not applied because it produced edits that cannot be reviewed in chat.'));
+			}
+
+			// Apply first, then report success only if the workspace actually changed.
+			// Chat streaming alone can look like a rename (non-zero edit/file counts) without
+			// writing anything, which leaves the agent believing the symbol was renamed.
+			const applyResult = await this._bulkEditService.apply(renameResult);
+			if (!applyResult.isApplied) {
+				return errorResult(localize('tool.rename.notApplied', 'Rename was not applied; no files were changed.'));
+			}
+
+			const editsByUri = new ResourceMap<TextEdit[]>();
+			for (const edit of renameResult.edits) {
+				if (ResourceTextEdit.is(edit)) {
+					let edits = editsByUri.get(edit.resource);
+					if (!edits) {
+						edits = [];
+						editsByUri.set(edit.resource, edits);
 					}
-
-					// Group text edits by URI
-					const editsByUri = new ResourceMap<TextEdit[]>();
-					for (const edit of renameResult.edits) {
-						if (ResourceTextEdit.is(edit)) {
-							let edits = editsByUri.get(edit.resource);
-							if (!edits) {
-								edits = [];
-								editsByUri.set(edit.resource, edits);
-							}
-							edits.push(edit.textEdit);
-						}
-					}
-
-					// Push edits through the chat response stream
-					for (const [editUri, edits] of editsByUri) {
-						chatModel.acceptResponseProgress(request, {
-							kind: 'textEdit',
-							uri: editUri,
-							edits: [],
-						});
-						chatModel.acceptResponseProgress(request, {
-							kind: 'textEdit',
-							uri: editUri,
-							edits,
-						});
-						chatModel.acceptResponseProgress(request, {
-							kind: 'textEdit',
-							uri: editUri,
-							edits: [],
-							done: true,
-						});
-					}
-
-					return this._successResult(input, editsByUri.size, renameResult.edits.length);
+					edits.push(edit.textEdit);
 				}
 			}
 
-			// Fallback: apply via bulk edit service when no chat context is available
-			await this._bulkEditService.apply(renameResult);
-			const fileCount = new ResourceSet(renameResult.edits.filter(ResourceTextEdit.is).map(e => e.resource)).size;
-			return this._successResult(input, fileCount, renameResult.edits.length);
+			if (chatModel && request) {
+				this._streamAppliedChatEdits(chatModel, request, editsByUri);
+			}
+
+			return this._successResult(input, editsByUri.size, renameResult.edits.length);
 
 		} finally {
 			ref.dispose();
+		}
+	}
+
+	/**
+	 * Record already-applied text edits on the chat response so they can be
+	 * reviewed without the editing session applying them a second time.
+	 */
+	private _streamAppliedChatEdits(chatModel: ChatModel, request: ChatRequestModel, editsByUri: ResourceMap<TextEdit[]>): void {
+		for (const [editUri, edits] of editsByUri) {
+			chatModel.acceptResponseProgress(request, {
+				kind: 'textEdit',
+				uri: editUri,
+				edits: [],
+				isExternalEdit: true,
+			});
+			chatModel.acceptResponseProgress(request, {
+				kind: 'textEdit',
+				uri: editUri,
+				edits,
+				isExternalEdit: true,
+			});
+			chatModel.acceptResponseProgress(request, {
+				kind: 'textEdit',
+				uri: editUri,
+				edits: [],
+				done: true,
+				isExternalEdit: true,
+			});
 		}
 	}
 

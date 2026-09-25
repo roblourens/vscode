@@ -79,13 +79,13 @@ suite('RenameTool', () => {
 		} as unknown as IChatService;
 	}
 
-	function createMockBulkEditService(): IBulkEditService & { appliedEdits: WorkspaceEdit[] } {
+	function createMockBulkEditService(isApplied = true): IBulkEditService & { appliedEdits: WorkspaceEdit[] } {
 		const appliedEdits: WorkspaceEdit[] = [];
 		return {
 			_serviceBrand: undefined,
 			apply: async (edit: WorkspaceEdit): Promise<IBulkEditResult> => {
 				appliedEdits.push(edit);
-				return { ariaSummary: '', isApplied: true };
+				return { ariaSummary: '', isApplied };
 			},
 			appliedEdits,
 		} as unknown as IBulkEditService & { appliedEdits: WorkspaceEdit[] };
@@ -445,6 +445,115 @@ suite('RenameTool', () => {
 				progressCount: 0,
 				appliedEditCount: 0,
 			});
+		});
+
+		test('does not report success with edit counts when bulk apply does not apply', async () => {
+			const model = disposables.add(createTextModel(testContent, 'typescript', undefined, testUri));
+			const otherUri = URI.parse('file:///test/other.ts');
+			const edits = [
+				makeEdit(testUri, new Range(1, 10, 1, 17), 'MyNewClass'),
+				makeEdit(testUri, new Range(4, 23, 4, 30), 'MyNewClass'),
+				makeEdit(otherUri, new Range(5, 14, 5, 21), 'MyNewClass'),
+			];
+			disposables.add(langFeatures.renameProvider.register('typescript', {
+				provideRenameEdits: (): WorkspaceEdit & Rejection => ({ edits }),
+			}));
+
+			const bulkEditService = createMockBulkEditService(false);
+			const tool = disposables.add(createTool(createMockTextModelService(model), { bulkEditService }));
+			const result = await tool.invoke(
+				createInvocation({ symbol: 'MyClass', newName: 'MyNewClass', uri: testUri.toString(), lineContent: 'import { MyClass }' }),
+				noopCountTokens, noopProgress, CancellationToken.None
+			);
+
+			const text = getTextContent(result);
+			assert.strictEqual(text, 'Rename was not applied; no files were changed.');
+			assert.ok(!text.includes('Renamed'));
+			assert.ok(!text.includes('3 edits'));
+			assert.ok(!text.includes('2 files'));
+			assert.strictEqual(bulkEditService.appliedEdits.length, 1);
+		});
+
+		test('chat context applies edits and reports success only after they are applied', async () => {
+			const model = disposables.add(createTextModel(testContent, 'typescript', undefined, testUri));
+			const otherUri = URI.parse('file:///test/other.ts');
+			const edits = [
+				makeEdit(testUri, new Range(1, 10, 1, 17), 'MyNewClass'),
+				makeEdit(otherUri, new Range(5, 14, 5, 21), 'MyNewClass'),
+			];
+			disposables.add(langFeatures.renameProvider.register('typescript', {
+				provideRenameEdits: (): WorkspaceEdit & Rejection => ({ edits }),
+			}));
+
+			const progress: Array<{ uri?: { toString(): string }; edits?: unknown[]; done?: boolean; isExternalEdit?: boolean }> = [];
+			const chatService = {
+				_serviceBrand: undefined,
+				getSession: () => ({
+					getRequests: () => [{}],
+					acceptResponseProgress: (_request: unknown, part: { uri?: { toString(): string }; edits?: unknown[]; done?: boolean; isExternalEdit?: boolean }) => progress.push(part),
+				}),
+			} as unknown as IChatService;
+			const bulkEditService = createMockBulkEditService();
+			const tool = disposables.add(createTool(createMockTextModelService(model), { bulkEditService, chatService }));
+
+			const result = await tool.invoke(
+				{
+					parameters: { symbol: 'MyClass', newName: 'MyNewClass', uri: testUri.toString(), lineContent: 'import { MyClass }' },
+					context: { sessionResource: URI.parse('chat-session:test') },
+				} as unknown as IToolInvocation,
+				noopCountTokens, noopProgress, CancellationToken.None
+			);
+
+			const text = getTextContent(result);
+			assert.ok(text.includes('Renamed'));
+			assert.ok(text.includes('2 edits'));
+			assert.ok(text.includes('2 files'));
+			assert.strictEqual(bulkEditService.appliedEdits.length, 1);
+			assert.ok(progress.length > 0);
+			assert.ok(progress.every(part => part.isExternalEdit === true));
+		});
+
+		test('chat context does not report success with edit counts when apply does not change the workspace', async () => {
+			const model = disposables.add(createTextModel(testContent, 'typescript', undefined, testUri));
+			const edits = [
+				makeEdit(testUri, new Range(1, 10, 1, 17), 'MyNewClass'),
+				makeEdit(testUri, new Range(4, 23, 4, 30), 'MyNewClass'),
+			];
+			disposables.add(langFeatures.renameProvider.register('typescript', {
+				provideRenameEdits: (): WorkspaceEdit & Rejection => ({ edits }),
+			}));
+
+			let progressCount = 0;
+			const chatService = {
+				_serviceBrand: undefined,
+				getSession: () => ({
+					getRequests: () => [{}],
+					acceptResponseProgress: () => progressCount++,
+				}),
+			} as unknown as IChatService;
+			const bulkEditService = createMockBulkEditService(false);
+			const tool = disposables.add(createTool(createMockTextModelService(model), { bulkEditService, chatService }));
+
+			const result = await tool.invoke(
+				{
+					parameters: { symbol: 'MyClass', newName: 'MyNewClass', uri: testUri.toString(), lineContent: 'import { MyClass }' },
+					context: { sessionResource: URI.parse('chat-session:test') },
+				} as unknown as IToolInvocation,
+				noopCountTokens, noopProgress, CancellationToken.None
+			);
+
+			const text = getTextContent(result);
+			assert.deepStrictEqual({
+				result: text,
+				progressCount,
+				appliedEditCount: bulkEditService.appliedEdits.length,
+			}, {
+				result: 'Rename was not applied; no files were changed.',
+				progressCount: 0,
+				appliedEditCount: 1,
+			});
+			assert.ok(!text.includes('2 edits'));
+			assert.ok(!text.includes('1 file'));
 		});
 
 		test('result includes toolResultMessage', async () => {
