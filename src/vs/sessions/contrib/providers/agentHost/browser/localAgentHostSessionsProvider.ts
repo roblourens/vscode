@@ -86,18 +86,25 @@ export class LocalAgentHostSessionsProvider extends DevContainerAgentHostSession
 	}
 
 	/**
-	 * Redirects a legacy extension-host Copilot CLI resource to its agent-host
-	 * twin, adopting it on the way.
+	 * Claims native local Agent Host resources, and redirects a legacy
+	 * extension-host Copilot CLI resource to its agent-host twin (adopting it
+	 * on the way).
+	 *
+	 * `agent-host-*` and `copilotcli:` name sessions on this machine, so a remote
+	 * host must never claim or probe them. Native local URIs are returned
+	 * immediately — they must not depend on the Copilot CLI migration gate, which
+	 * would otherwise decline them and let a later remote provider win the
+	 * first-claimer-wins fan-out.
 	 *
 	 * Subscribing to the twin is what performs adoption: the host restores the
 	 * session, which runs its own provenance and working-directory checks. A
 	 * session that is not ours to adopt fails that subscribe, and the caller falls
 	 * back to the legacy resource, so an external session is never worse off.
-	 *
-	 * Local-only by definition: `copilotcli:` and `agent-host-copilotcli:` name
-	 * sessions on this machine, so a remote host must never claim or probe them.
 	 */
 	async resolveSessionResource(resource: URI, reason?: SessionResourceResolveReason): Promise<URI | undefined> {
+		if (resource.scheme.startsWith(LOCAL_RESOURCE_SCHEME_PREFIX)) {
+			return resource;
+		}
 		// Frozen at startup: enabling the setting only takes effect after a restart,
 		// so a live toggle never probes a host whose gate is still off.
 		if (!isLegacyMigrationEnabledAtStartup(this._configurationService)) {
@@ -155,6 +162,7 @@ export class LocalAgentHostSessionsProvider extends DevContainerAgentHostSession
 			toHost: resource => resource,
 			fromHost: resource => resource,
 			resourceSchemeForProvider: provider => this.resourceSchemeForProvider(provider),
+			providerForSessionScheme: scheme => scheme.startsWith(LOCAL_RESOURCE_SCHEME_PREFIX) ? scheme.slice(LOCAL_RESOURCE_SCHEME_PREFIX.length) : scheme,
 			providerForResourceScheme: scheme => scheme.startsWith(LOCAL_RESOURCE_SCHEME_PREFIX) ? scheme.slice(LOCAL_RESOURCE_SCHEME_PREFIX.length) : undefined,
 		}));
 		this.automations = automations;

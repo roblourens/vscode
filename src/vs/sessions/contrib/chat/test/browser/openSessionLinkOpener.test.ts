@@ -189,6 +189,26 @@ suite('OpenSessionLinkOpenerContribution', () => {
 		assert.strictEqual(findSessionForOpenSessionLink(backendSession, sessionsManagementService, connectionsService), session);
 	});
 
+	test('prefers a local client session when a remote session shares the backend URI', () => {
+		const backendSession = URI.parse('copilotcli:/session-1');
+		const remoteSession = upcastPartial<ISession>({ resource: URI.parse('remote-myhost-copilotcli:/session-1') });
+		const localSession = upcastPartial<ISession>({ resource: URI.parse('agent-host-copilotcli:/session-1') });
+		const sessionsManagementService = new class extends mock<ISessionsManagementService>() {
+			override getSessions(): ISession[] {
+				return [remoteSession, localSession];
+			}
+		};
+		const connectionsService = new class extends mock<IAgentHostConnectionsService>() {
+			override resolveSessionResourceIdentity(resource: URI) {
+				return upcastPartial<NonNullable<ReturnType<IAgentHostConnectionsService['resolveSessionResourceIdentity']>>>({
+					backendSession: URI.parse(`copilotcli:${resource.path}`),
+				});
+			}
+		};
+
+		assert.strictEqual(findSessionForOpenSessionLink(backendSession, sessionsManagementService, connectionsService), localSession);
+	});
+
 	test('uses a contextual placeholder without opening the linked chat', () => {
 		const sessionResource = URI.parse('copilotcli:/session-1');
 		const chatResource = sessionResource.with({ fragment: 'chat-2' });

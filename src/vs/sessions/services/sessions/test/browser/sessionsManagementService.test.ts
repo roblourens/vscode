@@ -5666,6 +5666,44 @@ suite('SessionsManagementService', () => {
 
 				assert.strictEqual((await service.resolveSessionResource(legacyResource)).toString(), twinResource.toString());
 			});
+
+			test('a local agent-host resource is not offered to a later remote provider', async () => {
+				const native = URI.from({ scheme: COPILOT_CLI_LOCAL_AH_SCHEME, path: '/native-run' });
+				const session = stubSession({
+					sessionId: 'native-run',
+					providerId: LOCAL_AGENT_HOST_PROVIDER_ID,
+					sessionType: 'copilotcli',
+					resource: native,
+				});
+				const seenByRemote: string[] = [];
+				const local = new class extends TestSessionsProvider {
+					constructor() { super(session); }
+					override readonly id = LOCAL_AGENT_HOST_PROVIDER_ID;
+					override readonly order = -1;
+					override getSessions(): ISession[] { return [session]; }
+					override resolveSessionResource(resource: URI): Promise<URI | undefined> {
+						return resource.scheme === COPILOT_CLI_LOCAL_AH_SCHEME ? Promise.resolve(resource) : Promise.resolve(undefined);
+					}
+				};
+				const remote = new class extends TestSessionsProvider {
+					constructor() { super(session); }
+					override readonly id = 'agenthost-remote';
+					override getSessions(): ISession[] { return []; }
+					override resolveSessionResource(resource: URI): Promise<URI | undefined> {
+						seenByRemote.push(resource.toString());
+						return Promise.resolve(resource);
+					}
+				};
+				const service = createSessionsManagementService(session, disposables, [remote, local]).service;
+
+				assert.deepStrictEqual({
+					resolved: (await service.resolveSessionResource(native)).toString(),
+					seenByRemote,
+				}, {
+					resolved: native.toString(),
+					seenByRemote: [],
+				});
+			});
 		});
 
 		function serviceWithSessions(sessions: readonly ISession[]): ISessionsManagementService {

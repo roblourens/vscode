@@ -804,6 +804,20 @@ suite('LocalAgentHostSessionsProvider', () => {
 		assert.deepStrictEqual(provider.getSessions().map(session => session.remoteConnectionStatus), [undefined]);
 	});
 
+	test('claims native local Agent Host resources without the Copilot CLI migration gate', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const localResource = URI.from({ scheme: 'agent-host-copilotcli', path: '/local-run' });
+		const otherResource = URI.parse('remote-myhost-copilotcli:/remote-run');
+
+		assert.deepStrictEqual({
+			local: (await provider.resolveSessionResource(localResource, 'open'))?.toString(),
+			remote: await provider.resolveSessionResource(otherResource, 'open'),
+		}, {
+			local: localResource.toString(),
+			remote: undefined,
+		});
+	});
+
 	test('session types update when the local host advertises additional agents', () => {
 		const provider = createProvider(disposables, agentHost);
 		assert.deepStrictEqual(provider.sessionTypes.map(t => ({ id: t.id, label: t.label })), [

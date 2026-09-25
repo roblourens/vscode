@@ -810,6 +810,23 @@ suite('RemoteAgentHostSessionsProvider', () => {
 		});
 	});
 
+	test('does not claim a local or extension-host resource that shares a cached raw id', async () => {
+		connection.addSession(createSession('shared-session'));
+		const provider = createProvider(disposables, connection);
+		provider.seedSessions([createSession('shared-session')]);
+		const sessionResource = provider.getSessions()[0].resource;
+
+		assert.deepStrictEqual({
+			own: (await provider.resolveSessionResource(sessionResource, 'open'))?.toString(),
+			local: await provider.resolveSessionResource(URI.parse('agent-host-copilotcli:/shared-session'), 'open'),
+			legacy: await provider.resolveSessionResource(URI.parse('copilotcli:/shared-session'), 'open'),
+		}, {
+			own: sessionResource.toString(),
+			local: undefined,
+			legacy: undefined,
+		});
+	});
+
 	test('remoteLocationPreferenceKey defaults to the live address when no stable preference key is given (e.g. tunnels/WSL)', () => {
 		const provider = createProvider(disposables, connection, { address: 'tunnel:abc123' });
 		assert.strictEqual(provider.remoteLocationPreferenceKey, 'tunnel:abc123');

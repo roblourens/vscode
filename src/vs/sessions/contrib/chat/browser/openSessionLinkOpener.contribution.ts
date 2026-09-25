@@ -9,7 +9,7 @@ import { derivedOpts, IObservable, IReader, observableSignalFromEvent } from '..
 import { isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
-import { IAgentHostConnectionsService } from '../../../../platform/agentHost/common/agentHostConnectionsService.js';
+import { IAgentHostConnectionsService, LOCAL_AGENT_HOST_SCHEME_PREFIX } from '../../../../platform/agentHost/common/agentHostConnectionsService.js';
 import { AGENT_HOST_CHAT_LINK_PATTERN, AGENT_HOST_SESSION_ONLY_LINK_PATTERN, AgentSessionLinkStatus, buildAgentSessionLinkPresentation, parseOpenSessionLinkChatId, parseOpenSessionLinkUri } from '../../../../platform/agentHost/common/openSessionLink.js';
 import { ILinkPresentation, ILinkPresentationService, ILinkPresentationWatcher } from '../../../../platform/dataChannel/common/dataChannel.js';
 import { ILabelService } from '../../../../platform/label/common/label.js';
@@ -159,13 +159,23 @@ export function findSessionForOpenSessionLink(
 	sessionsManagementService: ISessionsManagementService,
 	connectionsService: IAgentHostConnectionsService,
 ): ISession | undefined {
-	return sessionsManagementService.getSessions().find(session => {
-		if (isEqual(session.resource, backendSession)) {
-			return true;
+	// Local and remote Copilot CLI sessions can share a raw id (and therefore the
+	// same backend URI). Prefer the local `agent-host-*` row so an Agents-window
+	// open stays on this machine when prior remote sessions are still listed.
+	let fallback: ISession | undefined;
+	for (const session of sessionsManagementService.getSessions()) {
+		if (!isEqual(session.resource, backendSession)) {
+			const identity = connectionsService.resolveSessionResourceIdentity(session.resource);
+			if (!identity || !isEqual(identity.backendSession, backendSession)) {
+				continue;
+			}
 		}
-		const identity = connectionsService.resolveSessionResourceIdentity(session.resource);
-		return !!identity && isEqual(identity.backendSession, backendSession);
-	});
+		if (session.resource.scheme.startsWith(LOCAL_AGENT_HOST_SCHEME_PREFIX)) {
+			return session;
+		}
+		fallback ??= session;
+	}
+	return fallback;
 }
 
 function findChat(session: ISessionLinkState, chatId: string | undefined, reader: IReader): ISessionLinkChatState | undefined {

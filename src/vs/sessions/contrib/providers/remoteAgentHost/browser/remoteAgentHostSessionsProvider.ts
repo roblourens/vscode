@@ -497,8 +497,19 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 	}
 
 	async resolveSessionResource(resource: URI, _reason?: SessionResourceResolveReason): Promise<URI | undefined> {
+		// Local (`agent-host-*`) and extension-host (`copilotcli:`) resources name
+		// sessions on this machine. Only this connection's `remote-<authority>-*`
+		// scheme is ours to claim, even when a cached remote session happens to
+		// share the same raw id.
+		if (!this._ownsSessionResourceScheme(resource.scheme)) {
+			return undefined;
+		}
 		const ownsResource = [...this._sessionCache.values()].some(session => isEqual(session.resource, resource));
 		return ownsResource ? resource : undefined;
+	}
+
+	private _ownsSessionResourceScheme(scheme: string): boolean {
+		return scheme.startsWith(remoteAgentHostSessionTypeAuthorityPrefix(this._connectionAuthority));
 	}
 
 	async prepareSessionForOpen(_session: ISession, _reason: SessionResourceResolveReason): Promise<void> {

@@ -1203,6 +1203,51 @@ suite('AgentHostAutomationStore', () => {
 		});
 	});
 
+	test('does not double-prefix an already-local host-authored session resource', async () => {
+		const connection = new TestAutomationConnection();
+		disposables.add(connection);
+		const storage = disposables.add(new InMemoryStorageService());
+		const store = disposables.add(new AgentHostAutomationStore('local-agent-host', connection, {
+			toHost: resource => resource,
+			fromHost: resource => resource,
+			resourceSchemeForProvider: provider => `agent-host-${provider}`,
+			providerForSessionScheme: scheme => scheme.startsWith('agent-host-') ? scheme.slice('agent-host-'.length) : scheme,
+			providerForResourceScheme: scheme => scheme.startsWith('agent-host-') ? scheme.slice('agent-host-'.length) : undefined,
+		}, new NullLogService(), storage));
+		const timestamp = new Date().toISOString();
+		connection.setAutomation({
+			resource: 'ahp-automation:/already-local',
+			definition: {
+				title: 'Already local',
+				message: { text: 'Say hi.', origin: { kind: MessageKind.Automation } },
+				session: {
+					provider: 'copilotcli',
+					workingDirectories: [],
+				},
+				enabled: true,
+				triggers: [],
+			},
+			runs: [{
+				resource: 'ahp-automation-run:/already-local-run',
+				automation: 'ahp-automation:/already-local',
+				origin: { kind: AutomationRunOriginKind.Manual },
+				lifecycle: {
+					status: AutomationRunStatus.Completed,
+					createdAt: timestamp,
+					startedAt: timestamp,
+					completedAt: timestamp,
+				},
+				primarySession: 'agent-host-copilotcli:/already-local-session',
+				sessionCount: 1,
+			}],
+			operations: [AutomationOperation.Update, AutomationOperation.Remove, AutomationOperation.Run],
+			createdAt: timestamp,
+			modifiedAt: timestamp,
+		});
+
+		assert.strictEqual(store.runs.get()[0].sessionResource?.toString(), 'agent-host-copilotcli:/already-local-session');
+	});
+
 	test('uses per-automation operations as the client authority', async () => {
 		const connection = new TestAutomationConnection();
 		disposables.add(connection);
