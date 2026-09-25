@@ -37,7 +37,7 @@ import type { InvokeChangesetOperationParams, InvokeChangesetOperationResult } f
 import { AhpErrorCodes, AHP_SESSION_NOT_FOUND, ContentEncoding, JSON_RPC_INTERNAL_ERROR, ProtocolError, ResourceChangeType, ResourceType, ResourceWriteMode, type CreateResourceWatchParams, type CreateResourceWatchResult, type DirectoryEntry, type ResourceCopyParams, type ResourceCopyResult, type ResourceDeleteParams, type ResourceDeleteResult, type ResourceListResult, type ResourceMkdirParams, type ResourceMkdirResult, type ResourceMoveParams, type ResourceMoveResult, type ResourceReadResult, type ResourceResolveParams, type ResourceResolveResult, type ResourceWatchState, type ResourceWriteParams, type ResourceWriteResult, type IStateSnapshot } from '../common/state/sessionProtocol.js';
 import { ChangesSummary, ChatInteractivity, ChatOriginKind, MessageAttachmentKind, TerminalClaimKind, TerminalLifecycleStatus, type Annotation, type AnnotationEntry, type AnnotationOrigin, type AnnotationsState, type ChatOrigin, type ChatState, type Customization, type Message, type MessageAttachment, type MessageResourceAttachment, type TerminalState, type TextRange, type ToolResultTerminalContent } from '../common/state/protocol/state.js';
 import type { ChatPendingMessageSetAction, ChatTurnStartedAction, SessionConfigChangedAction } from '../common/state/protocol/actions.js';
-import { isAhpAutomationCatalogChannel, isAhpAutomationRunChannel, ISessionGitState, MessageKind, ResponsePartKind, SESSION_META_GITHUB_KEY, SESSION_META_GIT_KEY, SESSION_META_MULTI_ROOT_KEY, SESSION_META_SOURCE_CONTROL_KEY, AH_META_AUTO_ARCHIVED_AT_DB_KEY, AH_META_CREATED_BY_SESSION_DB_KEY, readSessionCreationReference, readSessionSpawnDepth, withSessionSpawnDepth, withSessionCreationReference, parseSessionCreationReference, SessionLifecycle, SessionStatus, ToolCallStatus, ToolResultContentType, TurnState, AH_META_HAS_WORKSPACE_TRANSITIONS_DB_KEY, AH_META_WORKSPACE_CONVERSION_QUARANTINED_DB_KEY, AH_META_WORKSPACELESS_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_IS_DONE_DB_KEY, AH_META_IS_READ_DB_KEY, buildChatUri, buildDefaultChatUri, buildResourceWatchChannelUri, buildSubagentChatUri, buildSubagentSessionUriPrefix, chatStorageUri, getErrorResponsePart, isAhpChatChannel, isChatReadOnly, isDefaultChatUri, isSessionStatusArchived, isSubagentChatUri, isSubagentSession, needsSessionGitStateRefresh, parseChatUri, parseDefaultChatUri, parseRequiredSessionUriFromChatUri, parseResourceWatchChannelUri, parseSessionGitData, parseSessionMultiRootMetadata, parseSubagentSessionUri, readSessionExternal, readSessionGitHubState, readSessionGitState, readSessionMultiRootMetadata, readSessionSourceControlState, readSessionWorkspaceless, withMessageRequestHiddenFromTranscript, withSessionExternal, withSessionGitData, withSessionGitHubState, withSessionGitState, withSessionHasWorkspaceTransitions, withSessionMultiRootMetadata, withSessionSourceControlState, withSessionStatusFlag, withSessionWorkspaceless, withSessionEhcliAdopted, withSessionEhcliLastMigratedTurn, AH_META_EHCLI_LAST_TURN_DB_KEY, withSessionFolderPickerDecision, readSessionFolderPickerDecision, parseSessionFolderPickerDecision, SESSION_META_FOLDER_PICKER_KEY, getAllSessionRelatedPullRequestUrls, readSessionEhcliAdoptable, readSessionGitHubData, parseSessionGitHubData, parseSessionGitHubState, readSessionGitHubStateInput, withMigratedSessionGitHubState, withReplacedFolderGitHubState, SESSION_META_GITHUB_DATA_KEY, withWorkingDirectoryKey, withWorkingDirectoryScopeId, type ISessionSourceControlState, type SessionConfigState, type SessionSummary, type SessionSummaryMeta, type ToolResultSubagentContent, type Turn } from '../common/state/sessionState.js';
+import { isAhpAutomationCatalogChannel, isAhpAutomationRunChannel, ISessionGitState, MessageKind, ResponsePartKind, SESSION_META_GITHUB_KEY, SESSION_META_GIT_KEY, SESSION_META_MULTI_ROOT_KEY, SESSION_META_SOURCE_CONTROL_KEY, AH_META_AUTO_ARCHIVED_AT_DB_KEY, AH_META_CREATED_BY_SESSION_DB_KEY, readSessionCreationReference, readSessionSpawnDepth, withSessionSpawnDepth, withSessionCreationReference, parseSessionCreationReference, SessionLifecycle, SessionStatus, ToolCallStatus, ToolResultContentType, TurnState, AH_META_HAS_WORKSPACE_TRANSITIONS_DB_KEY, AH_META_WORKSPACE_CONVERSION_QUARANTINED_DB_KEY, AH_META_WORKSPACELESS_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_IS_DONE_DB_KEY, AH_META_IS_READ_DB_KEY, buildChatUri, buildDefaultChatUri, buildResourceWatchChannelUri, buildSubagentChatUri, buildSubagentSessionUriPrefix, chatStorageUri, getErrorResponsePart, isAhpChatChannel, isChatReadOnly, isDefaultChatUri, isSessionStatusArchived, isSessionStatusRead, isSubagentChatUri, isSubagentSession, needsSessionGitStateRefresh, parseChatUri, parseDefaultChatUri, parseRequiredSessionUriFromChatUri, parseResourceWatchChannelUri, parseSessionGitData, parseSessionMultiRootMetadata, parseSubagentSessionUri, readSessionExternal, readSessionGitHubState, readSessionGitState, readSessionMultiRootMetadata, readSessionSourceControlState, readSessionWorkspaceless, withMessageRequestHiddenFromTranscript, withSessionExternal, withSessionGitData, withSessionGitHubState, withSessionGitState, withSessionHasWorkspaceTransitions, withSessionMultiRootMetadata, withSessionSourceControlState, withSessionStatusFlag, withSessionWorkspaceless, withSessionEhcliAdopted, withSessionEhcliLastMigratedTurn, AH_META_EHCLI_LAST_TURN_DB_KEY, withSessionFolderPickerDecision, readSessionFolderPickerDecision, parseSessionFolderPickerDecision, SESSION_META_FOLDER_PICKER_KEY, getAllSessionRelatedPullRequestUrls, readSessionEhcliAdoptable, readSessionGitHubData, parseSessionGitHubData, parseSessionGitHubState, readSessionGitHubStateInput, withMigratedSessionGitHubState, withReplacedFolderGitHubState, SESSION_META_GITHUB_DATA_KEY, withWorkingDirectoryKey, withWorkingDirectoryScopeId, type ISessionSourceControlState, type SessionConfigState, type SessionSummary, type SessionSummaryMeta, type ToolResultSubagentContent, type Turn } from '../common/state/sessionState.js';
 import { readToolCallMeta } from '../common/meta/agentToolCallMeta.js';
 import { isHostSnapshotAttachment, toHostSnapshotAttachmentMeta } from '../common/meta/agentSnapshotAttachmentMeta.js';
 import { readEphemeralSessionMeta, withEphemeralSessionMeta } from '../common/meta/agentEphemeralSessionMeta.js';
@@ -2360,18 +2360,34 @@ export class AgentService extends Disposable implements IAgentService {
 	 */
 	private async _getCatalogReconciliationMetadata(agent: IAgent, registered: IRegisteredSession, isChatBacking: () => Promise<boolean>): Promise<IAgentSessionMetadata | undefined> {
 		const providerMetadata = await this._registeredSessionMetadata(agent, registered.session, registered.external);
-		const liveSummary = this._stateManager.getSessionSummary(registered.session.toString());
+		const sessionKey = registered.session.toString();
+		const liveSummary = this._stateManager.getSessionSummary(sessionKey);
+		const surfaced = liveSummary ? undefined : this._stateManager.getSurfacedSessionSummary(sessionKey);
 		if (!providerMetadata) {
-			return liveSummary ? this._withLiveSessionMetadata({
+			const overlay = liveSummary ?? surfaced;
+			return overlay ? this._withLiveSessionMetadata({
 				session: registered.session,
 				startTime: registered.startTime,
-				modifiedTime: Date.parse(liveSummary.modifiedAt),
-			}, liveSummary) : undefined;
+				modifiedTime: Date.parse(overlay.modifiedAt),
+			}, overlay) : undefined;
 		}
-		if (!liveSummary || await isChatBacking()) {
+		if (await isChatBacking()) {
 			return providerMetadata;
 		}
-		return this._withLiveSessionMetadata(providerMetadata, liveSummary, false, !this._stateManager.getSurfacedSessionSummary(registered.session.toString()));
+		if (liveSummary) {
+			return this._withLiveSessionMetadata(providerMetadata, liveSummary, false, !this._stateManager.getSurfacedSessionSummary(sessionKey));
+		}
+		if (!surfaced) {
+			return providerMetadata;
+		}
+		return {
+			...providerMetadata,
+			status: withSessionStatusFlag(
+				withSessionStatusFlag(providerMetadata.status ?? SessionStatus.Idle, SessionStatus.IsArchived, isSessionStatusArchived(surfaced.status)),
+				SessionStatus.IsRead,
+				isSessionStatusRead(surfaced.status),
+			),
+		};
 	}
 
 	private _catalogChatsFromState(state: NonNullable<ReturnType<AgentHostStateManager['getSessionState']>>): ICatalogChat[] {
@@ -3570,10 +3586,26 @@ export class AgentService extends Disposable implements IAgentService {
 		// session summary while selectable catalogues live on subscribed chat
 		// state, so a fresh `listSessions` call only needs the aggregate.
 		const withStatus = materialized.map(s => {
-			const liveSummary = this._stateManager.getSessionSummary(s.session.toString());
-			const metadata = liveSummary
-				? this._withLiveSessionMetadata(s, liveSummary, false, !this._stateManager.getSurfacedSessionSummary(s.session.toString()))
+			const sessionKey = s.session.toString();
+			const liveSummary = this._stateManager.getSessionSummary(sessionKey);
+			let metadata = liveSummary
+				? this._withLiveSessionMetadata(s, liveSummary, false, !this._stateManager.getSurfacedSessionSummary(sessionKey))
 				: s;
+			const surfaced = liveSummary ? undefined : this._stateManager.getSurfacedSessionSummary(sessionKey);
+			if (surfaced) {
+				// Never-restored archive/read toggles land on the surfaced summary
+				// before the catalog payload is rewritten. Overlay only those flags
+				// so listing does not wait on the async catalog write, without
+				// replacing discovery-owned recency or working directories.
+				metadata = {
+					...metadata,
+					status: withSessionStatusFlag(
+						withSessionStatusFlag(metadata.status ?? SessionStatus.Idle, SessionStatus.IsArchived, isSessionStatusArchived(surfaced.status)),
+						SessionStatus.IsRead,
+						isSessionStatusRead(surfaced.status),
+					),
+				};
+			}
 			const persistedTitle = persistedFallbackTitles.get(s.session.toString());
 			return persistedTitle && !this._stateManager.getSessionState(s.session.toString())
 				? { ...metadata, summary: persistedTitle }
@@ -6431,10 +6463,12 @@ export class AgentService extends Disposable implements IAgentService {
 			...(action.type === ActionType.SessionIsArchivedChanged && !action.isArchived ? { [AH_META_AUTO_ARCHIVED_AT_DB_KEY]: '' } : {}),
 		});
 		this._invalidateSessionList();
-		this._stateManager.setSurfacedSessionStatusFlag(session, flag, set);
-		const payloadDirty = this._markCatalogPayloadDirty(session);
+		// Queue catalog synchronization and mark the payload dirty before publishing.
+		// `root/sessionSummaryChanged` is the client's durability signal; restart
+		// immediately after it must still find the write in the shutdown drain.
 		this._queuePassiveSessionMetadataSynchronization(sessionUri, { key, flag, set });
-		await payloadDirty;
+		await this._markCatalogPayloadDirty(session);
+		this._stateManager.setSurfacedSessionStatusFlag(session, flag, set);
 		return true;
 	}
 
@@ -9241,6 +9275,11 @@ export class AgentService extends Disposable implements IAgentService {
 					await Promise.allSettled([...this._clientDispatchQueues.values()]);
 				}
 				await this.whenCatalogReconciliationIdle();
+				// Close the catalog before provider teardown. Host-owned archive/read
+				// flags for never-restored sessions live here, and Windows E2E restarts
+				// bound shutdown then process.exit — which can land while an SDK child
+				// process is still draining, leaving this connection unclosed.
+				await this._orchestratorDatabase.close();
 			} finally {
 				await this._providerService.shutdown();
 			}
