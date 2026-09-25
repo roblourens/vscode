@@ -3245,6 +3245,53 @@ suite('LocalAgentHostSessionsProvider', () => {
 		});
 	});
 
+	test('archiveSession archives an in-flight new session draft', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		const changes: ISessionChangeEvent[] = [];
+		disposables.add(provider.onDidChangeSessions(e => changes.push(e)));
+
+		await provider.archiveSession(session.sessionId);
+		await timeout(0);
+
+		assert.deepStrictEqual({
+			isArchived: session.isArchived.get(),
+			changedSessionIds: changes.flatMap(e => e.changed.map(s => s.sessionId)),
+			archivedDispatches: agentHost.dispatchedActions
+				.filter(dispatch => dispatch.action.type === ActionType.SessionIsArchivedChanged)
+				.map(dispatch => ({ channel: dispatch.channel, isArchived: (dispatch.action as { isArchived: boolean }).isArchived })),
+		}, {
+			isArchived: true,
+			changedSessionIds: [session.sessionId],
+			archivedDispatches: [{
+				channel: AgentSession.uri('copilotcli', AgentSession.id(session.resource)).toString(),
+				isArchived: true,
+			}],
+		});
+	});
+
+	test('a host archive echo updates an in-flight new session draft', () => {
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		const changes: ISessionChangeEvent[] = [];
+		disposables.add(provider.onDidChangeSessions(e => changes.push(e)));
+
+		agentHost.fireAction({
+			channel: AgentSession.uri('copilotcli', AgentSession.id(session.resource)).toString(),
+			action: { type: ActionType.SessionIsArchivedChanged, isArchived: true },
+			serverSeq: 1,
+			origin: undefined,
+		} as ActionEnvelope);
+
+		assert.deepStrictEqual({
+			isArchived: session.isArchived.get(),
+			changedSessionIds: changes.flatMap(e => e.changed.map(s => s.sessionId)),
+		}, {
+			isArchived: true,
+			changedSessionIds: [session.sessionId],
+		});
+	});
+
 	test('createNewSession forwards initial metadata to the agent host', async () => {
 		const provider = createProvider(disposables, agentHost);
 		provider.createNewSession(URI.parse('file:///home/user/my-project'), provider.sessionTypes[0].id, {

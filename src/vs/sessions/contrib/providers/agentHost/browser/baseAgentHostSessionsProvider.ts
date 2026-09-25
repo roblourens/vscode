@@ -2537,6 +2537,7 @@ class NewSession extends Disposable {
 	private readonly _description: ISettableObservable<IMarkdownString | undefined>;
 	private readonly _isNewSessionRequestInProgress = observableValue(this, false);
 	readonly preparationProgress = observableValue<ISessionPreparationProgress | undefined>(this, undefined);
+	private readonly _isArchived: ISettableObservable<boolean>;
 	private readonly _newSessionRequestActivities = new Map<number, string | undefined>();
 	private _newSessionRequestId = 0;
 	private readonly _isActiveSessionObs: IObservable<boolean>;
@@ -2679,7 +2680,8 @@ class NewSession extends Disposable {
 		this._modelSource = observableValue<ChatModelSource | undefined>(this, this._selectedModelId ? ChatModelSource.Chosen : undefined);
 		const mode = observableValue<{ readonly id: string; readonly kind: string } | undefined>(this, this._selectedAgent ? { id: this._selectedAgent.uri, kind: AGENT_MODE_KIND } : undefined);
 		this._mode = mode;
-		const isArchived = observableValue(this, false);
+		this._isArchived = observableValue(this, false);
+		const isArchived = this._isArchived;
 		const isRead = observableValue(this, true);
 		this._description = observableValue<IMarkdownString | undefined>(this, undefined);
 		const lastTurnEnd = observableValue<Date | undefined>(this, undefined);
@@ -2787,6 +2789,7 @@ class NewSession extends Disposable {
 	}
 
 	setStatus(status: SessionStatus): void { this._status.set(status, undefined); }
+	setArchived(isArchived: boolean): void { this._isArchived.set(isArchived, undefined); }
 	startRequest(activity: string | undefined): IDisposable {
 		const requestId = this._newSessionRequestId++;
 		this._newSessionRequestActivities.set(requestId, activity);
@@ -5520,19 +5523,33 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * Flips a session's archived state locally and dispatches the owning action
 	 * so the host persists it and fans it out to other windows.
 	 *
+	 * In-flight drafts live in `_newSessions` until the first send commits, so
+	 * Mark as Done must target that draft (and its eager backend URI) rather
+	 * than waiting for `_sessionCache` (#337984).
+	 *
 	 * Skips the local flip when disconnected: showing a session as archived when
 	 * the change can never be recorded is worse than appearing not to archive.
 	 */
 	protected _setSessionArchived(sessionId: string, isArchived: boolean): boolean {
-		const rawId = this._rawIdFromChatId(sessionId);
-		const cached = rawId ? this._sessionCache.get(rawId) : undefined;
 		const connection = this.connection;
-		if (!cached || !rawId || !connection) {
+		const backendUri = this._getBackendSessionUri(sessionId);
+		if (!connection || !backendUri) {
 			return false;
 		}
-		cached.isArchived.set(isArchived, undefined);
-		this._onDidChangeSessions.fire({ added: [], removed: [], changed: [cached] });
-		connection.dispatch(cached.backendUri.toString(), { type: ActionType.SessionIsArchivedChanged as const, isArchived });
+		const rawId = this._rawIdFromChatId(sessionId);
+		const cached = rawId ? this._sessionCache.get(rawId) : undefined;
+		if (cached) {
+			cached.isArchived.set(isArchived, undefined);
+			this._onDidChangeSessions.fire({ added: [], removed: [], changed: [cached] });
+		} else {
+			const newSession = this._getNewSession(sessionId);
+			if (!newSession) {
+				return false;
+			}
+			newSession.setArchived(isArchived);
+			this._onDidChangeSessions.fire({ added: [], removed: [], changed: [newSession.session] });
+		}
+		connection.dispatch(backendUri.toString(), { type: ActionType.SessionIsArchivedChanged as const, isArchived });
 		return true;
 	}
 
@@ -7139,7 +7156,22 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		if (cached) {
 			cached.isArchived.set(this._resolveArchivedState(rawId, isArchived), undefined);
 			this._onDidChangeSessions.fire({ added: [], removed: [], changed: [cached] });
+			return;
 		}
+		const newSession = this._findNewSessionByBackendRawId(rawId);
+		if (newSession) {
+			newSession.setArchived(this._resolveArchivedState(rawId, isArchived));
+			this._onDidChangeSessions.fire({ added: [], removed: [], changed: [newSession.session] });
+		}
+	}
+
+	private _findNewSessionByBackendRawId(rawId: string): NewSession | undefined {
+		for (const newSession of this._newSessions.values()) {
+			if (AgentSession.id(newSession.backendUri) === rawId) {
+				return newSession;
+			}
+		}
+		return undefined;
 	}
 
 	private _handleIsReadChanged(session: string, isRead: boolean): void {

@@ -397,6 +397,11 @@ export class AgentSideEffects extends Disposable {
 					turnIds.add(envelope.action.turnId);
 					const sessionChannel = parseRequiredSessionUriFromChatUri(envelope.channel);
 					void this._checkpointService.discardTurnStartCheckpoint(URI.parse(sessionChannel), URI.parse(envelope.channel), envelope.action.turnId).catch(() => undefined);
+					// Stop during first-send worktree setup drops the prompt before
+					// the agent materializes. Announce the session as idle immediately
+					// so the Agents window is not left waiting on a SessionAdded that
+					// would never arrive (#337984).
+					this._announceSessionIfStillCreating(sessionChannel);
 				}
 			}
 			if (!envelope.origin && envelope.action.type === ActionType.ChatToolCallComplete && !isPresentationOnlyToolCall(envelope.action)) {
@@ -2014,6 +2019,7 @@ export class AgentSideEffects extends Disposable {
 			const sendContext = { ...clientOperationContext, ...(turnTelemetryContext ? { turnTelemetryContext } : {}), ...(contribution.instructions?.length ? { hostInstructions: contribution.instructions } : {}) };
 			if (this._cancelledTurnIds.get(turnChannel)?.has(turnId)) {
 				await this._discardPendingTurnStartCheckpoint(checkpointCapture, sessionChannel, chatUri, turnId);
+				this._announceSessionIfStillCreating(sessionChannel);
 				return;
 			}
 			if (checkpointCapture) {
@@ -2024,6 +2030,7 @@ export class AgentSideEffects extends Disposable {
 			}
 			if (this._cancelledTurnIds.get(turnChannel)?.has(turnId)) {
 				await this._discardPendingTurnStartCheckpoint(checkpointCapture, sessionChannel, chatUri, turnId);
+				this._announceSessionIfStillCreating(sessionChannel);
 				return;
 			}
 			this._turnTracker.setCurrentStage(turnChannel, turnId, 'provider');
@@ -2175,6 +2182,36 @@ export class AgentSideEffects extends Disposable {
 			type: ActionType.SessionCreationFailed,
 			error,
 		});
+		const summary = this._stateManager.getSessionSummary(sessionChannel);
+		if (summary) {
+			this._stateManager.markSessionPersisted(sessionChannel, summary);
+		}
+	}
+
+	/**
+	 * Surfaces a cancelled first turn on a not-yet-materialized session as a
+	 * normal idle session.
+	 *
+	 * The first `sendMessage` is what materializes a provisional session
+	 * (worktree setup, SDK session init, …) and emits the deferred
+	 * `SessionAdded`. Cancelling that turn before the agent receives it drops
+	 * the prompt, so materialization never runs and clients that already
+	 * rendered the session as in-progress keep spinning (#337984).
+	 *
+	 * Idle provisional sessions with no turn activity are left hidden: those
+	 * are the new-session composer's eagerly-created drafts and must not leak
+	 * into the catalog (#321269). A cancelled first turn has already been
+	 * reduced, so the session is no longer idle-provisional.
+	 */
+	private _announceSessionIfStillCreating(sessionChannel: ProtocolURI): void {
+		if (this._stateManager.isIdleProvisionalSession(sessionChannel)) {
+			return;
+		}
+		const state = this._stateManager.getSessionState(sessionChannel);
+		if (state?.lifecycle !== SessionLifecycle.Creating) {
+			return;
+		}
+		this._stateManager.dispatchServerAction(sessionChannel, { type: ActionType.SessionReady });
 		const summary = this._stateManager.getSessionSummary(sessionChannel);
 		if (summary) {
 			this._stateManager.markSessionPersisted(sessionChannel, summary);

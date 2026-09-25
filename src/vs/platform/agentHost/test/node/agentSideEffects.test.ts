@@ -2305,6 +2305,93 @@ suite('AgentSideEffects', () => {
 			});
 		});
 
+		test('cancellation of a provisional first turn announces the session as idle', async () => {
+			setupProvisionalSession();
+			const worktreeStarted = new DeferredPromise<void>();
+			const worktreeGate = new DeferredPromise<void>();
+			const resolvingSideEffects = createTestSideEffects(disposables, stateManager, {
+				getAgent: () => agent,
+				agents: agentList,
+				sessionDataService: createNullSessionDataService(),
+				resolveWorkingDirectoryBeforeSend: async () => {
+					worktreeStarted.complete();
+					await worktreeGate.p;
+					return [URI.file('/wd')];
+				},
+			});
+			const turnStarted = {
+				type: ActionType.ChatTurnStarted,
+				turnId: 'turn-1',
+				startedAt: '2025-01-01T00:00:00.000Z',
+				message: { text: 'hello', origin: { kind: MessageKind.User } },
+			} as const;
+			stateManager.dispatchClientAction(defaultChatUri, turnStarted, { clientId: 'test', clientSeq: 1 });
+
+			const envelopes: ActionEnvelope[] = [];
+			disposables.add(stateManager.onDidEmitEnvelope(e => envelopes.push(e)));
+			const notifications: INotification[] = [];
+			disposables.add(stateManager.onDidEmitNotification(n => notifications.push(n)));
+
+			resolvingSideEffects.handleAction(defaultChatUri, turnStarted);
+			await worktreeStarted.p;
+
+			const cancelled = {
+				type: ActionType.ChatTurnCancelled,
+				turnId: 'turn-1',
+				duration: 0,
+			} as const;
+			stateManager.dispatchClientAction(defaultChatUri, cancelled, { clientId: 'test', clientSeq: 2 });
+			resolvingSideEffects.handleAction(defaultChatUri, cancelled);
+
+			await waitForState(stateManager, () => envelopes.some(e => e.action.type === ActionType.SessionReady) || undefined);
+			worktreeGate.complete();
+			await timeout(0);
+
+			const sessionAdded = notifications.find(n => n.type === 'root/sessionAdded');
+			assert.deepStrictEqual({
+				creationFailed: envelopes.some(e => e.action.type === ActionType.SessionCreationFailed),
+				lifecycle: stateManager.getSessionState(sessionUri.toString())?.lifecycle,
+				sessionAdded: !!sessionAdded,
+				sendMessageCalls: agent.sendMessageCalls.length,
+			}, {
+				creationFailed: false,
+				lifecycle: SessionLifecycle.Ready,
+				sessionAdded: true,
+				sendMessageCalls: 0,
+			});
+		});
+
+		test('cancelling a first turn before send does not leak an idle provisional session', async () => {
+			setupProvisionalSession();
+			const cancelled = {
+				type: ActionType.ChatTurnCancelled,
+				turnId: 'turn-1',
+				duration: 0,
+			} as const;
+			stateManager.dispatchClientAction(defaultChatUri, cancelled, { clientId: 'test', clientSeq: 1 });
+			const started = {
+				type: ActionType.ChatTurnStarted,
+				startedAt: '2025-01-01T00:00:00.000Z',
+				turnId: 'turn-1',
+				message: { text: 'hello', origin: { kind: MessageKind.User } },
+			} as const;
+
+			const notifications: INotification[] = [];
+			disposables.add(stateManager.onDidEmitNotification(n => notifications.push(n)));
+			sideEffects.handleAction(defaultChatUri, started);
+			await timeout(0);
+
+			assert.deepStrictEqual({
+				lifecycle: stateManager.getSessionState(sessionUri.toString())?.lifecycle,
+				sessionAdded: notifications.some(n => n.type === 'root/sessionAdded'),
+				sendMessageCalls: agent.sendMessageCalls.length,
+			}, {
+				lifecycle: SessionLifecycle.Creating,
+				sessionAdded: false,
+				sendMessageCalls: 0,
+			});
+		});
+
 		test('AgentSideEffects owns exactly one ChatError when an already-ready session send rejects', async () => {
 			setupSession(); // dispatches SessionReady -> lifecycle Ready
 			agent.sendMessageError = new Error('transient send failure');
