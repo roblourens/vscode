@@ -183,6 +183,7 @@ suite('AgentHostUntitledProvisionalSessionService', () => {
 	});
 
 	let agentHost: MockAgentHostService;
+	let configurationService: TestConfigurationService;
 	let sessionResolutions: ResourceMap<IAgentHostSessionResolution | undefined>;
 	let onDidChangeSessionResolution: Emitter<void>;
 	let warnings: string[];
@@ -231,7 +232,8 @@ suite('AgentHostUntitledProvisionalSessionService', () => {
 			override warn(message: string): void { warnings.push(message); }
 		}());
 		insta.stub(IChatService, new MockChatService());
-		insta.stub(IConfigurationService, new TestConfigurationService());
+		configurationService = new TestConfigurationService();
+		insta.stub(IConfigurationService, configurationService);
 		insta.stub(IWorkbenchEnvironmentService, { get isSessionsWindow() { return isSessionsWindow; } } as Partial<IWorkbenchEnvironmentService>);
 		insta.stub(IWorkspaceContextService, new class extends mock<IWorkspaceContextService>() {
 			override readonly onDidChangeWorkspaceFolders = onDidChangeWorkspaceFolders.event;
@@ -293,6 +295,40 @@ suite('AgentHostUntitledProvisionalSessionService', () => {
 			reused: true,
 			createCount: 1,
 			config: { isolation: 'folder' },
+		});
+	});
+
+	test('getInitialSessionConfig maps chat.permissions.default autoApprove into createSession config', async () => {
+		await configurationService.setUserConfiguration('chat.permissions.default', 'autoApprove');
+		agentHost.resolveQueue = [];
+		await provisional.getOrCreate(untitledChatUri('permissions-default'), 'copilot', undefined);
+
+		assert.deepStrictEqual({
+			initial: provisional.getInitialSessionConfig(),
+			createSession: agentHost.createCalls[0].config,
+		}, {
+			initial: { isolation: 'folder', autoApprove: 'autoApprove' },
+			createSession: { isolation: 'folder', autoApprove: 'autoApprove' },
+		});
+	});
+
+	test('getInitialSessionConfig maps chat.permissions.default autopilot onto mode', async () => {
+		await configurationService.setUserConfiguration('chat.permissions.default', 'autopilot');
+
+		assert.deepStrictEqual(provisional.getInitialSessionConfig(), {
+			isolation: 'folder',
+			mode: 'autopilot',
+			autoApprove: 'default',
+		});
+	});
+
+	test('getInitialSessionConfig lets explicit chat.defaultConfiguration approvals win over chat.permissions.default', async () => {
+		await configurationService.setUserConfiguration('chat.permissions.default', 'autoApprove');
+		await configurationService.setUserConfiguration('chat.defaultConfiguration', { approvals: 'assisted' });
+
+		assert.deepStrictEqual(provisional.getInitialSessionConfig(), {
+			isolation: 'folder',
+			autoApprove: 'assisted',
 		});
 	});
 

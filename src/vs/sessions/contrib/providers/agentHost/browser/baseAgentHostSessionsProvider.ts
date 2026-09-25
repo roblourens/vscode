@@ -61,8 +61,8 @@ import { IChatSendRequestOptions, IChatService, type IChatModelReference } from 
 import { IChatSessionFileChange, IChatSessionFileChange2, IChatSessionsService } from '../../../../../workbench/contrib/chat/common/chatSessionsService.js';
 import { assertAutomationSessionTemplate, IAutomationSessionTemplate } from '../../../../../workbench/contrib/chat/common/automations/automation.js';
 import { AutomationModelConfiguration } from '../../../automations/browser/automationModelConfiguration.js';
-import { ChatAgentLocation, ChatConfiguration, ChatModeKind, ChatPermissionLevel, getChatPermissionLevelFromDefaultConfiguration, isChatPermissionLevel, type IChatDefaultConfiguration } from '../../../../../workbench/contrib/chat/common/constants.js';
-import { isAutoApprovePolicyRestricted, normalizeSessionConfigValue } from '../../../../../workbench/contrib/chat/common/agentHostConfigPolicy.js';
+import { ChatAgentLocation, ChatConfiguration, ChatModeKind, type IChatDefaultConfiguration } from '../../../../../workbench/contrib/chat/common/constants.js';
+import { getConfiguredNewSessionAutoApprove, isAutoApprovePolicyRestricted, normalizeSessionConfigValue } from '../../../../../workbench/contrib/chat/common/agentHostConfigPolicy.js';
 import { ILanguageModelsService } from '../../../../../workbench/contrib/chat/common/languageModels.js';
 import { getRegisteredLanguageModels, getVisibleLanguageModelsForTarget, resolveConfiguredModel, resolveModelIdentifier, resolveModelIdentifierFromLanguageModels } from '../../../../../workbench/contrib/chat/common/modelSelection.js';
 import { buildMutableConfigSchema, IAgentHostMcpServer, IAgentHostSessionsProvider, IAgentMergeClientState, resolvedConfigsEqual } from '../../../../common/agentHostSessionsProvider.js';
@@ -412,23 +412,6 @@ function isGloballyRememberedSessionConfigKey(property: string): boolean {
 		&& property !== SessionConfigKey.Isolation
 		&& property !== SessionConfigKey.SandboxEnabled
 		&& !UNSAFE_SESSION_CONFIG_KEYS.has(property);
-}
-
-function normalizeAutoApproveValue(value: unknown, policyRestricted: boolean): ChatPermissionLevel | undefined {
-	// `KNOWN_AUTO_APPROVE_VALUES` is intentionally tolerant of legacy values
-	// that are not real `ChatPermissionLevel`s. Validate against the enum here
-	// so this function never returns a value outside its declared contract.
-	const normalized = getChatPermissionLevelFromDefaultConfiguration(value) ?? (isChatPermissionLevel(value) ? value : undefined);
-	if (!normalized) {
-		return undefined;
-	}
-	// Bypass and (legacy) Autopilot auto-approve at least some
-	// tool calls, so clamp them to Default when enterprise policy disables
-	// global auto-approval.
-	if (policyRestricted && normalized !== ChatPermissionLevel.Default) {
-		return ChatPermissionLevel.Default;
-	}
-	return normalized;
 }
 
 function isGitHubInfoEqual(a: IGitHubInfo | undefined, b: IGitHubInfo | undefined): boolean {
@@ -4444,15 +4427,13 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * profile-scoped map. Isolation is seeded from the last session started for
 	 * this workspace, falling back to `sessions.useWorktree`.
 	 *
-	 * The agent-host defaults are controlled by the single
-	 * `chat.defaultConfiguration` object setting (with `mode` and
-	 * `approvals` properties). Per axis the precedence is: enterprise
-	 * **policy** value > the user's **remembered** last pick > the ordinary
-	 * configured **setting** value (treated as a plain default) > schema
-	 * default. So a normal setting behaves as a default that the remembered
-	 * pick overrides, while an enterprise policy still wins outright. The
-	 * local-only `chat.permissions.default` setting is intentionally NOT
-	 * consulted here.
+	 * Mode is controlled by `chat.defaultConfiguration.mode`. Approvals use
+	 * {@link getConfiguredNewSessionAutoApprove}: enterprise policy > remembered
+	 * last pick > explicitly configured `chat.defaultConfiguration.approvals` >
+	 * `chat.permissions.default` > schema default. Schema-default Manual must
+	 * not mask `chat.permissions.default`, so Copilot SDK harness sessions
+	 * inherit Bypass/Autopilot. A remembered pick still overrides a normal
+	 * setting, while an enterprise policy wins outright.
 	 *
 	 * If enterprise policy disables global auto-approval
 	 * (`chat.tools.global.autoApprove` policy value `false`), the approval seed
@@ -4465,7 +4446,6 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 */
 	protected _initialNewSessionConfig(workspace?: ISessionWorkspace): Record<string, unknown> | undefined {
 		const config = Object.create(null) as Record<string, unknown>;
-		const policyRestricted = isAutoApprovePolicyRestricted(this._baseConfigurationService);
 
 		// Seed session config values from the last user picks, migrating any
 		// legacy `autoApprove='autopilot'` remembered value into the new
@@ -4483,21 +4463,17 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 				?? (this._baseConfigurationService.getValue<boolean>(USE_WORKTREE_SETTING) !== false ? 'worktree' : 'folder');
 		}
 
-		// `chat.defaultConfiguration` controls both axes. Per axis the
-		// precedence is: enterprise policy > remembered pick > effective
-		// configured value (`inspect().value`, which is the user's setting or
-		// the schema default). `inspect().value` is used instead of
-		// `getValue()` only so the policy layer can be lifted above the
-		// remembered pick.
+		// Mode axis still reads `chat.defaultConfiguration` directly. Approvals
+		// go through {@link getConfiguredNewSessionAutoApprove} so
+		// `chat.permissions.default` is mapped into the session when
+		// `chat.defaultConfiguration.approvals` is only at its schema default.
 		const inspected = this._baseConfigurationService.inspect<IChatDefaultConfiguration>(ChatConfiguration.DefaultConfiguration);
 		const policyDefaults = inspected.policyValue;
 		const effectiveDefaults = inspected.value;
 
-		// Approval axis: policy > remembered > effective.
-		const resolvedAutoApprove =
-			normalizeAutoApproveValue(policyDefaults?.approvals, policyRestricted)
-			?? normalizeAutoApproveValue(remembered[SessionConfigKey.AutoApprove], policyRestricted)
-			?? normalizeAutoApproveValue(effectiveDefaults?.approvals, policyRestricted);
+		const resolvedAutoApprove = getConfiguredNewSessionAutoApprove(this._baseConfigurationService, {
+			remembered: remembered[SessionConfigKey.AutoApprove],
+		});
 		if (resolvedAutoApprove) {
 			remembered[SessionConfigKey.AutoApprove] = resolvedAutoApprove;
 		} else {
@@ -4513,13 +4489,18 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 			delete remembered[SessionConfigKey.Mode];
 		}
 
+		// `chat.permissions.default` still accepts legacy `autopilot` on the
+		// approvals axis; migrate after both axes resolve so it becomes
+		// `mode='autopilot'` + `autoApprove='default'`.
+		const seeded = migrateLegacyAutopilotConfig(remembered);
+
 		// Worktree branch prefix, forwarded from `git.branchPrefix`. Seeded
 		// here (rather than remembered) since it is derived from a setting, not
 		// a user pick; an empty value is omitted so the default branch naming
 		// is preserved.
-		Object.assign(remembered, this._derivedNewSessionConfig(workspace));
+		Object.assign(seeded, this._derivedNewSessionConfig(workspace));
 
-		return Object.keys(remembered).length > 0 ? remembered : undefined;
+		return Object.keys(seeded).length > 0 ? seeded : undefined;
 	}
 
 	private _derivedNewSessionConfig(workspace: ISessionWorkspace | undefined): Record<string, unknown> {
