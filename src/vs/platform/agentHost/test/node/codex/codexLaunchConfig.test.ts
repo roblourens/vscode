@@ -5,14 +5,17 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { buildCodexLaunchConfig, buildCodexResumeParams, codexPermissionProfile, codexPermissionProfileOverrides, codexPermissionProfileReadRoots } from '../../../node/codex/codexLaunchConfig.js';
+import { buildCodexLaunchConfig, buildCodexResumeParams, CODEX_PROXY_ENV_KEY, codexChatGPTAuthThreadConfig, codexPermissionProfile, codexPermissionProfileOverrides, codexPermissionProfileReadRoots } from '../../../node/codex/codexLaunchConfig.js';
 
 suite('CodexLaunchConfig', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('adds the Copilot proxy and enforces telemetry overrides after extra arguments', () => {
-		const config = buildCodexLaunchConfig('/sdk/codex', { PATH: '/bin', OPENAI_API_KEY: 'personal' }, { baseUrl: 'http://127.0.0.1:1234', nonce: 'nonce' }, ['--log-level=debug', '-c', 'analytics.enabled=true']);
-		assert.deepStrictEqual(config.env, { PATH: '/bin', OPENAI_API_KEY: 'nonce', AI_AGENT: 'github_copilot_vscode_agent' });
+		const config = buildCodexLaunchConfig('/sdk/codex', { PATH: '/bin', OPENAI_API_KEY: 'personal', CODEX_API_KEY: 'sk-svcacct-test' }, { baseUrl: 'http://127.0.0.1:1234', nonce: 'nonce' }, ['--log-level=debug', '-c', 'analytics.enabled=true']);
+		assert.deepStrictEqual(config.env, { PATH: '/bin', [CODEX_PROXY_ENV_KEY]: 'nonce', AI_AGENT: 'github_copilot_vscode_agent' });
+		assert.strictEqual(config.env.OPENAI_API_KEY, undefined);
+		assert.strictEqual(config.env.CODEX_API_KEY, undefined);
+		assert.ok(config.args.includes(`model_providers.vscode-proxy.env_key="${CODEX_PROXY_ENV_KEY}"`));
 		assert.ok(config.args.includes('model_providers.vscode-proxy.name="VS Code Proxy"'));
 		assert.ok(!config.args.some(argument => argument.startsWith('model_provider=')));
 		assert.ok(config.args.includes('model_providers.vscode-proxy.requires_openai_auth=false'));
@@ -130,6 +133,13 @@ suite('CodexLaunchConfig', () => {
 		});
 	});
 
+	test('forces ChatGPT login only for signed-in openai threads', () => {
+		assert.deepStrictEqual(codexChatGPTAuthThreadConfig('openai', true), { forced_login_method: 'chatgpt' });
+		assert.deepStrictEqual(codexChatGPTAuthThreadConfig('openai', false), {});
+		assert.deepStrictEqual(codexChatGPTAuthThreadConfig('vscode-proxy', true), {});
+		assert.deepStrictEqual(codexChatGPTAuthThreadConfig('custom-provider', true), {});
+	});
+
 	test('resume explicitly binds each session model and provider', () => {
 		assert.deepStrictEqual(buildCodexResumeParams({ modelProvider: 'openai', modelId: 'native-model' }, 'thread-a', {}, undefined, {}, undefined, true), {
 			threadId: 'thread-a',
@@ -173,6 +183,18 @@ suite('CodexLaunchConfig', () => {
 			approvalPolicy: 'on-request',
 			approvalsReviewer: 'auto_review',
 			permissions: 'vscode-workspace',
+			config: { 'features.default_mode_request_user_input': true, 'features.image_generation': false },
+		});
+		assert.deepStrictEqual(buildCodexResumeParams({ modelProvider: 'openai', modelId: 'native-model' }, 'thread-e', {}, undefined, codexChatGPTAuthThreadConfig('openai', true), undefined, true), {
+			threadId: 'thread-e',
+			model: 'native-model',
+			modelProvider: 'openai',
+			config: { forced_login_method: 'chatgpt', 'features.default_mode_request_user_input': true, 'features.image_generation': true },
+		});
+		assert.deepStrictEqual(buildCodexResumeParams({ modelProvider: 'vscode-proxy', modelId: 'copilot-model' }, 'thread-f', {}, undefined, codexChatGPTAuthThreadConfig('vscode-proxy', true)), {
+			threadId: 'thread-f',
+			model: 'copilot-model',
+			modelProvider: 'vscode-proxy',
 			config: { 'features.default_mode_request_user_input': true, 'features.image_generation': false },
 		});
 	});

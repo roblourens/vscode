@@ -97,7 +97,7 @@ import { resolveCodexInput } from './codexPromptResolver.js';
 import { buildUserInputRequest, emptyUserInputResponse, userInputResponseFromAnswers } from './codexUserInputMapper.js';
 import { replayThreadToTurns } from './codexReplayMapper.js';
 import { CodexSessionMetadataStore } from './codexSessionMetadataStore.js';
-import { buildCodexLaunchConfig, buildCodexResumeParams, codexPermissionProfile, codexPermissionProfileReadRoots, CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY } from './codexLaunchConfig.js';
+import { buildCodexLaunchConfig, buildCodexResumeParams, codexChatGPTAuthThreadConfig, codexPermissionProfile, codexPermissionProfileReadRoots, CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY } from './codexLaunchConfig.js';
 import { codexDelegationDisplayText } from './codexDelegation.js';
 import { THREAD_LIST_MAX_PAGES, collectThreadListPages } from './codexThreadList.js';
 import { ICodexRolloutMetadata, ICodexRolloutModel, readCodexRolloutMetadata } from './codexRolloutMetadata.js';
@@ -1769,10 +1769,13 @@ export class CodexAgent extends Disposable implements IAgent {
 		}
 	}
 
-	private _imageGenerationEnabledForModelProvider(modelProvider: string): boolean {
-		return modelProvider === CODEX_OPENAI_MODEL_PROVIDER
-			&& this._openAIAccountState.status === 'signedIn'
+	private _isChatGPTSignedIn(): boolean {
+		return this._openAIAccountState.status === 'signedIn'
 			&& this._openAIAccountState.authType === 'chatgpt';
+	}
+
+	private _imageGenerationEnabledForModelProvider(modelProvider: string): boolean {
+		return modelProvider === CODEX_OPENAI_MODEL_PROVIDER && this._isChatGPTSignedIn();
 	}
 
 	private _defaultModel(): ModelSelection | undefined {
@@ -4962,17 +4965,18 @@ export class CodexAgent extends Disposable implements IAgent {
 			const scratch = this._createResumedSessionEntry(owningSessionId, '', workingDirectory, model, target);
 			const mcpServers = this._buildSessionMcpServers(scratch);
 			const dynamicTools = this._buildDynamicTools(scratch);
+			const resolvedModel = parseCodexModelSelection(model);
 			const threadConfig: Record<string, JsonValue> = {
 				web_search: narrowWebSearchMode(validatedConfig[CodexSessionConfigKey.WebSearchMode]) ?? codexSessionConfigDefaults[CodexSessionConfigKey.WebSearchMode],
 				...this._modelContextConfigOverrides(model),
 				[CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY]: true,
+				...codexChatGPTAuthThreadConfig(resolvedModel.modelProvider, this._isChatGPTSignedIn()),
 			};
 			if (Object.keys(mcpServers).length > 0) {
 				threadConfig.mcp_servers = mcpServers as JsonValue;
 			}
 
 			const conn = await this._ensureConnection();
-			const resolvedModel = parseCodexModelSelection(model);
 			const sessionHookTrust = await this._buildSessionHookTrustState(conn.client, workingDirectory.fsPath);
 			this._applySessionHookTrustState(threadConfig, sessionHookTrust, workingDirectory.fsPath);
 			this._assertCurrentConnection(conn);
@@ -5346,11 +5350,13 @@ export class CodexAgent extends Disposable implements IAgent {
 				this._assertCurrentConnection(forkConnection);
 			}
 			const forkCwd = forkManagedWorkingDirectory?.fsPath ?? runtimeWorkspaceRoots?.[0] ?? sourcePrimary?.fsPath;
+			const forkModelProvider = resolvedModel?.modelProvider ?? sourceRead.thread.modelProvider;
 			const forkConfig: Record<string, JsonValue> = {
 				...this._modelContextConfigOverrides(model),
 				...this._portableHistoryConfig(hasNativeHistory),
 				[CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY]: true,
-				'features.image_generation': this._imageGenerationEnabledForModelProvider(resolvedModel?.modelProvider ?? sourceRead.thread.modelProvider),
+				'features.image_generation': this._imageGenerationEnabledForModelProvider(forkModelProvider),
+				...codexChatGPTAuthThreadConfig(forkModelProvider, this._isChatGPTSignedIn()),
 			};
 			this._applySessionHookTrustState(forkConfig, await this._buildSessionHookTrustState(forkConnection.client, forkCwd), forkCwd);
 			this._assertCurrentConnection(forkConnection);
@@ -5571,6 +5577,7 @@ export class CodexAgent extends Disposable implements IAgent {
 			...this._modelContextConfigOverrides(model),
 			[CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY]: true,
 			'features.image_generation': this._imageGenerationEnabledForModelProvider(resolvedModel.modelProvider),
+			...codexChatGPTAuthThreadConfig(resolvedModel.modelProvider, this._isChatGPTSignedIn()),
 		};
 		const mcpServerNames = Object.keys(mcpServers);
 		if (mcpServerNames.length > 0) {
@@ -6774,7 +6781,11 @@ export class CodexAgent extends Disposable implements IAgent {
 								threadId,
 								mcpServers,
 								runtimeWorkspaceRoots,
-								{ ...resumeConfig, ...this._portableHistoryConfig(session.hasNativeHistory) },
+								{
+									...resumeConfig,
+									...this._portableHistoryConfig(session.hasNativeHistory),
+									...codexChatGPTAuthThreadConfig(resolvedModel.modelProvider, this._isChatGPTSignedIn()),
+								},
 								customizationLaunch.developerInstructions,
 								this._imageGenerationEnabledForModelProvider(resolvedModel.modelProvider),
 								{ approvalPolicy, approvalsReviewer: resolvedPermissions.approvalsReviewer, permissions },

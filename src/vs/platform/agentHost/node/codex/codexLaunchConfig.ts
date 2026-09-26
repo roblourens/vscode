@@ -83,6 +83,29 @@ export interface ICodexLaunchConfig {
 
 export const CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG_KEY = 'features.default_mode_request_user_input';
 
+/**
+ * Env var that holds the loopback vscode-proxy nonce. ChatGPT-authenticated
+ * Codex requests must not read this as an OpenAI API key: the default openai
+ * provider still talks to `chatgpt.com/backend-api/codex/responses`, and an
+ * `OPENAI_API_KEY` (including a stored `sk-svc…` service key) produces 401
+ * `Incorrect API key provided` while the account UI still shows ChatGPT Plus.
+ */
+export const CODEX_PROXY_ENV_KEY = 'VSCODE_CODEX_PROXY_KEY';
+
+const CODEX_API_KEY_ENV_VARS = ['OPENAI_API_KEY', 'CODEX_API_KEY'] as const;
+const CODEX_OPENAI_MODEL_PROVIDER = 'openai';
+
+/**
+ * Per-thread config that keeps ChatGPT-subscription turns on ChatGPT OAuth
+ * instead of an API key that happened to be in the process environment or
+ * `auth.json`. Copilot (`vscode-proxy`) and custom providers are unchanged.
+ */
+export function codexChatGPTAuthThreadConfig(modelProvider: string, chatGPTSignedIn: boolean): Record<string, JsonValue> {
+	return modelProvider === CODEX_OPENAI_MODEL_PROVIDER && chatGPTSignedIn
+		? { forced_login_method: 'chatgpt' }
+		: {};
+}
+
 export function buildCodexResumeParams(
 	model: { readonly modelProvider: string; readonly modelId: string },
 	threadId: string,
@@ -125,12 +148,15 @@ export function buildCodexLaunchConfig(
 		delete env.OTEL_SERVICE_NAME;
 		env.OTEL_RESOURCE_ATTRIBUTES = serializeResourceAttributes(telemetry.resourceAttributes);
 	}
-	env.OPENAI_API_KEY = proxy.nonce;
+	for (const key of CODEX_API_KEY_ENV_VARS) {
+		delete env[key];
+	}
+	env[CODEX_PROXY_ENV_KEY] = proxy.nonce;
 	const overrides = [
 		`model_providers.vscode-proxy.name="VS Code Proxy"`,
 		`model_providers.vscode-proxy.base_url="${proxy.baseUrl}/v1"`,
 		`model_providers.vscode-proxy.wire_api="responses"`,
-		`model_providers.vscode-proxy.env_key="OPENAI_API_KEY"`,
+		`model_providers.vscode-proxy.env_key="${CODEX_PROXY_ENV_KEY}"`,
 		`model_providers.vscode-proxy.requires_openai_auth=false`,
 		`model_providers.vscode-proxy.supports_websockets=false`,
 		// Codex filters its shell tool's env through `shell_environment_policy`,
