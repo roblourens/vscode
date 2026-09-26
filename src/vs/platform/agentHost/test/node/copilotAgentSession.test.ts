@@ -927,6 +927,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	configureMockSession?: (session: MockCopilotSession) => void;
 	getUserMcpServerNames?: () => Promise<ReadonlySet<string>>;
 	controlPlaneRpcTimeoutMs?: number;
+	sessionHostStallMs?: number;
 	sessionCustomizations?: () => readonly Customization[];
 	resolveCustomizationEnablement?: (target: ICustomizationEnablementTarget) => CustomizationEnablementResolution;
 	initialSessionMeta?: Record<string, unknown>;
@@ -1253,6 +1254,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 			enableDevelopmentErrorInjection: options?.enableDevelopmentErrorInjection ?? true,
 			realpath: options?.realpath,
 			controlPlaneRpcTimeoutMs: options?.controlPlaneRpcTimeoutMs,
+			sessionHostStallMs: options?.sessionHostStallMs,
 			subagentTaskCompletionDelay: options?.subagentTaskCompletionDelay ?? 0,
 			telemetryContext: () => options?.telemetryContext,
 		},
@@ -3704,6 +3706,46 @@ suite('CopilotAgentSession', () => {
 		await assert.rejects(() => session.send('hello', undefined, 'turn-failed'), /send failed/);
 
 		assert.deepStrictEqual({ hasActiveTurn: session.hasActiveTurn, turnEndCount }, { hasActiveTurn: false, turnEndCount: 1 });
+	});
+
+	test('a send that never emits SDK events fails the turn instead of hanging', async () => {
+		let turnEndCount = 0;
+		const { session, signals } = await createAgentSession(disposables, {
+			onTurnEnded: () => turnEndCount++,
+			sessionHostStallMs: 1,
+		});
+
+		await session.send('hello', undefined, 'turn-no-host');
+		await timeout(20);
+
+		const errors = getActions(signals).filter((a): a is ChatErrorAction => a.type === ActionType.ChatError);
+		assert.deepStrictEqual({
+			hasActiveTurn: session.hasActiveTurn,
+			turnEndCount,
+			errorType: errors[0]?.part.error.errorType,
+			errorMessage: errors[0]?.part.error.message,
+			resumable: errors[0]?.part.resumable,
+		}, {
+			hasActiveTurn: false,
+			turnEndCount: 1,
+			errorType: 'sessionHostUnregistered',
+			errorMessage: 'Copilot session host is not registered. Retry your request.',
+			resumable: true,
+		});
+	});
+
+	test('an SDK event after send disarms the session-host stall', async () => {
+		const { session, mockSession, signals } = await createAgentSession(disposables, { sessionHostStallMs: 1 });
+		await session.send('hello', undefined, 'turn-live-host');
+		mockSession.fire('user.message', { content: 'hello' } as SessionEventPayload<'user.message'>['data']);
+		await timeout(20);
+		assert.deepStrictEqual({
+			hasActiveTurn: session.hasActiveTurn,
+			errors: getActions(signals).filter(a => a.type === ActionType.ChatError).length,
+		}, {
+			hasActiveTurn: true,
+			errors: 0,
+		});
 	});
 
 	for (const abortedIdle of [false, true]) {

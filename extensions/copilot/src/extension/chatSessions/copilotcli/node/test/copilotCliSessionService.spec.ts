@@ -532,6 +532,117 @@ describe('CopilotCLISessionService', () => {
 		});
 	});
 
+	describe('CopilotCLISessionService session host closeSession races', () => {
+		it('does not closeSession while a live wrapper owns the session host', async () => {
+			const id = 'live-host';
+			manager.sessions.set(id, new MockCliSdkSession(id, new Date()));
+			const wrapper = await service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+			expect(wrapper).toBeTruthy();
+			const closeSpy = vi.spyOn(manager, 'closeSession');
+
+			await service.getChatHistory({ sessionId: id, workspace: workspaceInfoFor(undefined) }, CancellationToken.None);
+			await service.renameSession(id, 'Still Live');
+
+			expect(closeSpy).not.toHaveBeenCalled();
+			wrapper!.dispose();
+		});
+
+		it('does not close a reopened wrapper with a stale dispose closeSession', async () => {
+			const id = 'reopen-host';
+			manager.sessions.set(id, new MockCliSdkSession(id, new Date()));
+			const first = await service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+			expect(first).toBeTruthy();
+
+			let releaseClose: () => void = () => { };
+			const closeStarted = new Promise<void>(resolve => {
+				manager.closeSession = vi.fn(() => {
+					resolve();
+					return new Promise<void>(r => { releaseClose = r; });
+				}) as unknown as typeof manager.closeSession;
+			});
+
+			first!.dispose();
+			await closeStarted;
+			const secondPromise = service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+			releaseClose();
+			const second = await secondPromise;
+			expect(second).toBeTruthy();
+			expect(manager.closeSession).toHaveBeenCalledTimes(1);
+
+			const laterClose = vi.fn(async () => { });
+			manager.closeSession = laterClose as unknown as typeof manager.closeSession;
+			await service.getChatHistory({ sessionId: id, workspace: workspaceInfoFor(undefined) }, CancellationToken.None);
+			expect(laterClose).not.toHaveBeenCalled();
+			second!.dispose();
+		});
+
+		it('skips closeSession when getSession re-registers the host before dispose close runs', async () => {
+			const id = 'skip-stale-close';
+			const sdkSession = new MockCliSdkSession(id, new Date());
+			let releaseModel: () => void = () => { };
+			const modelRequested = new Promise<void>(resolve => {
+				sdkSession.getSelectedModel = () => {
+					resolve();
+					return new Promise<string | undefined>(r => { releaseModel = () => r(undefined); });
+				};
+			});
+			manager.sessions.set(id, sdkSession);
+			const first = await service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+			expect(first).toBeTruthy();
+
+			const historyPromise = service.getChatHistory({ sessionId: id, workspace: workspaceInfoFor(undefined) }, CancellationToken.None);
+			await modelRequested;
+			const secondPromise = service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+			const closeSpy = vi.spyOn(manager, 'closeSession');
+			first!.dispose();
+			releaseModel();
+			await historyPromise;
+			const second = await secondPromise;
+			expect(second).toBeTruthy();
+			expect(closeSpy).not.toHaveBeenCalled();
+			second!.dispose();
+		});
+
+		it('serializes history closeSession ahead of getSession so the live host is not unregistered', async () => {
+			const id = 'serialize-host';
+			manager.sessions.set(id, new MockCliSdkSession(id, new Date()));
+			const originalGetSession = manager.getSession.bind(manager);
+			let releaseHistory: () => void = () => { };
+			const historyOpened = new Promise<void>(resolve => {
+				manager.getSession = vi.fn((opts: SessionOptions & { sessionId: string }, writable: boolean) => {
+					if (!writable) {
+						resolve();
+						return new Promise(r => {
+							releaseHistory = () => r(originalGetSession(opts, writable));
+						});
+					}
+					return originalGetSession(opts, writable);
+				}) as unknown as typeof manager.getSession;
+			});
+			const closeSpy = vi.spyOn(manager, 'closeSession');
+
+			const historyPromise = service.getChatHistory({ sessionId: id, workspace: workspaceInfoFor(undefined) }, CancellationToken.None);
+			await historyOpened;
+			const wrapperPromise = service.getSession({ sessionId: id, ...sessionOptionsFor() }, CancellationToken.None);
+
+			let wrapperResolved = false;
+			void wrapperPromise.then(() => { wrapperResolved = true; });
+			await Promise.resolve();
+			expect(wrapperResolved).toBe(false);
+
+			releaseHistory();
+			await historyPromise;
+			const wrapper = await wrapperPromise;
+			expect(wrapper).toBeTruthy();
+			expect(closeSpy).toHaveBeenCalledTimes(1);
+
+			closeSpy.mockClear();
+			await service.getChatHistory({ sessionId: id, workspace: workspaceInfoFor(undefined) }, CancellationToken.None);
+			expect(closeSpy).not.toHaveBeenCalled();
+			wrapper!.dispose();
+		});
+	});
+
 	describe('CopilotCLISessionService.getSession missing', () => {
 		it('returns undefined when underlying manager has no session', async () => {
 			const session = await service.getSession({ sessionId: 'does-not-exist', ...sessionOptionsFor() }, CancellationToken.None);

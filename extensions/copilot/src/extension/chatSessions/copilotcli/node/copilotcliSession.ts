@@ -60,6 +60,13 @@ export type CopilotCLICommand = 'compact' | 'plan' | 'fleet' | 'remote';
  */
 export const copilotCLICommands: readonly CopilotCLICommand[] = ['compact', 'plan', 'fleet', 'remote'] as const;
 
+/**
+ * A send that never receives an SDK event has no registered session host
+ * (`pending-request event was not delivered`). Abort instead of leaving the
+ * chat on Considering/Working until the window is reloaded (#338127).
+ */
+export const COPILOT_CLI_SESSION_HOST_STALL_MS = 60_000;
+
 export class CopilotCLIQuotaExceededError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -1887,7 +1894,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 			if (input.source) {
 				sendOptions.source = input.source;
 			}
-			await this._sdkSession.send(sendOptions);
+			await this.sendWithSessionHostWatchdog(sendOptions);
 
 			try {
 				const localSession = this._sdkSession as LocalSession;
@@ -1899,6 +1906,48 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 				this.logService.error(error, '[CopilotCLISession] Error while waiting for pending background tasks');
 				// Don't fail the whole request if waiting for background tasks fails, as it's not critical to the main flow.
 				// Just log the error and continue.
+			}
+		}
+	}
+
+	/**
+	 * `Session.send()` waits for idle. If the runtime has no session host
+	 * registered, pending-request reverse-RPCs are dropped and send never
+	 * settles — the chat UI stays on Considering/Working until reload.
+	 * Abort when no SDK event arrives at all; a live host emits promptly.
+	 */
+	private async sendWithSessionHostWatchdog(sendOptions: SendOptions): Promise<void> {
+		const sendPromise = this._sdkSession.send(sendOptions);
+		let stallTimer: ReturnType<typeof setTimeout> | undefined;
+		let sawEvent = false;
+		const stall = new Promise<never>((_, reject) => {
+			stallTimer = setTimeout(() => {
+				if (sawEvent) {
+					return;
+				}
+				this.logService.error(`[CopilotCLISession] No session host events for ${this.sessionId} after ${COPILOT_CLI_SESSION_HOST_STALL_MS}ms; aborting hung send.`);
+				void this._sdkSession.abort().catch(error => {
+					this.logService.error(`[CopilotCLISession] Failed to abort hung session ${this.sessionId}: ${error}`);
+				});
+				reject(new Error(l10n.t('Copilot session host is not registered. Retry your request.')));
+			}, COPILOT_CLI_SESSION_HOST_STALL_MS);
+		});
+		const stopWatching = this._sdkSession.on('*', () => {
+			sawEvent = true;
+			if (stallTimer !== undefined) {
+				clearTimeout(stallTimer);
+				stallTimer = undefined;
+			}
+		});
+		try {
+			await Promise.race([sendPromise, stall]);
+		} catch (error) {
+			void sendPromise.catch(() => { /* aborted hung send */ });
+			throw error;
+		} finally {
+			stopWatching();
+			if (stallTimer !== undefined) {
+				clearTimeout(stallTimer);
 			}
 		}
 	}

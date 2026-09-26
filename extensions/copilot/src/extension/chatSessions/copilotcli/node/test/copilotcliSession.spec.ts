@@ -31,7 +31,7 @@ import { MockChatSessionMetadataStore } from '../../../common/test/mockChatSessi
 import { IWorkspaceInfo } from '../../../common/workspaceInfo';
 import { FakeToolsService, ToolCall } from '../../common/copilotCLITools';
 import { Session } from '../../common/utils';
-import { CopilotCLISession } from '../copilotcliSession';
+import { CopilotCLISession, COPILOT_CLI_SESSION_HOST_STALL_MS } from '../copilotcliSession';
 import { PermissionRequest } from '../permissionHelpers';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler, UserInputResponse } from '../userInputHelpers';
 import { NullICopilotCLIImageSupport } from './testHelpers';
@@ -68,6 +68,7 @@ class MockSdkSession {
 
 	emit(event: string, data: unknown) {
 		this.onHandlers.get(event)?.forEach(h => h({ data }));
+		this.onHandlers.get('*')?.forEach(h => h({ type: event, data }));
 	}
 
 	/**
@@ -483,6 +484,30 @@ describe('CopilotCLISession', () => {
 
 		expect(session.status).toBe(ChatSessionStatus.Failed);
 		expect(stream.output.join('\n')).toContain('Error: network');
+	});
+
+	it('fails a hung send with no session host events instead of staying InProgress', async () => {
+		let sendStarted!: () => void;
+		const started = new Promise<void>(resolve => { sendStarted = resolve; });
+		sdkSession.send = () => {
+			sendStarted();
+			return new Promise(() => { /* never settles and emits no events */ });
+		};
+		const session = await createSession();
+		const stream = new MockChatResponseStream();
+		session.attachStream(stream);
+		vi.useFakeTimers();
+		try {
+			const request = session.handleRequest({ id: '', toolInvocationToken: undefined as never }, { prompt: 'Hang' }, [], undefined, authInfo, CancellationToken.None);
+			await started;
+			await vi.advanceTimersByTimeAsync(COPILOT_CLI_SESSION_HOST_STALL_MS);
+			await request;
+			expect(session.status).toBe(ChatSessionStatus.Failed);
+			expect(stream.output.join('\n')).toContain('session host is not registered');
+			expect(sdkSession.aborted).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('emits status events on successful request', async () => {

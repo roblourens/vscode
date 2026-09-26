@@ -7,13 +7,13 @@ import type { CopilotSession, CurrentToolMetadata, ElicitationContext, Elicitati
 import { realpath as fsRealpath } from 'fs';
 import { cp, rm } from 'fs/promises';
 import { promisify } from 'util';
-import { DeferredPromise, firstParallel, raceCancellation, raceCancellationError, raceTimeout, RunOnceScheduler, Sequencer, SequencerByKey, Throttler, timeout } from '../../../../base/common/async.js';
+import { DeferredPromise, disposableTimeout, firstParallel, raceCancellation, raceCancellationError, raceTimeout, RunOnceScheduler, Sequencer, SequencerByKey, Throttler, timeout } from '../../../../base/common/async.js';
 import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { CancellationError, getErrorMessage } from '../../../../base/common/errors.js';
 import { escapeMarkdownSyntaxTokens } from '../../../../base/common/htmlContent.js';
-import { Disposable, DisposableMap, IReference, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap, IDisposable, IReference, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { LRUCache } from '../../../../base/common/map.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { isAuthorizationProtectedResourceMetadata } from '../../../../base/common/oauth.js';
@@ -452,6 +452,8 @@ const realpath = promisify(fsRealpath);
 // A non-settling control RPC must not permanently block the per-chat sequencer.
 const CONTROL_PLANE_RPC_TIMEOUT_MS = 30_000;
 const SUBAGENT_TASK_COMPLETION_DELAY_MS = 250;
+/** First-event timeout after send; a registered host emits well before this. */
+const SESSION_HOST_UNREGISTERED_STALL_MS = 60_000;
 
 function hasParentPathSegment(filePath: string): boolean {
 	return filePath.split(/[\\/]/).includes('..');
@@ -546,6 +548,12 @@ export interface ICopilotAgentSessionOptions {
 	readonly realpath?: (path: string) => Promise<string>;
 	/** Overrides the control-plane RPC timeout for deterministic tests. */
 	readonly controlPlaneRpcTimeoutMs?: number;
+	/**
+	 * How long after `session.send()` the host may stay `pending` with no SDK
+	 * events before the turn is failed. An unregistered session host drops
+	 * pending-request reverse-RPCs, so idle never arrives (#338127).
+	 */
+	readonly sessionHostStallMs?: number;
 }
 
 /** Keeps provider-owned state consistent with a live SDK working-directory mutation. */
@@ -858,6 +866,8 @@ export class CopilotAgentSession extends Disposable {
 	readonly resourceUri: URI;
 	private readonly _ownerSessionUri: URI;
 	private readonly _controlPlaneRpcTimeoutMs: number;
+	private readonly _sessionHostStallMs: number;
+	private readonly _sessionHostStall = this._register(new MutableDisposable<IDisposable>());
 	private _controlPlaneDesynchronized = false;
 	get ownerSessionUri(): URI { return this._ownerSessionUri; }
 	/** @deprecated Compatibility alias for SDK callbacks; this is the exact persistence resource. */
@@ -1341,6 +1351,7 @@ export class CopilotAgentSession extends Disposable {
 		this.sessionId = options.rawSessionId;
 		this._ownerSessionUri = options.sessionUri;
 		this._controlPlaneRpcTimeoutMs = options.controlPlaneRpcTimeoutMs ?? CONTROL_PLANE_RPC_TIMEOUT_MS;
+		this._sessionHostStallMs = options.sessionHostStallMs ?? SESSION_HOST_UNREGISTERED_STALL_MS;
 		this.resourceUri = options.resource ?? options.sessionUri;
 		this._chatChannelUri = options.chatChannelUri;
 		this._storageUri = this.resourceUri;
@@ -2099,6 +2110,33 @@ export class CopilotAgentSession extends Disposable {
 		return turn.id;
 	}
 
+	/**
+	 * `session.send()` is fire-and-forget; the turn stays pending until the
+	 * first SDK event. If the runtime has no session host registered, pending
+	 * requests are dropped and idle never arrives — fail instead of spinning
+	 * Considering/Working until reload (#338127).
+	 */
+	private _armSessionHostStallWatchdog(turn: CopilotTurn | undefined): void {
+		this._clearSessionHostStallWatchdog();
+		if (!turn || this._currentTurn.value !== turn || !turn.isPending) {
+			return;
+		}
+		this._sessionHostStall.value = disposableTimeout(() => {
+			if (this._currentTurn.value !== turn || !turn.isPending) {
+				return;
+			}
+			this._logService.error(`[Copilot:${this.sessionId}] No session host events for turn ${turn.id} after ${this._sessionHostStallMs}ms; failing hung turn.`);
+			this.failActiveTurn({
+				errorType: 'sessionHostUnregistered',
+				message: localize('copilotAgent.sessionHostUnregistered', "Copilot session host is not registered. Retry your request."),
+			});
+		}, this._sessionHostStallMs);
+	}
+
+	private _clearSessionHostStallWatchdog(): void {
+		this._sessionHostStall.clear();
+	}
+
 	discardActiveTurn(): void {
 		if (this._currentTurn.value) {
 			this._clearActiveTurn();
@@ -2112,6 +2150,7 @@ export class CopilotAgentSession extends Disposable {
 	 * is not stranded waiting on a turn that already ended.
 	 */
 	private _clearActiveTurn(): void {
+		this._clearSessionHostStallWatchdog();
 		const turn = this._currentTurn.value;
 		this._clearPendingFusionEvents();
 		this._hasFusionRootTurnBoundary = false;
@@ -3050,6 +3089,7 @@ export class CopilotAgentSession extends Disposable {
 		}
 		try {
 			await this._send(prompt, attachments, mode);
+			this._armSessionHostStallWatchdog(turn);
 		} catch (err) {
 			// A rejected send never reaches the SDK's agentic loop, so no
 			// `session.idle` will ever arrive to close this turn. The host turns
@@ -3330,6 +3370,7 @@ export class CopilotAgentSession extends Disposable {
 			await this._otelService.withTraceContext(traceContext, () => this._wrapper.session.rpc.sendMessages({ messages: [] }));
 			turn?.markProviderCallResolved();
 			this._logService.info(`[Copilot:${this.sessionId}] zero-message continuation returned`);
+			this._armSessionHostStallWatchdog(turn);
 		} catch (error) {
 			if (this._resumingTurnAwaitingProviderStart === turn) {
 				this._resumingTurnAwaitingProviderStart = undefined;
@@ -5433,6 +5474,8 @@ export class CopilotAgentSession extends Disposable {
 	private _subscribeToEvents(): void {
 		const wrapper = this._wrapper;
 		const sessionId = this.sessionId;
+
+		this._register(wrapper.onAnyEvent(() => this._clearSessionHostStallWatchdog()));
 
 		this._register(wrapper.onSystemNotification(e => {
 			this._seedSubagentDisplayNames([e]);

@@ -41,6 +41,9 @@ export class CopilotSessionWrapper extends Disposable {
 	private readonly _handledEventTypes = new Set<SessionEventType>();
 	private readonly _onUnhandledEvent = this._register(new Emitter<SessionEvent>());
 	readonly onUnhandledEvent = this._onUnhandledEvent.event;
+	private readonly _onAnyEvent = this._register(new Emitter<SessionEvent>());
+	/** Fires for every SDK event, including provisional Fusion conversation events. */
+	readonly onAnyEvent = this._onAnyEvent.event;
 	private readonly _onModelCallFinished = this._register(new Emitter<ICopilotModelCallFinishedEvent>());
 	readonly onModelCallFinished = this._onModelCallFinished.event;
 	private readonly _onProvisionalFusionEvent = this._register(new Emitter<CopilotProvisionalFusionEvent>());
@@ -64,6 +67,7 @@ export class CopilotSessionWrapper extends Disposable {
 		super();
 		this._logService.info(this._lifecycleLogMessage('attached'));
 		const unsubscribeAll = session.on(event => {
+			this._onAnyEvent.fire(event);
 			if (isProvisionalFusionConversationEvent(event)) {
 				if (event.type === 'tool.execution_start' || event.type === 'tool.execution_complete' || event.type === 'assistant.message') {
 					this._onProvisionalFusionEvent.fire(event);

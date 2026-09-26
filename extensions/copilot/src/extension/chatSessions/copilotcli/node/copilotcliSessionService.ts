@@ -831,12 +831,65 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		return buildSandboxConfigForCLI(process.platform, sandboxSetting, fileSystemSetting, { allowedHosts, blockedHosts });
 	}
 
+	private getSessionMutex(sessionId: string): Mutex {
+		const existing = this.sessionMutexForGetSession.get(sessionId);
+		if (existing) {
+			return existing;
+		}
+		const created = new Mutex();
+		this.sessionMutexForGetSession.set(sessionId, created);
+		return created;
+	}
+
+	/**
+	 * Serializes SDK getSession/closeSession for a session id so a history or
+	 * metadata read cannot unregister the runtime session host while a live
+	 * wrapper is sending (#338127).
+	 */
+	private async withSessionLock<T>(sessionId: string, token: CancellationToken, fn: () => Promise<T>): Promise<T | undefined> {
+		const lockDisposable = await this.getSessionMutex(sessionId).acquire(token);
+		if (!lockDisposable) {
+			return undefined;
+		}
+		try {
+			return await fn();
+		} finally {
+			lockDisposable.dispose();
+		}
+	}
+
+	private async closeTransientSdkSession(sessionManager: internal.LocalSessionManager, sessionId: string, reason: string): Promise<void> {
+		if (this._sessionWrappers.has(sessionId)) {
+			this.logService.trace(`[CopilotCLISession] Skipping closeSession for ${sessionId} ${reason}; a live session host is registered.`);
+			return;
+		}
+		await sessionManager.closeSession(sessionId).catch(error => {
+			this.logService.error(`[CopilotCLISession] Failed to close session ${sessionId} ${reason}: ${error}`);
+		});
+	}
+
+	private async closeSdkSessionIfUnused(sdkSession: Session, sessionManager: internal.LocalSessionManager): Promise<void> {
+		const sessionId = sdkSession.sessionId;
+		await this.withSessionLock(sessionId, CancellationToken.None, async () => {
+			if (this._sessionWrappers.has(sessionId)) {
+				this.logService.trace(`[CopilotCLISession] Skipping closeSession for ${sessionId} after wrapper dispose; a live session host is registered.`);
+				return;
+			}
+			if (sdkSession.isAbortable()) {
+				await sdkSession.abort().catch(error => {
+					this.logService.error(`Failed to abort session ${sessionId}: ${error}`);
+				});
+			}
+			await sessionManager.closeSession(sessionId).catch(error => {
+				this.logService.error(`Failed to close session ${sessionId}: ${error}`);
+			});
+			this._onDidCloseSession.fire(sessionId);
+		});
+	}
+
 	public async getSession(options: IGetSessionOptions, token: CancellationToken): Promise<RefCountedSession | undefined> {
 		// https://github.com/microsoft/vscode/issues/276573
-		const lock = this.sessionMutexForGetSession.get(options.sessionId) ?? new Mutex();
-		this.sessionMutexForGetSession.set(options.sessionId, lock);
-		const lockDisposable = await lock.acquire(token);
-		try {
+		return this.withSessionLock(options.sessionId, token, async () => {
 			{
 				const session = this._sessionWrappers.get(options.sessionId);
 				if (session) {
@@ -873,9 +926,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 				mcpGateway.dispose();
 				throw error;
 			}
-		} finally {
-			lockDisposable?.dispose();
-		}
+		});
 	}
 	public async getChatHistory({ sessionId, workspace }: { sessionId: string; workspace: IWorkspaceInfo }, token: CancellationToken): Promise<(ChatRequestTurn2 | ChatResponseTurn2)[]> {
 		const { history } = await this.getChatHistoryImpl({ sessionId, workspace }, token);
@@ -893,33 +944,36 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 			return { history: [], events: [] };
 		}
 
-		let events: readonly SessionEvent[] = [];
-		let modelId: string | undefined = undefined;
-
-		// Try to shutdown session as soon as possible.
-		const existingSession = this._sessionWrappers.get(sessionId)?.object?.sdkSession;
-		if (existingSession) {
-			modelId = await existingSession.getSelectedModel();
-			events = existingSession.getEvents();
-		} else {
-			let shutdown = Promise.resolve();
+		const sessionData = await this.withSessionLock(sessionId, token, async (): Promise<{ modelId: string | undefined; events: readonly SessionEvent[] } | undefined> => {
+			// Try to shutdown session as soon as possible. Never closeSession while a
+			// live wrapper still owns the runtime session host (#338127).
+			const existingSession = this._sessionWrappers.get(sessionId)?.object?.sdkSession;
+			if (existingSession) {
+				return {
+					modelId: await existingSession.getSelectedModel(),
+					events: existingSession.getEvents(),
+				};
+			}
 			try {
 				const session = await sessionManager.getSession({ sessionId }, false);
 				if (!session) {
-					return { history: [], events: [] };
+					return { modelId: undefined, events: [] };
 				}
-				modelId = await session.getSelectedModel();
-				events = session.getEvents();
-				shutdown = sessionManager.closeSession(sessionId).catch(error => {
-					this.logService.error(`[CopilotCLISession] Failed to close session ${sessionId} after fetching chat history: ${error}`);
-				});
+				const modelId = await session.getSelectedModel();
+				const events = session.getEvents();
+				await this.closeTransientSdkSession(sessionManager, sessionId, `after fetching chat history`);
+				return { modelId, events };
 			} catch (error) {
 				this.logService.error(`[CopilotCLISession] Failed to read session ${sessionId}, it may be corrupted: ${error}`);
-				return { history: [], events: [] };
-			} finally {
-				await shutdown;
+				return { modelId: undefined, events: [] };
 			}
+		});
+		if (!sessionData) {
+			requestDetailsPromise.catch(error => {/** */ });
+			agentIdPromise.catch(error => {/** */ });
+			return { history: [], events: [] };
 		}
+		const { modelId, events } = sessionData;
 
 		const [agentId, storedDetails] = await Promise.all([agentIdPromise, requestDetailsPromise]);
 
@@ -1178,18 +1232,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		}));
 		session.add(toDisposable(() => {
 			this._sessionWrappers.deleteAndLeak(sdkSession.sessionId);
-			this.sessionMutexForGetSession.delete(sdkSession.sessionId);
-			(async () => {
-				if (sdkSession.isAbortable()) {
-					await sdkSession.abort().catch(error => {
-						this.logService.error(`Failed to abort session ${sdkSession.sessionId}: ${error}`);
-					});
-				}
-				await sessionManager.closeSession(sdkSession.sessionId).catch(error => {
-					this.logService.error(`Failed to close session ${sdkSession.sessionId}: ${error}`);
-				});
-				this._onDidCloseSession.fire(sdkSession.sessionId);
-			})();
+			void this.closeSdkSessionIfUnused(sdkSession, sessionManager);
 		}));
 
 		const refCountedSession = new RefCountedSession(session);
@@ -1219,6 +1262,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 			this.logService.error(`Failed to delete session ${sessionId}: ${error}`);
 		} finally {
 			this._sessionWrappers.deleteAndLeak(sessionId);
+			this.sessionMutexForGetSession.delete(sessionId);
 			// Possible the session was deleted in another vscode session or the like.
 			this._onDidChangeSessions.fire();
 			this._onDidDeleteSession.fire(sessionId);
@@ -1226,31 +1270,28 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 	}
 
 	private async updateSdkSessionMetadata(sessionId: string, title: string, operation: (sdkSession: LocalSession) => Promise<void>): Promise<void> {
-		let sessionManager: internal.LocalSessionManager | undefined;
-		let shouldCloseSession = false;
-		const sdkSession = (this._sessionWrappers.get(sessionId)?.object.sdkSession as LocalSession | undefined) ?? await (async () => {
-			sessionManager = await this.getSessionManager();
-			const session = await sessionManager.getSession({ sessionId }, true) as LocalSession | undefined;
-			shouldCloseSession = !!session;
-			return session;
-		})();
-
-		if (!sdkSession) {
-			// SDK session not yet materialized (e.g. brand-new VS Code sessionId).
-			// Stage locally; `createSession` syncs it into the SDK once the session is created.
-			await this.customSessionTitleService.setCustomSessionTitle(sessionId, title);
-			return;
-		}
-
-		try {
-			await operation(sdkSession);
-		} finally {
-			if (shouldCloseSession && sessionManager) {
-				await sessionManager.closeSession(sessionId).catch(error => {
-					this.logService.error(`[CopilotCLISession] Failed to close session ${sessionId} after updating title metadata: ${error}`);
-				});
+		await this.withSessionLock(sessionId, CancellationToken.None, async () => {
+			const wrappedSession = this._sessionWrappers.get(sessionId)?.object.sdkSession as LocalSession | undefined;
+			if (wrappedSession) {
+				await operation(wrappedSession);
+				return;
 			}
-		}
+
+			const sessionManager = await this.getSessionManager();
+			const sdkSession = await sessionManager.getSession({ sessionId }, true) as LocalSession | undefined;
+			if (!sdkSession) {
+				// SDK session not yet materialized (e.g. brand-new VS Code sessionId).
+				// Stage locally; `createSession` syncs it into the SDK once the session is created.
+				await this.customSessionTitleService.setCustomSessionTitle(sessionId, title);
+				return;
+			}
+
+			try {
+				await operation(sdkSession);
+			} finally {
+				await this.closeTransientSdkSession(sessionManager, sessionId, `after updating title metadata`);
+			}
+		});
 	}
 
 	public async renameSession(sessionId: string, title: string): Promise<void> {
