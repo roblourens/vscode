@@ -95,7 +95,7 @@ suite('AgentHostClientTools', () => {
 	function createActiveClientService(
 		tools: IObservable<readonly IToolData[]> = constObservable([]),
 		toolSets: IObservable<Iterable<IToolSet>> = constObservable([]),
-		mcpOptions?: { remoteAuthority?: string; servers: readonly IMcpServer[] },
+		mcpOptions?: { remoteAuthority?: string; servers: readonly IMcpServer[]; activateCollections?: () => Promise<void> },
 	) {
 		const instantiationService = disposables.add(new TestInstantiationService());
 		let semanticSearchEnabled = false;
@@ -137,6 +137,7 @@ suite('AgentHostClientTools', () => {
 			enablementModel: new class extends mock<IEnablementModel>() {
 				override readProfileEnabled() { return true; }
 			}(),
+			activateCollections: mcpOptions?.activateCollections ?? (async () => { }),
 		});
 		instantiationService.stub(IMcpWorkbenchService, {
 			local: [],
@@ -206,6 +207,24 @@ suite('AgentHostClientTools', () => {
 			},
 			syncProviderIsStable: true,
 			scopeAfterReleaseIsResolved: true,
+		});
+	});
+
+	test('waits for MCP discovery before resolving a remote-initiated customization scope', async () => {
+		await runWithFakedTimers({ useFakeTimers: true }, async () => {
+			const barrier = new DeferredPromise<void>();
+			const { service } = createActiveClientService(undefined, undefined, {
+				servers: [],
+				activateCollections: () => barrier.p,
+			});
+			const scope = disposables.add(service.acquireScope(REMOTE_COPILOT_CLI_SESSION_TYPE, []));
+			let resolved = false;
+			const whenResolved = scope.whenResolved().then(() => { resolved = true; });
+			await timeout(100);
+			assert.strictEqual({ resolved, isResolved: scope.isResolved.get() }, { resolved: false, isResolved: false });
+			barrier.complete();
+			await whenResolved;
+			assert.strictEqual(scope.isResolved.get(), true);
 		});
 	});
 
@@ -901,7 +920,16 @@ suite('AgentHostClientTools', () => {
 			// constructs a real one — which reads these on its first autorun.
 			instantiationService.stub(IMcpService, {
 				servers: observableValue('mcpServers', []),
+				activateCollections: async () => { },
+				enablementModel: new class extends mock<IEnablementModel>() {
+					override readProfileEnabled() { return true; }
+				}(),
 			});
+			instantiationService.stub(IMcpWorkbenchService, {
+				local: [],
+				onChange: Event.None,
+				whenInitialLocalMcpServersLoaded: Promise.resolve(),
+			} as Partial<IMcpWorkbenchService> as IMcpWorkbenchService);
 			instantiationService.stub(IConfigurationResolverService, {} as Partial<IConfigurationResolverService>);
 			instantiationService.stub(IWorkbenchEnvironmentService, {} as Partial<IWorkbenchEnvironmentService>);
 			instantiationService.stub(IPromptsService, new class extends mock<IPromptsService>() {

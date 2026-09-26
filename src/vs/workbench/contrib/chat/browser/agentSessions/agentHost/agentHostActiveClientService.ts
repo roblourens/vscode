@@ -30,7 +30,7 @@ import { IAgentPluginService } from '../../../common/plugins/agentPluginService.
 import { IPromptsService } from '../../../common/promptSyntax/service/promptsService.js';
 import { ILanguageModelToolsService, IToolData, IToolSet } from '../../../common/tools/languageModelToolsService.js';
 import { RenameToolId } from '../../tools/renameTool.js';
-import { IMcpService } from '../../../../mcp/common/mcpTypes.js';
+import { IMcpService, IMcpWorkbenchService } from '../../../../mcp/common/mcpTypes.js';
 import { IConfigurationResolverService } from '../../../../../services/configurationResolver/common/configurationResolver.js';
 import { IWorkbenchEnvironmentService } from '../../../../../services/environment/common/environmentService.js';
 import { AgentCustomizationSyncProvider } from './agentCustomizationSyncProvider.js';
@@ -121,6 +121,7 @@ class AgentCustomizationScope extends Disposable {
 		@IAgentPluginService private readonly _agentPluginService: IAgentPluginService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IMcpService private readonly _mcpService: IMcpService,
+		@IMcpWorkbenchService private readonly _mcpWorkbenchService: IMcpWorkbenchService,
 		@IConfigurationResolverService private readonly _configurationResolverService: IConfigurationResolverService,
 	) {
 		super();
@@ -131,6 +132,18 @@ class AgentCustomizationScope extends Disposable {
 			const seq = ++this._updateSeq;
 			let completedInitialResolution = false;
 			try {
+				// Wait for host/user MCP discovery before the first publish so a
+				// remote-initiated createSession does not snapshot an empty set
+				// (#338096). Later MCP changes still flow through the autorun.
+				if (!this._initialResolution.isSettled) {
+					await Promise.all([
+						this._mcpService.activateCollections(),
+						this._mcpWorkbenchService.whenInitialLocalMcpServersLoaded,
+					]);
+					if (seq !== this._updateSeq || this._isDisposed) {
+						return;
+					}
+				}
 				const [refs, agents] = await Promise.all([
 					resolveCustomizationRefs(
 						this._fileService,

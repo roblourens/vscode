@@ -30,7 +30,7 @@ import { PendingMessage, ChatInputAnswer, ChatInputRequest, ChatInputResponseKin
 import type { ClientPluginCustomization, CustomizationEnablement } from '../../common/state/protocol/channels-session/state.js';
 import { CustomizationType, parseRequiredSessionUriFromChatUri, type Customization, type ToolCallResult } from '../../common/state/sessionState.js';
 import { IClaudeAgentSdkService } from './claudeAgentSdkService.js';
-import { buildClientMcpServers, buildOptions, toClaudeMcpServers, type ClaudeDeniedMcpServerSpec } from './claudeSdkOptions.js';
+import { buildClientMcpServers, buildOptions, mcpServerDefinitionsFromRootConfig, toClaudeMcpServers, type ClaudeDeniedMcpServerSpec } from './claudeSdkOptions.js';
 import { claudeTransportForProvider, parseClaudeModelSelection, toClaudeSdkModelId } from './claudeModelSelection.js';
 import { buildServerToolMcpServer, CLAUDE_SERVER_TOOL_MCP_SERVER_NAME, serverToolAllowList } from './claudeServerToolMcpServer.js';
 import { convertToolCallResult } from './clientTools/claudeClientToolResult.js';
@@ -56,7 +56,7 @@ import { SubagentRegistry } from './claudeSubagentRegistry.js';
 import { ClaudePermissionKind } from './claudeToolDisplay.js';
 import { getSdkMcpServerEnablement, isCustomizationSdkEligible, resolveCustomizationEnablement } from '../shared/customizationEnablementGate.js';
 import { McpServerType, type IMcpServerConfiguration } from '../../../mcp/common/mcpPlatformTypes.js';
-import { AgentHostGitHubMcpServerEnabledConfigKey, platformRootSchema } from '../../common/agentHostSchema.js';
+import { AgentHostGitHubMcpServerEnabledConfigKey, AgentHostMcpServersConfigKey, platformRootSchema } from '../../common/agentHostSchema.js';
 import { GITHUB_MCP_SERVER_NAME, resolveGitHubMcpServerConfiguration } from '../shared/githubMcpServer.js';
 import { ICopilotApiService } from '../shared/copilotApiService.js';
 import { IAgentHostAuthenticationService } from '../agentHostAuthenticationService.js';
@@ -887,14 +887,25 @@ export class ClaudeAgentSession extends Disposable {
 			return { servers: {}, deniedServers: [] };
 		}
 		const definitions = new Map<string, IMcpServerDefinition>();
+		const deniedServers: ClaudeDeniedMcpServerSpec[] = [];
+		for (const definition of mcpServerDefinitionsFromRootConfig(
+			this._configurationService.getRootValue(platformRootSchema, AgentHostMcpServersConfigKey),
+			primaryCwd,
+		)) {
+			const resolution = resolveCustomizationEnablement(this._customizationEnablementService, this._configurationResource, [definition.customization]);
+			if (getSdkMcpServerEnablement(resolution).get(definition.customization.id) === true) {
+				definitions.set(definition.name, definition);
+			} else {
+				deniedServers.push(toClaudeDeniedMcpServer(definition));
+			}
+		}
 		const discoveredDefinitions = await this._mcpDiscovery?.refresh() ?? [];
 		let hasGitHubMcpServer = gitHubMcpServerConfiguration
-			? discoveredDefinitions.some(definition => isGitHubMcpServerDefinition(definition, gitHubMcpServerConfiguration))
+			? [...definitions.values(), ...discoveredDefinitions].some(definition => isGitHubMcpServerDefinition(definition, gitHubMcpServerConfiguration))
 			: false;
 		const discoveredCandidates = discoveredDefinitions.map(definition => definition.customization);
 		const discoveredResolution = resolveCustomizationEnablement(this._customizationEnablementService, this._configurationResource, discoveredCandidates);
 		const discoveredEnablement = getSdkMcpServerEnablement(discoveredResolution);
-		const deniedServers: ClaudeDeniedMcpServerSpec[] = [];
 		for (const definition of discoveredDefinitions) {
 			if (discoveredEnablement.get(definition.customization.id) !== true) {
 				if (definition.defaultCwd && isEqual(definition.defaultCwd, primaryCwd)) {

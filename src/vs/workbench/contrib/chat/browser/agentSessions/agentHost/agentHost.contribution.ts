@@ -23,6 +23,7 @@ import { AgentHostAllowSignedOutWhenUsableContribution } from './agentHostAllowS
 import { AgentHostByokLmHandler } from './agentHostByokLmHandler.js';
 import { AgentHostContribution } from './agentHostChatContribution.js';
 import { AgentHostCopilotCliSettingsContribution } from './agentHostCopilotCliSettingsContribution.js';
+import { AgentHostMcpServersContribution } from './agentHostMcpServersContribution.js';
 import { AgentHostExistingSessionHarnessPickerEnablement } from './agentHostExistingSessionHarnessPickerEnablement.js';
 import { AgentHostOpenSessionLinkOpenerContribution } from './openSessionLinkOpener.contribution.js';
 import { AgentHostSessionListContribution } from './agentHostSessionListContribution.js';
@@ -54,6 +55,7 @@ registerWorkbenchContribution2(AgentHostSessionListContribution.ID, AgentHostSes
 registerWorkbenchContribution2(AgentHostOpenSessionLinkOpenerContribution.ID, AgentHostOpenSessionLinkOpenerContribution, WorkbenchPhase.BlockStartup);
 registerWorkbenchContribution2(AgentHostTerminalContribution.ID, AgentHostTerminalContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostCopilotCliSettingsContribution.ID, AgentHostCopilotCliSettingsContribution, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(AgentHostMcpServersContribution.ID, AgentHostMcpServersContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostAllowSignedOutWhenUsableContribution.ID, AgentHostAllowSignedOutWhenUsableContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostSignedOutModelsNotificationContribution.ID, AgentHostSignedOutModelsNotificationContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostSdkSetupNotificationContribution.ID, AgentHostSdkSetupNotificationContribution, WorkbenchPhase.AfterRestored);

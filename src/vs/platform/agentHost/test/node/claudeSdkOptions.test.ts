@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { buildClaudeTelemetryEnv, buildOptions, buildSubprocessEnv, toClaudeMcpServers } from '../../node/claude/claudeSdkOptions.js';
+import { buildClaudeTelemetryEnv, buildOptions, buildSubprocessEnv, mcpServerDefinitionsFromRootConfig, toClaudeMcpServers } from '../../node/claude/claudeSdkOptions.js';
 import type { ClaudeTransport, IClaudeProxyHandle } from '../../node/claude/claudeProxyService.js';
 import { McpServerType } from '../../../mcp/common/mcpPlatformTypes.js';
 import { CustomizationType, McpServerStatus, type McpServerCustomization } from '../../common/state/protocol/state.js';
@@ -470,5 +470,29 @@ suite('claudeSdkOptions / buildOptions additionalDirectories projection', () => 
 	test('undefined additionalDirectories omits Options.additionalDirectories', async () => {
 		const opts = await buildOptions(input(undefined), proxyTransport, () => { });
 		assert.strictEqual(opts.additionalDirectories, undefined);
+	});
+});
+
+suite('claudeSdkOptions / mcpServerDefinitionsFromRootConfig', () => {
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('projects host root MCP into session definitions and skips malformed entries', () => {
+		const cwd = URI.file('/tmp/primary');
+		const definitions = mcpServerDefinitionsFromRootConfig({
+			notion: { type: McpServerType.REMOTE, url: 'https://mcp.notion.com' },
+			stdio: { type: McpServerType.LOCAL, command: 'npx' },
+			skip: { type: 'unknown' },
+		}, cwd);
+
+		assert.deepStrictEqual(definitions.map(definition => ({
+			name: definition.name,
+			type: definition.configuration.type,
+			defaultCwd: definition.defaultCwd,
+		})), [
+			{ name: 'notion', type: McpServerType.REMOTE, defaultCwd: cwd },
+			{ name: 'stdio', type: McpServerType.LOCAL, defaultCwd: cwd },
+		]);
+		assert.deepStrictEqual(mcpServerDefinitionsFromRootConfig(undefined, cwd), []);
 	});
 });

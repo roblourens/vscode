@@ -21,7 +21,7 @@ import type { IAgentHostNativeOTelConfig, IAgentHostTraceContext } from '../../c
 import type { ClaudeTransport } from './claudeProxyService.js';
 import { SessionClientToolsDiff } from './clientTools/claudeSessionClientToolsModel.js';
 import { McpServerType } from '../../../mcp/common/mcpPlatformTypes.js';
-import type { IMcpServerDefinition } from '../../../agentPlugins/common/pluginParsers.js';
+import { makeMcpServerCustomization, normalizeMcpServerConfiguration, type IMcpServerDefinition } from '../../../agentPlugins/common/pluginParsers.js';
 import { isEqual } from '../../../../base/common/resources.js';
 import { resolveMcpServerWorkingDirectory } from '../shared/mcpServerWorkingDirectory.js';
 
@@ -230,6 +230,34 @@ export async function buildClientMcpServers(
 	}
 	const server = await buildClientToolMcpServer(tools, id => registry.register(id), sdkService);
 	return { client: server };
+}
+
+const ROOT_MCP_CONFIG_URI = URI.parse('agent-host://root/mcp.json');
+
+/**
+ * Projects the host root `mcpServers` map into session MCP definitions so
+ * Claude sessions see host user MCP at startup without waiting for a local
+ * client to claim the session (#338096).
+ */
+export function mcpServerDefinitionsFromRootConfig(
+	servers: Record<string, unknown> | undefined,
+	primaryCwd: URI,
+): IMcpServerDefinition[] {
+	const definitions: IMcpServerDefinition[] = [];
+	for (const [name, value] of Object.entries(servers ?? {})) {
+		const configuration = normalizeMcpServerConfiguration(value);
+		if (!configuration) {
+			continue;
+		}
+		definitions.push({
+			name,
+			configuration,
+			defaultCwd: primaryCwd,
+			uri: ROOT_MCP_CONFIG_URI,
+			customization: makeMcpServerCustomization(ROOT_MCP_CONFIG_URI, name),
+		});
+	}
+	return definitions;
 }
 
 export function toClaudeMcpServers(
