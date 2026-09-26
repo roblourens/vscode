@@ -21922,6 +21922,171 @@ suite('AgentService (node dispatcher)', () => {
 			});
 		});
 
+		test('an automatic rename_chat keeps a title the user set, which an explicit rename_chat still replaces', async () => {
+			class RecordingTitleDatabase extends TestSessionDatabase {
+				titleSourceReads = 0;
+				explicitTitle: string | undefined;
+				readonly explicitRenamePersisted = new DeferredPromise<void>();
+
+				override async getMetadataObject<T extends Record<string, unknown>>(obj: T): Promise<{ [K in keyof T]: string | undefined }> {
+					const result = await super.getMetadataObject(obj);
+					if (Object.keys(obj).some(key => key === SESSION_CUSTOM_TITLE_SOURCE_KEY || key.startsWith('customChatTitleSource:'))) {
+						this.titleSourceReads++;
+					}
+					return result;
+				}
+
+				override async setMetadataValues(values: Readonly<Record<string, string>>): Promise<void> {
+					await super.setMetadataValues(values);
+					if (this.explicitTitle && Object.values(values).includes(this.explicitTitle)) {
+						await this.explicitRenamePersisted.complete();
+					}
+				}
+
+				override async setMetadataValuesAndCatalogSyncSnapshot(values: Readonly<Record<string, string>>, snapshot: ISessionCatalogSyncPendingSnapshot): Promise<SessionCatalogSyncWriteResult> {
+					const result = await super.setMetadataValuesAndCatalogSyncSnapshot(values, snapshot);
+					if (this.explicitTitle && Object.values(values).includes(this.explicitTitle)) {
+						await this.explicitRenamePersisted.complete();
+					}
+					return result;
+				}
+			}
+			class ServerToolAgent extends MockAgent {
+				serverToolHost: IAgentServerToolHost | undefined;
+
+				setServerToolHost(host: IAgentServerToolHost): void {
+					this.serverToolHost = host;
+				}
+			}
+
+			const db = new RecordingTitleDatabase();
+			const catalogDatabase = disposables.add(new AgentHostDatabase(':memory:'));
+			const localService = disposables.add(createTestAgentService(
+				new NullLogService(),
+				fileService,
+				createSessionDataService(db),
+				{ _serviceBrand: undefined } as IProductService,
+				createNoopGitService(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				[],
+				undefined,
+				undefined,
+				catalogDatabase,
+			));
+			const agent = disposables.add(new ServerToolAgent('copilot'));
+			registerTestAgentProvider(localService, agent);
+			const session = await localService.createSession({ provider: 'copilot' });
+			const sessionUri = session.toString();
+			const defaultChat = buildDefaultChatUri(session);
+			const peerChat = buildChatUri(sessionUri, 'peer-user-title');
+			const waitForTitleSourceRead = async (previousReads: number): Promise<void> => {
+				for (let i = 0; i < 40; i++) {
+					if (db.titleSourceReads > previousReads) {
+						return;
+					}
+					await timeout(5);
+				}
+				assert.ok(db.titleSourceReads > previousReads, 'automatic rename_chat should read the persisted title source');
+			};
+
+			getStateManager(localService).dispatchServerAction(sessionUri, { type: ActionType.SessionTitleChanged, title: 'User default title' });
+			getStateManager(localService).updateChatTitle(sessionUri, defaultChat, 'User default title');
+			await db.setMetadata('customTitle', 'User default title');
+			await db.setMetadata('customTitleSource', 'user');
+			await db.setMetadata(`customChatTitle:${defaultChat}`, 'User default title');
+			await db.setMetadata(`customChatTitleSource:${defaultChat}`, 'user');
+
+			const defaultSourceReads = db.titleSourceReads;
+			const automaticDefaultResult = await agent.serverToolHost!.executeTool(defaultChat, SessionServerToolName.RenameChat, {
+				title: 'Automatic default title',
+				automatic: true,
+			});
+			await waitForTitleSourceRead(defaultSourceReads);
+			await timeout(0);
+
+			getStateManager(localService).addChat(sessionUri, peerChat, { title: 'User peer title' });
+			await db.setMetadata(`customChatTitle:${peerChat}`, 'User peer title');
+			await db.setMetadata(`customChatTitleSource:${peerChat}`, 'user');
+
+			const peerSourceReads = db.titleSourceReads;
+			const automaticPeerResult = await agent.serverToolHost!.executeTool(defaultChat, SessionServerToolName.RenameChat, {
+				chat: `agent-host-session://copilot/${AgentSession.id(session)}?chat=peer-user-title`,
+				title: 'Automatic peer title',
+				automatic: true,
+			});
+			await waitForTitleSourceRead(peerSourceReads);
+			await timeout(0);
+
+			const afterAutomatic = {
+				automaticDefaultResult,
+				automaticPeerResult,
+				liveSessionTitle: getStateManager(localService).getSessionState(sessionUri)?.title,
+				liveDefaultChatTitle: getStateManager(localService).getChatState(defaultChat)?.title,
+				liveChatTitle: getStateManager(localService).getChatState(peerChat)?.title,
+				persistedSessionTitle: await db.getMetadata('customTitle'),
+				persistedSessionSource: await db.getMetadata('customTitleSource'),
+				persistedDefaultChatTitle: await db.getMetadata(`customChatTitle:${defaultChat}`),
+				persistedDefaultChatSource: await db.getMetadata(`customChatTitleSource:${defaultChat}`),
+				persistedChatTitle: await db.getMetadata(`customChatTitle:${peerChat}`),
+				persistedChatSource: await db.getMetadata(`customChatTitleSource:${peerChat}`),
+			};
+
+			db.explicitTitle = 'Explicit peer title';
+			const explicitDefaultResult = await agent.serverToolHost!.executeTool(defaultChat, SessionServerToolName.RenameChat, {
+				title: 'Explicit default title',
+			});
+			const explicitPeerResult = await agent.serverToolHost!.executeTool(defaultChat, SessionServerToolName.RenameChat, {
+				chat: `agent-host-session://copilot/${AgentSession.id(session)}?chat=peer-user-title`,
+				title: 'Explicit peer title',
+			});
+			await db.explicitRenamePersisted.p;
+			await timeout(0);
+
+			assert.deepStrictEqual({
+				afterAutomatic,
+				explicitDefaultResult,
+				explicitPeerResult,
+				liveSessionTitle: getStateManager(localService).getSessionState(sessionUri)?.title,
+				liveDefaultChatTitle: getStateManager(localService).getChatState(defaultChat)?.title,
+				liveChatTitle: getStateManager(localService).getChatState(peerChat)?.title,
+				persistedSessionTitle: await db.getMetadata('customTitle'),
+				persistedSessionSource: await db.getMetadata('customTitleSource'),
+				persistedDefaultChatTitle: await db.getMetadata(`customChatTitle:${defaultChat}`),
+				persistedDefaultChatSource: await db.getMetadata(`customChatTitleSource:${defaultChat}`),
+				persistedChatTitle: await db.getMetadata(`customChatTitle:${peerChat}`),
+				persistedChatSource: await db.getMetadata(`customChatTitleSource:${peerChat}`),
+			}, {
+				afterAutomatic: {
+					automaticDefaultResult: 'Renaming chat.',
+					automaticPeerResult: 'Renaming chat.',
+					liveSessionTitle: 'User default title',
+					liveDefaultChatTitle: 'User default title',
+					liveChatTitle: 'User peer title',
+					persistedSessionTitle: 'User default title',
+					persistedSessionSource: 'user',
+					persistedDefaultChatTitle: 'User default title',
+					persistedDefaultChatSource: 'user',
+					persistedChatTitle: 'User peer title',
+					persistedChatSource: 'user',
+				},
+				explicitDefaultResult: 'Renamed chat to "Explicit default title".',
+				explicitPeerResult: 'Renamed chat to "Explicit peer title".',
+				liveSessionTitle: 'Explicit default title',
+				liveDefaultChatTitle: 'Explicit default title',
+				liveChatTitle: 'Explicit peer title',
+				persistedSessionTitle: 'Explicit default title',
+				persistedSessionSource: 'agent',
+				persistedDefaultChatTitle: 'Explicit default title',
+				persistedDefaultChatSource: 'agent',
+				persistedChatTitle: 'Explicit peer title',
+				persistedChatSource: 'agent',
+			});
+		});
+
 		test('rename failures preserve live state and both persisted metadata values', async () => {
 			class FailingTitleDatabase extends TestSessionDatabase {
 				readonly allFailuresObserved = new DeferredPromise<void>();

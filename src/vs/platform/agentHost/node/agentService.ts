@@ -69,8 +69,8 @@ import { AgentSessionResidency } from './agentSessionResidency.js';
 import { resolveChangesetOwnerScope } from './agentHostBranchChangesetScope.js';
 import { IAgentHostSessionOpenTelemetry, type IAgentHostSessionOpenTelemetryScope } from './agentHostSessionOpenTelemetry.js';
 import { AgentServerToolHost } from './shared/agentServerToolHost.js';
-import { type IAddSessionWorkingDirectoryOptions, type IAgentServiceSessionServerToolAccessor, type IPreparedChatWorkingDirectory, type IChatContextSnapshot, type IRenameTitleResult, type ISessionCreationDefaults, validateRenameTitle } from './shared/sessionServerTools.js';
-import { AGENT_HOST_TITLE_SOURCE_AGENT, AGENT_HOST_TITLE_SOURCE_AUTO, customChatTitleMetadataKey, customChatTitleSourceMetadataKey, persistSessionMetadataValues, SESSION_ARTIFACTS_KEY, SESSION_CUSTOM_TITLE_KEY, SESSION_CUSTOM_TITLE_SOURCE_KEY } from './shared/persistSessionMetadata.js';
+import { type IAddSessionWorkingDirectoryOptions, type IAgentServiceSessionServerToolAccessor, type IPreparedChatWorkingDirectory, type IChatContextSnapshot, type IRenameChatOptions, type IRenameTitleResult, type ISessionCreationDefaults, validateRenameTitle } from './shared/sessionServerTools.js';
+import { AGENT_HOST_TITLE_SOURCE_AGENT, AGENT_HOST_TITLE_SOURCE_AUTO, AGENT_HOST_TITLE_SOURCE_USER, customChatTitleMetadataKey, customChatTitleSourceMetadataKey, persistSessionMetadataValues, SESSION_ARTIFACTS_KEY, SESSION_CUSTOM_TITLE_KEY, SESSION_CUSTOM_TITLE_SOURCE_KEY } from './shared/persistSessionMetadata.js';
 import { type IArtifactServerToolAccessor } from './shared/artifactServerTools.js';
 import { SessionArtifacts } from './shared/sessionArtifacts.js';
 import { readSessionAdditionalWorktrees, writeSessionAdditionalWorktrees, type ISessionAdditionalWorktree } from './shared/sessionAdditionalWorktrees.js';
@@ -1491,7 +1491,7 @@ export class AgentService extends Disposable implements IAgentService {
 				}
 				: undefined),
 			prepareChatWorkingDirectory: (session, directory, options) => this.prepareChatWorkingDirectory(session, directory, options),
-			renameChat: (session, chat, title) => this._renameChatFromTool(session, chat, title),
+			renameChat: (session, chat, title, options) => this._renameChatFromTool(session, chat, title, options),
 			reportToolError: (toolName, error) => this._logService.error(`[AgentService] ${toolName} failed after the tool returned: ${toErrorMessage(error)}`),
 			deleteSession: session => this.disposeSession(session),
 			getChatContext: (session, chatId) => this._getChatContext(session, chatId),
@@ -1779,11 +1779,18 @@ export class AgentService extends Disposable implements IAgentService {
 		};
 	}
 
-	private async _renameChatFromTool(session: URI, chat: URI, title: string): Promise<IRenameTitleResult> {
+	private async _renameChatFromTool(session: URI, chat: URI, title: string, options?: IRenameChatOptions): Promise<IRenameTitleResult> {
 		validateRenameTitle(title, SessionServerToolName.RenameChat);
 		const isDefaultChat = isDefaultChatUri(chat.toString());
 		if (!isDefaultChat && !await this._peerChatExists(session, chat)) {
 			throw new Error(`Invalid ${SessionServerToolName.RenameChat} input: chat must match a known non-default chat.`);
+		}
+
+		if (options?.automatic) {
+			const keptTitle = await this._keptUserChatTitleFromAutomaticRename(session, chat, isDefaultChat);
+			if (keptTitle !== undefined) {
+				return { title: keptTitle };
+			}
 		}
 
 		if (isDefaultChat) {
@@ -1810,6 +1817,42 @@ export class AgentService extends Disposable implements IAgentService {
 			this._stateManager.updateChatTitle(session.toString(), chat.toString(), title);
 		}
 		return { title };
+	}
+
+	/**
+	 * Returns the persisted user title when an automatic `rename_chat` must leave
+	 * it alone, or `undefined` so the agent's title can be applied.
+	 */
+	private async _keptUserChatTitleFromAutomaticRename(session: URI, chat: URI, isDefaultChat: boolean): Promise<string | undefined> {
+		const chatKey = chat.toString();
+		const sessionKey = session.toString();
+		const chatTitleKey = customChatTitleMetadataKey(chatKey);
+		const chatSourceKey = customChatTitleSourceMetadataKey(chatKey);
+		const ref = await this._sessionDataService.tryOpenDatabase(session);
+		if (!ref) {
+			return undefined;
+		}
+		try {
+			const metadata = await ref.object.getMetadataObject({
+				[chatTitleKey]: true,
+				[chatSourceKey]: true,
+				...(isDefaultChat ? {
+					[SESSION_CUSTOM_TITLE_KEY]: true,
+					[SESSION_CUSTOM_TITLE_SOURCE_KEY]: true,
+				} : {}),
+			});
+			const source = metadata[chatSourceKey] ?? (isDefaultChat ? metadata[SESSION_CUSTOM_TITLE_SOURCE_KEY] : undefined);
+			if (source !== AGENT_HOST_TITLE_SOURCE_USER) {
+				return undefined;
+			}
+			return metadata[chatTitleKey]
+				?? (isDefaultChat ? metadata[SESSION_CUSTOM_TITLE_KEY] : undefined)
+				?? this._stateManager.getChatState(chatKey)?.title
+				?? (isDefaultChat ? this._stateManager.getSessionState(sessionKey)?.title : undefined)
+				?? '';
+		} finally {
+			ref.dispose();
+		}
 	}
 
 	private async _peerChatExists(session: URI, chat: URI): Promise<boolean> {

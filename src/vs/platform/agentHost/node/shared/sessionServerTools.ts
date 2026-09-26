@@ -316,7 +316,7 @@ export interface IAgentServiceSessionServerToolAccessor {
 	readonly startPrompt: (session: URI, chat: URI, prompt: string, delegation?: IAgentMessageDelegationMeta) => Promise<void>;
 	readonly createChat: (session: URI, chat: URI, options?: { title?: string; model?: ModelSelection; workingDirectories?: readonly URI[] }) => Promise<void>;
 	readonly prepareChatWorkingDirectory: (session: URI, directory: URI, options: IAddSessionWorkingDirectoryOptions) => Promise<IPreparedChatWorkingDirectory>;
-	readonly renameChat: (session: URI, chat: URI, title: string) => Promise<IRenameTitleResult>;
+	readonly renameChat: (session: URI, chat: URI, title: string, options?: IRenameChatOptions) => Promise<IRenameTitleResult>;
 	readonly reportToolError: (toolName: SessionServerToolName, error: unknown) => void;
 	readonly deleteSession: (session: URI) => Promise<void>;
 	/** Reads a point-in-time snapshot of a session's chat conversation (default chat, or a specific chat by id). */
@@ -330,6 +330,11 @@ export interface IAgentServiceSessionServerToolAccessor {
 /** Complete dependency surface needed by the session server-tool group. */
 export interface ISessionServerToolAccessor extends IAgentServiceSessionServerToolAccessor {
 	readonly requestSessionWorkspaceUpdate: (chat: URI, turnId: string, workspaceFolder: URI, isolation: boolean) => void;
+}
+
+export interface IRenameChatOptions {
+	/** True when this call is fulfilling the host's automatic title reminder. */
+	readonly automatic?: boolean;
 }
 
 export interface IRenameTitleResult {
@@ -1212,7 +1217,7 @@ export async function applyRenameChatTool(accessor: ISessionServerToolAccessor, 
 		const targetSession = getRenameChatSession(rawArgs, currentChannel);
 		const metadata = await accessor.getSession(targetSession);
 		const { session, chat, title } = getRenameChatArgs(rawArgs, metadata ? [metadata] : [], currentChannel);
-		return accessor.renameChat(session, chat, title);
+		return accessor.renameChat(session, chat, title, isAutomaticTitleRename ? { automatic: true } : undefined);
 	};
 	if (isAutomaticTitleRename) {
 		void rename().catch(error => accessor.reportToolError(SessionServerToolName.RenameChat, error));

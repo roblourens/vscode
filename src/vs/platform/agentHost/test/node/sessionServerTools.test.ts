@@ -45,6 +45,7 @@ import {
 	serializeSessions,
 	type IChatContextSnapshot,
 	type IPreparedChatWorkingDirectory,
+	type IRenameChatOptions,
 	type ISessionServerToolAccessor,
 } from '../../node/shared/sessionServerTools.js';
 
@@ -68,7 +69,7 @@ suite('SessionServerTools', () => {
 		return { directory, release, associateWithChat };
 	}
 
-	function createAccessor(overrides?: Partial<ISessionServerToolAccessor> & { onCreate?: (config: IAgentCreateSessionConfig) => void; onPrompt?: (...args: Parameters<ISessionServerToolAccessor['startPrompt']>) => void; onCreateChat?: (...args: Parameters<ISessionServerToolAccessor['createChat']>) => void; onRenameChat?: (session: URI, chat: URI, title: string) => void; onDelete?: (session: URI) => void; depths?: Map<string, number> }): ISessionServerToolAccessor {
+	function createAccessor(overrides?: Partial<ISessionServerToolAccessor> & { onCreate?: (config: IAgentCreateSessionConfig) => void; onPrompt?: (...args: Parameters<ISessionServerToolAccessor['startPrompt']>) => void; onCreateChat?: (...args: Parameters<ISessionServerToolAccessor['createChat']>) => void; onRenameChat?: (session: URI, chat: URI, title: string, options?: IRenameChatOptions) => void; onDelete?: (session: URI) => void; depths?: Map<string, number> }): ISessionServerToolAccessor {
 		const depths = overrides?.depths ?? new Map<string, number>();
 		return {
 			getAutomaticTitleGenerationStrategy: overrides?.getAutomaticTitleGenerationStrategy ?? (() => 'deferred'),
@@ -83,7 +84,7 @@ suite('SessionServerTools', () => {
 			startPrompt: overrides?.startPrompt ?? (async (session, chat, prompt, delegation) => { overrides?.onPrompt?.(session, chat, prompt, delegation); }),
 			createChat: overrides?.createChat ?? (async (session, chat, options) => { overrides?.onCreateChat?.(session, chat, options); }),
 			prepareChatWorkingDirectory: overrides?.prepareChatWorkingDirectory ?? (async (_session, directory) => prepared(directory)),
-			renameChat: overrides?.renameChat ?? (async (session, chat, title) => { overrides?.onRenameChat?.(session, chat, title); return { title }; }),
+			renameChat: overrides?.renameChat ?? (async (session, chat, title, options) => { overrides?.onRenameChat?.(session, chat, title, options); return { title }; }),
 			reportToolError: overrides?.reportToolError ?? (() => { }),
 			deleteSession: overrides?.deleteSession ?? (async session => { overrides?.onDelete?.(session); }),
 			getChatContext: overrides?.getChatContext ?? (async () => undefined),
@@ -2066,6 +2067,36 @@ suite('SessionServerTools', () => {
 				{ session: 'copilot:/s1', chat: peer, title: 'Updated Focus' },
 			],
 			listSessionsCalls: 0,
+		});
+	});
+
+	test('rename_chat tells the accessor whether the rename is automatic', async () => {
+		const calls: { title: string; automatic?: boolean }[] = [];
+		const automaticApplied = new DeferredPromise<void>();
+		const accessor = createAccessor({
+			renameChat: async (_session, _chat, title, options) => {
+				calls.push({ title, automatic: options?.automatic });
+				if (options?.automatic) {
+					await automaticApplied.complete();
+				}
+				return { title };
+			},
+		});
+		const defaultChat = buildDefaultChatUri('copilot:/s1');
+		const automaticResult = await applyRenameChatTool(accessor, { title: 'Auto Title', automatic: true }, defaultChat);
+		await automaticApplied.p;
+		const explicitResult = await applyRenameChatTool(accessor, { title: 'User Asked Title' }, defaultChat);
+		assert.deepStrictEqual({
+			automaticResult,
+			explicitResult,
+			calls,
+		}, {
+			automaticResult: 'Renaming chat.',
+			explicitResult: 'Renamed chat to "User Asked Title".',
+			calls: [
+				{ title: 'Auto Title', automatic: true },
+				{ title: 'User Asked Title', automatic: undefined },
+			],
 		});
 	});
 
