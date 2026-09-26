@@ -198,9 +198,34 @@ export function shouldRestorePerTypeModelOnSessionSwitch(isEmpty: boolean, sessi
  * for an empty session that has no persisted mode yet. Re-applying it after
  * restore — including when TAS registers the default asynchronously — would
  * reset Agent to Ask across restarts (#337078).
+ *
+ * A later TAS/custom-mode refresh must also not replace an already-showing
+ * Agent with Ask mid-session.
  */
-export function shouldApplyDefaultNewSessionMode(hasPersistedOrUserMode: boolean): boolean {
-	return !hasPersistedOrUserMode;
+export function shouldApplyDefaultNewSessionMode(
+	hasPersistedOrUserMode: boolean,
+	currentModeId?: string,
+	defaultModeId?: string,
+): boolean {
+	if (hasPersistedOrUserMode) {
+		return false;
+	}
+	if (currentModeId && defaultModeId) {
+		const normalizedDefault = defaultModeId.trim().toLowerCase();
+		if (normalizedDefault && currentModeId.toLowerCase() === ChatModeKind.Agent && normalizedDefault === ChatModeKind.Ask) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * When the picker list refreshes, a mode can briefly disappear (custom agents
+ * reload, tools agent not registered yet). Keep the current selection unless
+ * Agent is actually disabled, in which case Ask is the fallback.
+ */
+export function shouldKeepCurrentModeWhenMissingFromList(isAgentModeEnabled: boolean): boolean {
+	return isAgentModeEnabled;
 }
 
 /**

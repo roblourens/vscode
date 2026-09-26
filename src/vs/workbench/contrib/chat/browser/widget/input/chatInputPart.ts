@@ -105,7 +105,7 @@ import { ChatModelSelectionDiagnostics } from './chatModelSelectionDiagnostics.j
 import { deserializeUntitledInputAttachments, deserializeUntitledInputState, serializeUntitledInputAttachments, serializeUntitledInputState } from './chatInputStatePersistence.js';
 import { ChatInputStateOrigin, IChatModel, IChatModelInputState, IChatRequestModeInfo, IChatRequestModel, IInputModel, IIntendedModelHolder, IntendedModelSlot, logChangesToStateModel } from '../../../common/model/chatModel.js';
 import { isInConversationModelChoice, ModelSelectionReason, resolveConfiguredModel, RestoredModelReason } from '../../../common/modelSelection.js';
-import { filterModelsForSession, hasModelsTargetingSession, isModelHiddenInPicker, isModelSupportedForInlineChat, isModelSupportedForMode, isNewConversation, isSessionStarted, mergeModelsWithCache, shouldApplyDefaultNewSessionMode, shouldDropAgnosticDraftModel, shouldResetOnModelListChange, shouldRestorePerTypeModelOnSessionSwitch } from './chatInputModelUtils.js';
+import { filterModelsForSession, hasModelsTargetingSession, isModelHiddenInPicker, isModelSupportedForInlineChat, isModelSupportedForMode, isNewConversation, isSessionStarted, mergeModelsWithCache, shouldApplyDefaultNewSessionMode, shouldDropAgnosticDraftModel, shouldKeepCurrentModeWhenMissingFromList, shouldResetOnModelListChange, shouldRestorePerTypeModelOnSessionSwitch } from './chatInputModelUtils.js';
 import { getChatSessionType, isUntitledChatSession, LocalChatSessionUri } from '../../../common/model/chatUri.js';
 import { IChatResponseViewModel, isResponseVM } from '../../../common/model/chatViewModel.js';
 import { IChatAgentService } from '../../../common/participants/chatAgents.js';
@@ -1768,7 +1768,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			return;
 		}
 
-		if (!shouldApplyDefaultNewSessionMode(this._preserveSelectedMode)) {
+		if (!shouldApplyDefaultNewSessionMode(this._preserveSelectedMode, this._currentModeObservable.get().id, this.configurationService.getValue<string>(ChatConfiguration.DefaultNewSessionMode))) {
 			this._modelSelectionController.ensureCurrentModelSupported();
 			return;
 		}
@@ -2212,12 +2212,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		const validMode = this._currentChatModesObservable.get().findModeById(currentMode.id);
 		const isAgentModeEnabled = this.configurationService.getValue<boolean>(ChatConfiguration.AgentEnabled);
 		if (!validMode) {
-			// Keep builtin Agent while the picker list is still loading so restore
-			// does not persist Ask (#254173, #337078).
-			if (currentMode.id === ChatMode.Agent.id && isAgentModeEnabled) {
+			// Picker list refresh can drop a mode briefly. Keep Agent (or a custom
+			// agent) instead of falling back to Ask mid-session (#337078).
+			if (shouldKeepCurrentModeWhenMissingFromList(isAgentModeEnabled)) {
 				return;
 			}
-			this.setChatMode(isAgentModeEnabled ? ChatModeKind.Agent : ChatModeKind.Ask, false);
+			this.setChatMode(ChatModeKind.Ask, false);
 			return;
 		}
 		if (currentMode.kind === ChatModeKind.Agent && !isAgentModeEnabled) {

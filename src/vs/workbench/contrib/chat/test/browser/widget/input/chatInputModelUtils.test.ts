@@ -29,6 +29,7 @@ import {
 	shouldResetOnModelListChange,
 	shouldRestorePerTypeModelOnSessionSwitch,
 	shouldApplyDefaultNewSessionMode,
+	shouldKeepCurrentModeWhenMissingFromList,
 } from '../../../../browser/widget/input/chatInputModelUtils.js';
 
 /**
@@ -1558,6 +1559,17 @@ suite('ChatInputModelUtils', () => {
 				shouldApplyDefaultNewSessionMode(false),
 				shouldApplyDefaultNewSessionMode(true),
 			], [true, false]);
+		});
+
+		test('does not replace an already-showing Agent with Ask on TAS/mode refresh', () => {
+			assert.deepStrictEqual([
+				shouldApplyDefaultNewSessionMode(false, ChatModeKind.Agent, 'ask'),
+				shouldApplyDefaultNewSessionMode(false, ChatModeKind.Agent, 'Ask'),
+				shouldApplyDefaultNewSessionMode(false, ChatModeKind.Agent, 'plan'),
+				shouldApplyDefaultNewSessionMode(false, ChatModeKind.Ask, 'agent'),
+				shouldKeepCurrentModeWhenMissingFromList(true),
+				shouldKeepCurrentModeWhenMissingFromList(false),
+			], [false, false, true, true, true, false]);
 		});
 
 		test('a started contributed session is never a new conversation, even before its requests load', () => {
